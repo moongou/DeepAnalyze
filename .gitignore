@@ -21,6 +21,10 @@ wheels/
 .trae/
 
 #other
+DeepAnalyze-8B/
+DeepAnalyze-8B-MLX-4bit/
+models/
+**/.cache/
 **/.claude/
 **/workspace/
 **/CLAUDE.md

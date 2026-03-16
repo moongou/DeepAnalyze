@@ -623,9 +623,9 @@ def bot_stream(messages, workspace, session_id="default"):
             messages=messages,
             temperature=0.4,
             stream=True,
+            stop=["</Code>", "</s>", "<|endoftext|>", "<|im_end|>"],
             extra_body={
                 "add_generation_prompt": False,
-                "stop_token_ids": [151676, 151645],
                 "max_new_tokens": 32768,
             },
         )
