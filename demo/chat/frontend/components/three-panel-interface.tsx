@@ -631,7 +631,21 @@ export function ThreePanelInterface() {
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(
     null
   );
-  // const [clearChatOpen, setClearChatOpen] = useState(false); // Removed redundant state
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const stopGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsTyping(false);
+    setStreamingMessageId(null);
+    if (streamRafRef.current) {
+      cancelAnimationFrame(streamRafRef.current);
+      streamRafRef.current = null;
+    }
+    toast({ description: "已停止生成" });
+  };
 
   // 节流滚动到底部
 
@@ -752,7 +766,7 @@ export function ThreePanelInterface() {
     }
     const welcome: Message = {
       id: `welcome-${Date.now()}`,
-      content: "Hello! I'm DeepAnalyze-8B, your autonomous data science assistant. Upload your data and let's explore it together!",
+      content: "您好！我是 DeepAnalyze。作为您的专属数据科学家，我精通 Python 与 R 语言的双重分析引擎。\n请上传您的数据，我将为您开展具有深度与广度的关联分析，助您洞察数据背后的深层逻辑与核心价值。",
       sender: "ai",
       timestamp: new Date(),
       localOnly: true,
@@ -764,6 +778,47 @@ export function ThreePanelInterface() {
       }
     } catch { }
     toast({ description: "已清空聊天" });
+  };
+
+  // 创建全新 Session
+  const createNewSession = async () => {
+    if (isTyping) {
+      toast({ description: "执行中，暂时无法开启新会话", variant: "destructive" });
+      return;
+    }
+
+    // 1. 清空当前工作区文件
+    try {
+      await fetch(`${API_URLS.WORKSPACE_CLEAR}?session_id=${sessionId}`, {
+        method: "DELETE",
+      });
+    } catch (e) {
+      console.warn("Failed to clear workspace for new session", e);
+    }
+
+    // 2. 生成新 Session ID
+    const newSid = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    localStorage.setItem("sessionId", newSid);
+    setSessionId(newSid);
+
+    // 3. 重置聊天历史
+    const welcome: Message = {
+      id: `welcome-${Date.now()}`,
+      content: "您好！我是 DeepAnalyze。作为您的专属数据科学家，我精通 Python 与 R 语言的双重分析引擎。\n请上传您的数据，我将为您开展具有深度与广度的关联分析，助您洞察数据背后的深层逻辑与核心价值。",
+      sender: "ai",
+      timestamp: new Date(),
+      localOnly: true,
+    };
+    setMessages([welcome]);
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify([welcome]));
+
+    // 4. 重置 UI 状态
+    setWorkspaceFiles([]);
+    setWorkspaceTree(null);
+    setCollapsedSections({});
+    setManualLocks({});
+
+    toast({ description: "已开启全新分析会话" });
   };
 
   useEffect(() => {
@@ -2507,12 +2562,16 @@ export function ThreePanelInterface() {
     setAttachments([]);
     setIsTyping(true);
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     try {
       const response = await fetch(API_URLS.CHAT_COMPLETIONS, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
+        signal: controller.signal,
         body: JSON.stringify({
           model: "DeepAnalyze-8B", // 修正模型名
           messages: [
@@ -2921,6 +2980,35 @@ export function ThreePanelInterface() {
                   {/* 旧菜单已移除 */}
                 </div>
                 <div className="flex items-center gap-1">
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 w-8 p-0"
+                        title="开启全新分析会话"
+                      >
+                        <RefreshCw className="h-4 w-4" />
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>开启全新分析？</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          将清空当前所有聊天历史与工作区数据，开始一个全新的分析流程。
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>取消</AlertDialogCancel>
+                        <AlertDialogAction
+                          onClick={createNewSession}
+                          className="bg-blue-600 hover:bg-blue-700"
+                        >
+                          确认开启
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -3257,11 +3345,11 @@ export function ThreePanelInterface() {
                   {isTyping ? (
                     <Button
                       size="sm"
-                      className="h-9 w-9 p-0 rounded-full bg-white text-black border border-blue-400/50 dark:bg-white dark:text-black"
-                      title="正在生成…"
-                      disabled
+                      onClick={stopGeneration}
+                      className="h-9 w-9 p-0 rounded-full bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50"
+                      title="停止生成"
                     >
-                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <Square className="h-4 w-4 fill-current" />
                     </Button>
                   ) : (
                     <Button

@@ -28,8 +28,12 @@ kill_from_pid_file "vLLM" "$LOG_DIR/vllm.pid"
 # Backup cleanup (pkill as safety)
 echo "Ensuring all related processes are stopped..."
 pkill -f "vllm.entrypoints.openai.api_server" 2>/dev/null || true
+pkill -f "mlx_lm.server" 2>/dev/null || true
+# Backends and next.js
 pkill -f "backend.py" 2>/dev/null || true
+pkill -f "next dev" 2>/dev/null || true
 pkill -f "next-dev" 2>/dev/null || true
+pkill -f "node" 2>/dev/null || true
 
 echo "Done. All services stopped."
 echo "=========================================="

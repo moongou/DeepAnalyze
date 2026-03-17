@@ -3,7 +3,7 @@
 # Configuration for M3 Max Optimization (MLX)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="$SCRIPT_DIR/demo/jupyter/.venv/bin/python"
-MODEL_DIR="$SCRIPT_DIR/DeepAnalyze-8B-MLX-4bit"
+MODEL_DIR="$SCRIPT_DIR/DeepAnalyze-8B-MLX-FP16"
 MLX_PORT=8000
 API_PORT=8200
 FRONTEND_PORT=4000
@@ -70,6 +70,11 @@ echo "Backend API started with PID: $BACKEND_PID"
 echo "[3/3] Starting Web Frontend..."
 if [ -d "$SCRIPT_DIR/demo/chat/frontend" ]; then
     cd "$SCRIPT_DIR/demo/chat/frontend" || exit
+    # Check if node_modules exists, if not run npm install
+    if [ ! -d "node_modules" ]; then
+        echo "Installing frontend dependencies (first time)..."
+        npm install
+    fi
     nohup npm run dev -- -p "$FRONTEND_PORT" > "$LOG_DIR/frontend.log" 2>&1 &
     FRONTEND_PID=$!
     echo "Frontend started with PID: $FRONTEND_PID"
