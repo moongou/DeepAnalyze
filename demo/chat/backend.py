@@ -52,13 +52,31 @@ if os.path.exists(FONT_DIR):
             except Exception as e:
                 print(f"Error registering font {font_file}: {e}")
 
+import chardet
+from docx import Document
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+
 Chinese_matplot_str = """
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import os
 
-# 优先尝试 SimHei，如果不存在则使用系统默认
-plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial', 'sans-serif']
+# 注册中文字体到 matplotlib
+font_dirs = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/fonts"), "/System/Library/Fonts", "/Library/Fonts"]
+for d in font_dirs:
+    if os.path.exists(d):
+        for font_file in os.listdir(d):
+            if font_file.lower().endswith(('.ttf', '.ttc', '.otf')):
+                try:
+                    fm.fontManager.addfont(os.path.join(d, font_file))
+                except:
+                    pass
+
+# 优先尝试常见中文字体
+plt.rcParams['font.sans-serif'] = ['SimHei', 'PingFang SC', 'Heiti SC', 'STHeiti', 'SimSun', 'Arial Unicode MS', 'DejaVu Sans', 'sans-serif']
 plt.rcParams['axes.unicode_minus'] = False
 """
 
@@ -116,8 +134,8 @@ MODEL_PATH = "DeepAnalyze-8B"  # replace to your path to DeepAnalyze-8B
 client = openai.OpenAI(base_url=API_BASE, api_key="dummy")
 
 # Workspace directory
-WORKSPACE_BASE_DIR = "workspace"
-DB_PATH = "deepanalyze.db"
+WORKSPACE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace")
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepanalyze.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -282,41 +300,63 @@ def uniquify_path(target: Path) -> Path:
 # API Routes
 @app.post("/api/auth/register")
 async def register(username: str = Form(...), password: str = Form(...)):
+    print(f"Registering user: {username}")
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
 
-    conn = next(get_db())
-    cursor = conn.cursor()
     try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
         cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
                        (username, hash_password(password)))
         conn.commit()
+        conn.close()
     except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Username already exists")
+    except Exception as e:
+        print(f"Registration error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
     return {"message": "Registered successfully"}
 
 @app.post("/api/auth/login")
 async def login(username: str = Form(...), password: str = Form(...)):
+    print(f"Login attempt: {username}")
     if username == "rainforgrain":
         # Superuser skip password check
         # Ensure superuser exists in the DB for foreign key constraints
-        conn = next(get_db())
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
+            if not cursor.fetchone():
+                cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                               (username, hash_password("internal_bypass_value")))
+                conn.commit()
+            conn.close()
+            return {"username": "rainforgrain", "is_superuser": True}
+        except Exception as e:
+            print(f"Superuser login error: {e}")
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=str(e))
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
-        if not cursor.fetchone():
-            cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
-                           (username, hash_password("internal_bypass_value")))
-            conn.commit()
-        return {"username": "rainforgrain", "is_superuser": True}
+        cursor.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row or row["password_hash"] != hash_password(password):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    conn = next(get_db())
-    cursor = conn.cursor()
-    cursor.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
-    row = cursor.fetchone()
-    if not row or row["password_hash"] != hash_password(password):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-
-    return {"username": username, "is_superuser": False}
+        return {"username": username, "is_superuser": False}
+    except Exception as e:
+        print(f"Login error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/workspace/files")
 async def get_workspace_files(session_id: str = Query("default"), username: str = Query("default")):
@@ -708,6 +748,9 @@ def bot_stream(messages, workspace, session_id="default", username="default"):
 4. 通过低报价格、伪报原产地、伪报HS编码归类逃避税税的行为。你的分析结果应明确指出可疑行为，并详细阐述推理原因。
 
 **你的特质与要求**：
+- **中文字符与编码处理（极重要）**：在处理任何数据文件前，**必须首先检查文件编码**（建议使用 `chardet` 或 `charset_normalizer`）。对于任何包含中文的内容，必须确保在所有输出文件（Png, Jpg, Pdf, Txt, Csv, Docx 等）中正确显示中文。
+- **可视化支持**：在 Python 绘图时，务必配置 `plt.rcParams['font.sans-serif']` 使用 `SimHei`, `PingFang SC` 或其他系统中文字体，防止出现乱码或方框。在 R 中使用 `showtext` 处理中文。
+- **报告生成**：分析完成后，应当生成详细的最终报告。**只要有可能，最终报告均应同时包含 PDF 和 DOCX 格式**。
 - **深度洞察**：能够穿透表面数据，通过多角度关联分析挖掘深层逻辑，明确指出可疑行为并详述推理原因。
 - **自主思考**：能根据用户上传的数据，主动提出分析假设并验证。
 - **工具专家**：熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势进行建模与可视化。
@@ -985,6 +1028,7 @@ import pypandoc
 
 
 def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
+    # 尝试使用 pypandoc
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     pdf_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pdf")
     try:
@@ -996,11 +1040,13 @@ def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
             extra_args=[
                 "--standalone",
                 "--pdf-engine=xelatex",
+                "-V", "mainfont=PingFang SC", # macOS 常用
             ],
         )
         return pdf_path
-    except Exception:
-        return None
+    except Exception as e:
+        print(f"Pandoc PDF conversion failed: {e}, falling back to ReportLab")
+        return _save_pdf_with_reportlab(md_text, base_name, workspace_dir)
 
 
 from typing import Optional
@@ -1028,11 +1074,76 @@ def _save_pdf_from_text(text: str, base_name: str) -> Path:
     raise NotImplementedError("TODO: text-based PDF rendering")
 
 
+def _save_docx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
+    Path(workspace_dir).mkdir(parents=True, exist_ok=True)
+    docx_path = uniquify_path(Path(workspace_dir) / f"{base_name}.docx")
+    try:
+        doc = Document()
+        # 移除 Markdown 标记（简单处理）
+        clean_text = re.sub(r"\\newpage", "", md_text)
+        # 按换行分割
+        for line in clean_text.splitlines():
+            if line.startswith("# "):
+                doc.add_heading(line[2:], level=1)
+            elif line.startswith("## "):
+                doc.add_heading(line[3:], level=2)
+            elif line.startswith("### "):
+                doc.add_heading(line[4:], level=3)
+            else:
+                doc.add_paragraph(line)
+        doc.save(docx_path)
+        return docx_path
+    except Exception as e:
+        print(f"Error saving DOCX: {e}")
+        return None
+
+def _save_pdf_with_reportlab(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
+    Path(workspace_dir).mkdir(parents=True, exist_ok=True)
+    pdf_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pdf")
+    try:
+        # 尝试注册中文字体
+        font_paths = [
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/Library/Fonts/Arial Unicode.ttf",
+            os.path.join(FONT_DIR, "SimHei.ttf")
+        ]
+        font_name = "Helvetica"
+        for fp in font_paths:
+            if os.path.exists(fp):
+                try:
+                    pdfmetrics.registerFont(TTFont('ChineseFont', fp))
+                    font_name = 'ChineseFont'
+                    break
+                except:
+                    continue
+
+        doc = SimpleDocTemplate(str(pdf_path))
+        styles = getSampleStyleSheet()
+        if font_name == 'ChineseFont':
+            styles['Normal'].fontName = 'ChineseFont'
+            styles['Heading1'].fontName = 'ChineseFont'
+
+        story = []
+        clean_text = re.sub(r"\\newpage", "", md_text)
+        for line in clean_text.splitlines():
+            if line.strip():
+                if line.startswith("# "):
+                    story.append(Paragraph(line[2:], styles['Heading1']))
+                else:
+                    story.append(Paragraph(line, styles['Normal']))
+                story.append(Spacer(1, 12))
+
+        doc.build(story)
+        return pdf_path
+    except Exception as e:
+        print(f"Error saving PDF with ReportLab: {e}")
+        return None
+
 @app.post("/export/report")
 async def export_report(body: dict = Body(...)):
     """
-    接收全部聊天历史（messages: [{role, content}...]），抽取 <Analyze>..</Analyze> ~ <Answer>..</Answer>
-    仅生成 Markdown 文件并保存到 workspace；PDF 渲染留作 TODO。
+    接收全部聊天历史（messages: [{role, content}...]），抽取 <Analyze>..~ <Answer>..
+    生成 Markdown, PDF (ReportLab) 和 DOCX 文件。
     """
     try:
         messages = body.get("messages", [])
@@ -1046,40 +1157,36 @@ async def export_report(body: dict = Body(...)):
 
         md_text = _extract_sections_from_messages(messages)
         if not md_text:
-            md_text = (
-                "(No <Analyze>/<Understand>/<Code>/<Execute>/<Answer> sections found.)"
-            )
+            md_text = "(No <Analyze>/<Understand>/<Code>/<Execute>/<Answer> sections found.)"
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_title = re.sub(r"[^\w\-_.]+", "_", title) if title else "Report"
         base_name = f"{safe_title}_{ts}" if title else f"Report_{ts}"
 
-        # Save MD into generated/ folder under workspace
         export_dir = os.path.join(workspace_dir, "generated")
         os.makedirs(export_dir, exist_ok=True)
 
         md_path = _save_md(md_text, base_name, export_dir)
-
-        # PDF 暂不生成（TODO）。
+        docx_path = _save_docx(md_text, base_name, export_dir)
         pdf_path = _save_pdf(md_text, base_name, export_dir)
 
         result = {
             "message": "exported",
             "md": md_path.name,
             "pdf": pdf_path.name if pdf_path else None,
+            "docx": docx_path.name if docx_path else None,
             "download_urls": {
                 "md": build_download_url(f"{username}/{session_id}/generated/{md_path.name}"),
-                "pdf": (
-                    build_download_url(f"{username}/{session_id}/generated/{pdf_path.name}")
-                    if pdf_path
-                    else None
-                ),
+                "pdf": build_download_url(f"{username}/{session_id}/generated/{pdf_path.name}") if pdf_path else None,
+                "docx": build_download_url(f"{username}/{session_id}/generated/{docx_path.name}") if docx_path else None,
             },
         }
         return JSONResponse(result)
     except HTTPException:
         raise
     except Exception as e:
+        print(f"Export report error: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1090,58 +1197,89 @@ async def save_project(
     name: str = Form(...),
     messages: str = Form(...)
 ):
-    conn = next(get_db())
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO projects (username, session_id, name, messages) VALUES (?, ?, ?, ?)",
-        (username, session_id, name, messages)
-    )
-    conn.commit()
-    return {"message": "Project saved successfully", "project_id": cursor.lastrowid}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO projects (username, session_id, name, messages) VALUES (?, ?, ?, ?)",
+            (username, session_id, name, messages)
+        )
+        conn.commit()
+        lastrowid = cursor.lastrowid
+        conn.close()
+        return {"message": "Project saved successfully", "project_id": lastrowid}
+    except Exception as e:
+        print(f"Save project error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/projects/list")
 async def list_projects(username: str = Query(...)):
-    conn = next(get_db())
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, name, session_id, created_at FROM projects WHERE username = ? ORDER BY created_at DESC",
-        (username,)
-    )
-    rows = cursor.fetchall()
-    return {"projects": [dict(row) for row in rows]}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, name, session_id, created_at FROM projects WHERE username = ? ORDER BY created_at DESC",
+            (username,)
+        )
+        rows = cursor.fetchall()
+        projects = [dict(row) for row in rows]
+        conn.close()
+        return {"projects": projects}
+    except Exception as e:
+        print(f"List projects error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/projects/load")
 async def load_project(project_id: int = Query(...)):
-    conn = next(get_db())
-    cursor = conn.cursor()
-    cursor.execute("SELECT session_id, messages FROM projects WHERE id = ?", (project_id,))
-    row = cursor.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return {"session_id": row["session_id"], "messages": json.loads(row["messages"])}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT session_id, messages FROM projects WHERE id = ?", (project_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return {"session_id": row["session_id"], "messages": json.loads(row["messages"])}
+    except Exception as e:
+        print(f"Load project error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/projects/delete")
 async def delete_project(project_id: int = Query(...), username: str = Query(...)):
-    conn = next(get_db())
-    cursor = conn.cursor()
-    # Get session_id first to delete files
-    cursor.execute("SELECT session_id FROM projects WHERE id = ? AND username = ?", (project_id, username))
-    row = cursor.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        # Get session_id first to delete files
+        cursor.execute("SELECT session_id FROM projects WHERE id = ? AND username = ?", (project_id, username))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Project not found")
 
-    session_id = row["session_id"]
+        session_id = row["session_id"]
 
-    # Delete from DB
-    cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-    conn.commit()
+        # Delete from DB
+        cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        conn.commit()
+        conn.close()
 
-    # Delete workspace files
-    workspace_dir = get_session_workspace(session_id, username)
-    if os.path.exists(workspace_dir):
-        shutil.rmtree(workspace_dir)
+        # Delete workspace files
+        workspace_dir = get_session_workspace(session_id, username)
+        if os.path.exists(workspace_dir):
+            shutil.rmtree(workspace_dir)
 
-    return {"message": "Project deleted successfully"}
+        return {"message": "Project deleted successfully"}
+    except Exception as e:
+        print(f"Delete project error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
