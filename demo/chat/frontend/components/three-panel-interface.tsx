@@ -53,7 +53,9 @@ import {
   Upload,
   Square,
   Code2,
+  Terminal,
 } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
 import { Tree, NodeApi } from "react-arborist";
 import { useToast } from "@/hooks/use-toast";
 import { FileIcon, defaultStyles } from "react-file-icon";
@@ -628,13 +630,34 @@ export function ThreePanelInterface() {
       if (!res.ok) throw new Error("加载失败");
       const data = await res.json();
 
+      // 1. 设置会话 ID 和消息记录
       setSessionId(data.session_id);
-      setMessages(data.messages.map((m: any) => ({
+      localStorage.setItem("sessionId", data.session_id);
+
+      const restoredMessages = data.messages.map((m: any) => ({
         ...m,
         timestamp: new Date(m.timestamp)
-      })));
+      }));
+      setMessages(restoredMessages);
+
+      // 2. 同步到本地缓存，确保刷新不丢失
+      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(restoredMessages));
+
+      // 3. 关闭弹窗并刷新文件列表
       setShowProjectManager(false);
+
+      // 4. 设置项目名称
+      const proj = userProjects.find(p => p.id === projectId);
+      if (proj) setProjectName(proj.name);
+
       toast({ description: "项目已加载" });
+
+      // 延迟触发文件刷新，确保 sessionId 已更新
+      setTimeout(() => {
+        loadWorkspaceFiles();
+        loadWorkspaceTree();
+      }, 100);
+
     } catch (e) {
       toast({ description: "加载失败", variant: "destructive" });
     }
@@ -926,7 +949,7 @@ export function ThreePanelInterface() {
       return;
     }
 
-    // 1. 清空当前工作区文件
+    // 1. 清空当前工作区文件 (发送 DELETE 请求)
     try {
       await fetch(`${API_URLS.WORKSPACE_CLEAR}?session_id=${sessionId}&username=${currentUser || "default"}`, {
         method: "DELETE",
@@ -943,7 +966,7 @@ export function ThreePanelInterface() {
     // 3. 重置聊天历史
     const welcome: Message = {
       id: `welcome-${Date.now()}`,
-      content: "您好！我是 DeepAnalyze。作为您的专属数据科学家，我精通 Python 与 R 语言的双重分析引擎。\n请上传您的数据，我将为您开展具有深度与广度的关联分析，助您洞察数据背后的深层逻辑与核心价值。",
+      content: "您好！我是 DeepAnalyze。我是一位精通 Python 与 R 语言的双重分析专家，专门从事中国海关风险管理与风险防控。\n\n我将为您深入分析进出口业务数据，运用统计学与逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
       sender: "ai",
       timestamp: new Date(),
       localOnly: true,
@@ -956,6 +979,7 @@ export function ThreePanelInterface() {
     setWorkspaceTree(null);
     setCollapsedSections({});
     setManualLocks({});
+    setProjectName("");
 
     toast({ description: "已开启全新分析会话" });
   };
@@ -3443,241 +3467,256 @@ export function ThreePanelInterface() {
                 {/* 加载气泡已移除，改为仅按钮态提示 */}
                 <div ref={messagesEndRef} />
               </div>
-
-              {/* Input Area */}
-              <div className="p-4 border-t border-gray-200 dark:border-gray-800 shrink-0">
-                <div className="flex gap-3 items-end">
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    onChange={handleFileUpload}
-                    className="hidden"
-                    accept="*"
-                  />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                  >
-                    <Paperclip className="h-4 w-4" />
-                  </Button>
-                  <div className="flex-1 relative">
-                    <Input
-                      value={inputValue}
-                      onChange={(e) => setInputValue(e.target.value)}
-                      placeholder="Ask anything..."
-                      onKeyPress={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          handleSendMessage();
-                        }
-                      }}
-                      className="border-gray-200 dark:border-gray-700 bg-white dark:bg-black rounded-lg"
-                    />
-                  </div>
-                  {/* 将清空按钮移动到发送按钮旁边 */}
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        title="清空聊天"
-                        className="h-9 px-2"
-                        disabled={isTyping}
-                      >
-                        <Eraser className="h-4 w-4" />
-                      </Button>
-                    </AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>清空聊天？</AlertDialogTitle>
-                        <AlertDialogDescription>
-                          将删除当前会话内的所有消息，仅保留欢迎提示。
-                        </AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel>取消</AlertDialogCancel>
-                        <AlertDialogAction
-                          onClick={clearChat}
-                          className="bg-red-600 hover:bg-red-700"
-                        >
-                          确认清空
-                        </AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
-                  {isTyping ? (
-                    <Button
-                      size="sm"
-                      onClick={stopGeneration}
-                      className="h-9 w-9 p-0 rounded-full bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50"
-                      title="停止生成"
-                    >
-                      <Square className="h-4 w-4 fill-current" />
-                    </Button>
-                  ) : (
-                    <Button
-                      onClick={handleSendMessage}
-                      size="sm"
-                      disabled={!inputValue.trim()}
-                      className="bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
-                    >
-                      <Send className="h-4 w-4" />
-                    </Button>
-                  )}
-                </div>
-              </div>
             </div>
           </ResizablePanel>
 
           <ResizableHandle withHandle />
 
-          {/* Right Panel - Code Editor */}
+          {/* Right Panel - Code Editor & Input */}
           <ResizablePanel defaultSize={35} minSize={20}>
-            <div className="flex flex-col bg-gray-50 dark:bg-gray-900 min-h-0 h-full">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0">
-                <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
-                  Code
-                </h2>
-                {showCodeEditor && (
-                  <div className="flex gap-2">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        setShowCodeEditor(false);
-                        setCodeEditorContent("");
-                        setSelectedCodeSection("");
-                      }}
-                      className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                    >
-                      Close
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={executeCode}
-                      disabled={!codeEditorContent || isExecutingCode}
-                      className="h-6 px-3 text-xs bg-black text-white dark:bg-white dark:text-black"
-                    >
-                      {isExecutingCode ? "Running..." : "Run"}
-                    </Button>
+            <ResizablePanelGroup direction="vertical">
+              {/* Upper: Code/Preview */}
+              <ResizablePanel defaultSize={70} minSize={30}>
+                <div className="flex flex-col bg-gray-50 dark:bg-gray-900 min-h-0 h-full">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0">
+                    <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                      Code
+                    </h2>
+                    {showCodeEditor && (
+                      <div className="flex gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setShowCodeEditor(false);
+                            setCodeEditorContent("");
+                            setSelectedCodeSection("");
+                          }}
+                          className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                        >
+                          Close
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={executeCode}
+                          disabled={!codeEditorContent || isExecutingCode}
+                          className="h-6 px-3 text-xs bg-black text-white dark:bg-white dark:text-black"
+                        >
+                          {isExecutingCode ? "Running..." : "Run"}
+                        </Button>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
 
-              {!showCodeEditor ? (
-                <div className="flex-1 flex items-center justify-center text-gray-400">
-                  <div className="text-center select-none">
-                    <p className="text-sm">Click a code block to edit</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex-1 min-h-0 flex flex-col p-4 editor-container overflow-hidden">
-                  {/* Code Editor */}
-                  <div
-                    className="min-h-0 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-black flex flex-col"
-                    style={{ height: `${editorHeight}%` }}
-                  >
-                    <div className="bg-gray-50 dark:bg-gray-800 px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
-                      <span className="text-xs text-gray-500 font-mono">
-                        python
-                      </span>
+                  {!showCodeEditor ? (
+                    <div className="flex-1 flex items-center justify-center text-gray-400">
+                      <div className="text-center select-none">
+                        <p className="text-sm">Click a code block to edit</p>
+                      </div>
                     </div>
-                    <div className="flex-1 min-h-0">
-                      <Editor
-                        height="100%"
-                        defaultLanguage="python"
-                        value={codeEditorContent}
-                        onChange={(value) => setCodeEditorContent(value || "")}
-                        theme={isDarkMode ? "vs-dark" : "light"}
-                        options={{
-                          fontSize: 14,
-                          fontFamily:
-                            "var(--font-mono), 'Courier New', monospace",
-                          lineNumbers: "on",
-                          minimap: { enabled: false },
-                          scrollBeyondLastLine: false,
-                          automaticLayout: true,
-                          tabSize: 4,
-                          insertSpaces: true,
-                          wordWrap: "on",
-                          folding: true,
-                          lineDecorationsWidth: 10,
-                          lineNumbersMinChars: 3,
-                          glyphMargin: false,
-                          selectOnLineNumbers: true,
-                          roundedSelection: false,
-                          readOnly: false,
-                          cursorStyle: "line",
-                          smoothScrolling: true,
-                          formatOnPaste: true,
-                          formatOnType: true,
-                          suggestOnTriggerCharacters: true,
-                          acceptSuggestionOnEnter: "on",
-                          tabCompletion: "on",
-                          scrollbar: {
-                            vertical: "visible",
-                            verticalScrollbarSize: 10,
-                          },
-                        }}
-                        loading={
-                          <div className="flex items-center justify-center h-full">
-                            <div className="flex items-center gap-2 text-muted-foreground">
-                              <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                              <span className="text-sm">加载编辑器...</span>
+                  ) : (
+                    <div className="flex-1 min-h-0 flex flex-col p-4 editor-container overflow-hidden">
+                      {/* Code Editor */}
+                      <div
+                        className="min-h-0 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-black flex flex-col"
+                        style={{ height: `${editorHeight}%` }}
+                      >
+                        <div className="bg-gray-50 dark:bg-gray-800 px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
+                          <span className="text-xs text-gray-500 font-mono">
+                            python
+                          </span>
+                        </div>
+                        <div className="flex-1 min-h-0">
+                          <Editor
+                            height="100%"
+                            defaultLanguage="python"
+                            value={codeEditorContent}
+                            onChange={(value) => setCodeEditorContent(value || "")}
+                            theme={isDarkMode ? "vs-dark" : "light"}
+                            options={{
+                              fontSize: 14,
+                              fontFamily:
+                                "var(--font-mono), 'Courier New', monospace",
+                              lineNumbers: "on",
+                              minimap: { enabled: false },
+                              scrollBeyondLastLine: false,
+                              automaticLayout: true,
+                              tabSize: 4,
+                              insertSpaces: true,
+                              wordWrap: "on",
+                              folding: true,
+                              lineDecorationsWidth: 10,
+                              lineNumbersMinChars: 3,
+                              glyphMargin: false,
+                              selectOnLineNumbers: true,
+                              roundedSelection: false,
+                              readOnly: false,
+                              cursorStyle: "line",
+                              smoothScrolling: true,
+                              formatOnPaste: true,
+                              formatOnType: true,
+                              suggestOnTriggerCharacters: true,
+                              acceptSuggestionOnEnter: "on",
+                              tabCompletion: "on",
+                              scrollbar: {
+                                vertical: "visible",
+                                verticalScrollbarSize: 10,
+                              },
+                            }}
+                            loading={
+                              <div className="flex items-center justify-center h-full">
+                                <div className="flex items-center gap-2 text-muted-foreground">
+                                  <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                                  <span className="text-sm">加载编辑器...</span>
+                                </div>
+                              </div>
+                            }
+                          />
+                        </div>
+                      </div>
+
+                      {/* Resizer */}
+                      <div
+                        className="h-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 cursor-row-resize flex items-center justify-center group"
+                        onMouseDown={handleMouseDown}
+                      >
+                        <div className="w-8 h-1 bg-gray-300 dark:bg-gray-600 rounded group-hover:bg-gray-400 dark:group-hover:bg-gray-500"></div>
+                      </div>
+
+                      {/* Terminal Output */}
+                      <div
+                        className="min-h-0 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-900 flex flex-col"
+                        style={{ height: `${100 - editorHeight}%` }}
+                      >
+                        <div className="bg-gray-50 dark:bg-gray-800 px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
+                          <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
+                            Output
+                          </span>
+                        </div>
+                        <div className="flex-1 min-h-0 p-3 overflow-auto font-mono text-sm bg-white dark:bg-black text-gray-800 dark:text-gray-200">
+                          {codeExecutionResult ? (
+                            <div>
+                              <div className="text-gray-500 dark:text-gray-400 mb-1">
+                                $ python main.py
+                              </div>
+                              <pre className="whitespace-pre-wrap text-gray-800 dark:text-gray-200">
+                                {codeExecutionResult}
+                              </pre>
+                              <div className="flex items-center mt-2">
+                                <span className="text-gray-500 dark:text-gray-400">
+                                  $
+                                </span>
+                                <span className="w-2 h-4 bg-gray-400 dark:bg-gray-500 ml-1 animate-pulse"></span>
+                              </div>
                             </div>
-                          </div>
-                        }
+                          ) : (
+                            <div className="text-gray-400 dark:text-gray-500 italic">
+                              Run code to see output...
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </ResizablePanel>
+
+              <ResizableHandle withHandle />
+
+              {/* Lower: Chat Input */}
+              <ResizablePanel defaultSize={30} minSize={20}>
+                <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
+                  <div className="p-4 flex-1 flex flex-col min-h-0">
+                    <div className="flex gap-3 items-start flex-1">
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        onChange={handleFileUpload}
+                        className="hidden"
+                        accept="*"
                       />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 mt-1"
+                      >
+                        <Paperclip className="h-4 w-4" />
+                      </Button>
+                      <div className="flex-1 relative flex flex-col h-full min-h-0">
+                        <Textarea
+                          value={inputValue}
+                          onChange={(e) => setInputValue(e.target.value)}
+                          placeholder="在此输入分析指令或提问..."
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSendMessage();
+                            }
+                          }}
+                          rows={8}
+                          className="flex-1 resize-none border-gray-200 dark:border-gray-700 bg-white dark:bg-black rounded-lg focus-visible:ring-1"
+                        />
+                      </div>
                     </div>
-                  </div>
-
-                  {/* Resizer */}
-                  <div
-                    className="h-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 cursor-row-resize flex items-center justify-center group"
-                    onMouseDown={handleMouseDown}
-                  >
-                    <div className="w-8 h-1 bg-gray-300 dark:bg-gray-600 rounded group-hover:bg-gray-400 dark:group-hover:bg-gray-500"></div>
-                  </div>
-
-                  {/* Terminal Output */}
-                  <div
-                    className="min-h-0 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-900 flex flex-col"
-                    style={{ height: `${100 - editorHeight}%` }}
-                  >
-                    <div className="bg-gray-50 dark:bg-gray-800 px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
-                      <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
-                        Output
-                      </span>
-                    </div>
-                    <div className="flex-1 min-h-0 p-3 overflow-auto font-mono text-sm bg-white dark:bg-black text-gray-800 dark:text-gray-200">
-                      {codeExecutionResult ? (
-                        <div>
-                          <div className="text-gray-500 dark:text-gray-400 mb-1">
-                            $ python main.py
-                          </div>
-                          <pre className="whitespace-pre-wrap text-gray-800 dark:text-gray-200">
-                            {codeExecutionResult}
-                          </pre>
-                          <div className="flex items-center mt-2">
-                            <span className="text-gray-500 dark:text-gray-400">
-                              $
-                            </span>
-                            <span className="w-2 h-4 bg-gray-400 dark:bg-gray-500 ml-1 animate-pulse"></span>
-                          </div>
-                        </div>
+                    <div className="flex justify-end gap-2 mt-3">
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            title="清空聊天"
+                            className="h-9 px-3"
+                            disabled={isTyping}
+                          >
+                            <Eraser className="h-4 w-4 mr-2" />
+                            清空
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>清空聊天？</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              将删除当前会话内的所有消息，仅保留欢迎提示。
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>取消</AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={clearChat}
+                              className="bg-red-600 hover:bg-red-700"
+                            >
+                              确认清空
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                      {isTyping ? (
+                        <Button
+                          size="sm"
+                          onClick={stopGeneration}
+                          className="h-9 px-4 rounded-md bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50"
+                        >
+                          <Square className="h-4 w-4 mr-2 fill-current" />
+                          停止
+                        </Button>
                       ) : (
-                        <div className="text-gray-400 dark:text-gray-500 italic">
-                          Run code to see output...
-                        </div>
+                        <Button
+                          onClick={handleSendMessage}
+                          size="sm"
+                          disabled={!inputValue.trim()}
+                          className="h-9 px-4 bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
+                        >
+                          <Send className="h-4 w-4 mr-2" />
+                          发送
+                        </Button>
                       )}
                     </div>
                   </div>
                 </div>
-              )}
-            </div>
+              </ResizablePanel>
+            </ResizablePanelGroup>
           </ResizablePanel>
         </ResizablePanelGroup>
       </div>

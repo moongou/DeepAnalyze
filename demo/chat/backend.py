@@ -572,11 +572,51 @@ async def proxy(url: str):
         raise HTTPException(status_code=502, detail=f"Proxy fetch failed: {e}")
 
 
+def convert_to_utf8(file_path: Path) -> Optional[Path]:
+    """检查文件编码并转换为 UTF-8，另存为 _utf8 后缀的文件。"""
+    if not file_path.exists() or not file_path.is_file():
+        return None
+
+    # 已经是 _utf8 文件或不是需要转换的文本类型，跳过
+    if file_path.stem.endswith("_utf8"):
+        return file_path
+
+    # 仅转换文本类文件
+    if file_path.suffix.lower() not in [".csv", ".txt", ".md", ".json", ".xml"]:
+        return file_path
+
+    try:
+        with open(file_path, "rb") as f:
+            raw_data = f.read()
+
+        result = chardet.detect(raw_data)
+        encoding = result['encoding']
+
+        if not encoding:
+            encoding = 'utf-8' # 兜底
+
+        if encoding.lower() == 'utf-8':
+            # 已经是 utf-8，但为了符合用户要求，依然创建一个副本
+            utf8_path = file_path.parent / f"{file_path.stem}_utf8{file_path.suffix}"
+            if not utf8_path.exists():
+                shutil.copy2(file_path, utf8_path)
+            return utf8_path
+
+        # 转换
+        content = raw_data.decode(encoding, errors='replace')
+        utf8_path = file_path.parent / f"{file_path.stem}_utf8{file_path.suffix}"
+        with open(utf8_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return utf8_path
+    except Exception as e:
+        print(f"Error converting {file_path} to UTF-8: {e}")
+        return file_path
+
 @app.post("/workspace/upload")
 async def upload_files(
     files: List[UploadFile] = File(...), session_id: str = Query("default"), username: str = Query("default")
 ):
-    """上传文件到工作区（支持 user & session 隔离）"""
+    """上传文件到工作区（支持 user & session 隔离），并自动转换为 UTF-8"""
     workspace_dir = get_session_workspace(session_id, username)
     uploaded_files = []
 
@@ -586,6 +626,10 @@ async def upload_files(
         with open(dst, "wb") as buffer:
             content = await file.read()
             buffer.write(content)
+
+        # 自动转换为 UTF-8
+        utf8_dst = convert_to_utf8(dst)
+
         uploaded_files.append(
             {
                 "name": dst.name,
@@ -593,9 +637,17 @@ async def upload_files(
                 "path": str(dst.relative_to(Path(workspace_dir))),
             }
         )
+        if utf8_dst and utf8_dst != dst:
+             uploaded_files.append(
+                {
+                    "name": utf8_dst.name,
+                    "size": utf8_dst.stat().st_size,
+                    "path": str(utf8_dst.relative_to(Path(workspace_dir))),
+                }
+            )
 
     return {
-        "message": f"Successfully uploaded {len(uploaded_files)} files",
+        "message": f"Successfully uploaded {len(uploaded_files)} files (including UTF-8 conversions)",
         "files": uploaded_files,
     }
 
@@ -617,7 +669,7 @@ async def upload_to_dir(
     session_id: str = Query("default"),
     username: str = Query("default"),
 ):
-    """上传文件到 workspace 下的指定子目录（仅限工作区内）。"""
+    """上传文件到 workspace 下的指定子目录（仅限工作区内），并自动转换为 UTF-8。"""
     workspace_dir = get_session_workspace(session_id, username)
     abs_workspace = Path(workspace_dir).resolve()
     target_dir = (abs_workspace / dir).resolve()
@@ -632,6 +684,10 @@ async def upload_to_dir(
             with open(dst, "wb") as buffer:
                 content = await f.read()
                 buffer.write(content)
+
+            # 自动转换为 UTF-8
+            utf8_dst = convert_to_utf8(dst)
+
             saved.append(
                 {
                     "name": dst.name,
@@ -639,9 +695,17 @@ async def upload_to_dir(
                     "path": str(dst.relative_to(abs_workspace)),
                 }
             )
+            if utf8_dst and utf8_dst != dst:
+                 saved.append(
+                    {
+                        "name": utf8_dst.name,
+                        "size": utf8_dst.stat().st_size,
+                        "path": str(utf8_dst.relative_to(abs_workspace)),
+                    }
+                )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Save failed: {e}")
-    return {"message": f"uploaded {len(saved)}", "files": saved}
+    return {"message": f"uploaded {len(saved)} (including UTF-8 conversions)", "files": saved}
 
 
 @app.post("/execute")
@@ -748,7 +812,8 @@ def bot_stream(messages, workspace, session_id="default", username="default"):
 4. 通过低报价格、伪报原产地、伪报HS编码归类逃避税税的行为。你的分析结果应明确指出可疑行为，并详细阐述推理原因。
 
 **你的特质与要求**：
-- **中文字符与编码处理（极重要）**：在处理任何数据文件前，**必须首先检查文件编码**（建议使用 `chardet` 或 `charset_normalizer`）。对于任何包含中文的内容，必须确保在所有输出文件（Png, Jpg, Pdf, Txt, Csv, Docx 等）中正确显示中文。
+- **UTF-8 编码优先（极重要）**：系统已自动将上传的文本文件转换为 UTF-8 编码并添加了 `_utf8` 后缀。**请务必优先使用带有 `_utf8` 后缀的文件进行分析**，以确保 Python 和 R 能够正确识别中文字符，避免乱码。
+- **中文字符与编码处理**：在处理任何数据文件前，应确认使用 UTF-8 编码。对于任何包含中文的内容，必须确保在所有输出文件（Png, Jpg, Pdf, Txt, Csv, Docx 等）中正确显示中文。
 - **可视化支持**：在 Python 绘图时，务必配置 `plt.rcParams['font.sans-serif']` 使用 `SimHei`, `PingFang SC` 或其他系统中文字体，防止出现乱码或方框。在 R 中使用 `showtext` 处理中文。
 - **报告生成**：分析完成后，应当生成详细的最终报告。**只要有可能，最终报告均应同时包含 PDF 和 DOCX 格式**。
 - **深度洞察**：能够穿透表面数据，通过多角度关联分析挖掘深层逻辑，明确指出可疑行为并详述推理原因。
@@ -777,11 +842,8 @@ def bot_stream(messages, workspace, session_id="default", username="default"):
 
     if messages and messages[-1]["role"] == "user":
         user_message = messages[-1]["content"]
-        file_info = (
-            collect_file_info(workspace)
-            if workspace
-            else collect_file_info(WORKSPACE_DIR)
-        )
+        # 总是使用当前 session 的 WORKSPACE_DIR 获取文件信息
+        file_info = collect_file_info(WORKSPACE_DIR)
         if file_info:
             messages[-1][
                 "content"
@@ -938,6 +1000,9 @@ async def chat(body: dict = Body(...)):
     workspace = body.get("workspace", [])
     session_id = body.get("session_id", "default")
     username = body.get("username", "default")
+
+    # 动态构建 workspace 目录，确保能正确识别当前 session 的文件
+    actual_workspace_dir = get_session_workspace(session_id, username)
 
     def generate():
         for delta_content in bot_stream(messages, workspace, session_id, username):
