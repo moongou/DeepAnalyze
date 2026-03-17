@@ -928,7 +928,7 @@ export function ThreePanelInterface() {
 
     // 1. 清空当前工作区文件
     try {
-      await fetch(`${API_URLS.WORKSPACE_CLEAR}?session_id=${sessionId}`, {
+      await fetch(`${API_URLS.WORKSPACE_CLEAR}?session_id=${sessionId}&username=${currentUser || "default"}`, {
         method: "DELETE",
       });
     } catch (e) {
@@ -1505,7 +1505,7 @@ export function ThreePanelInterface() {
     if (!sessionId) return;
     try {
       const response = await fetch(
-        `${API_URLS.WORKSPACE_CLEAR}?session_id=${sessionId}`,
+        `${API_URLS.WORKSPACE_CLEAR}?session_id=${sessionId}&username=${currentUser || "default"}`,
         {
           method: "DELETE",
         }
@@ -2713,6 +2713,7 @@ export function ThreePanelInterface() {
         signal: controller.signal,
         body: JSON.stringify({
           model: "DeepAnalyze-8B", // 修正模型名
+          username: currentUser || "default", // 添加 username
           messages: [
             ...messages
               .filter((m) => !m.localOnly)
@@ -2959,7 +2960,7 @@ export function ThreePanelInterface() {
                       const url = `${API_URLS.WORKSPACE_UPLOAD_TO
                         }?dir=${encodeURIComponent(
                           dir
-                        )}&session_id=${encodeURIComponent(sessionId)}`;
+                        )}&session_id=${encodeURIComponent(sessionId)}&username=${currentUser || "default"}`;
                       await fetch(url, { method: "POST", body: form });
                       await loadWorkspaceTree();
                       await loadWorkspaceFiles();

