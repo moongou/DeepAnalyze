@@ -565,7 +565,7 @@ export function ThreePanelInterface() {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "welcome-1",
-      content: "Hello! I'm DeepAnalyze-8B, your autonomous data science assistant. Upload your data and let's explore it together!",
+      content: "您好！我是 DeepAnalyze。作为您的专属数据科学家，我精通 Python 与 R 语言的双重分析引擎。\n请上传您的数据，我将为您开展具有深度与广度的关联分析，助您洞察数据背后的深层逻辑与核心价值。",
       sender: "ai",
       timestamp: new Date(),
       localOnly: true,

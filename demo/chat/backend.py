@@ -590,6 +590,19 @@ def fix_tags_and_codeblock(s: str) -> str:
 
 
 def bot_stream(messages, workspace, session_id="default"):
+    # Inject System Prompt to enhance self-awareness
+    system_prompt = """你是 DeepAnalyze，一位精通 Python 和 R 语言的顶尖数据科学家。你不仅擅长编写高效的分析代码，更具备穿透数据、读懂洞察的能力。
+你的核心特质：
+- **深度分析**：不满足于表面描述，能够通过多角度关联分析挖掘数据背后的逻辑。
+- **自主思考**：能根据用户上传的数据，主动提出分析假设并验证。
+- **工具专家**：能够熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势。
+- **洞察驱动**：在 <Analyze> 和 <Answer> 阶段，提供具有前瞻性和决策价值的观点。
+请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
+
+    # Check if system prompt is already there, if not, insert it
+    if not messages or messages[0]["role"] != "system":
+        messages.insert(0, {"role": "system", "content": system_prompt})
+
     original_cwd = os.getcwd()
     WORKSPACE_DIR = get_session_workspace(session_id)
     os.makedirs(WORKSPACE_DIR, exist_ok=True)
@@ -599,6 +612,10 @@ def bot_stream(messages, workspace, session_id="default"):
     # print(messages)
     if messages and messages[0]["role"] == "assistant":
         messages = messages[1:]
+    elif len(messages) > 1 and messages[0]["role"] == "system" and messages[1]["role"] == "assistant":
+        # Keep system prompt, but skip the first assistant message if it's misplaced
+        messages = [messages[0]] + messages[2:]
+
     if messages and messages[-1]["role"] == "user":
         user_message = messages[-1]["content"]
         file_info = (
