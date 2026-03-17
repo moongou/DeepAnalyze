@@ -372,6 +372,91 @@ export function ThreePanelInterface() {
   const stepNavigatorRef = useRef<HTMLDivElement>(null);
   const activeStepRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: "welcome-1",
+      content: "您好！我是 DeepAnalyze。我是一位精通 Python 与 R 语言的双重分析专家，专门从事中国海关风险管理与风险防控。\n\n我将为您深入分析进出口业务数据，运用统计学与逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
+      sender: "ai",
+      timestamp: new Date(),
+      localOnly: true,
+    },
+  ]);
+  const [inputValue, setInputValue] = useState("");
+  const [isTyping, setIsTyping] = useState(false);
+  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
+  const [workspaceTree, setWorkspaceTree] = useState<WorkspaceNode | null>(
+    null
+  );
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const treeContainerRef = useRef<HTMLDivElement>(null);
+  const [treeSize, setTreeSize] = useState<{ w: number; h: number }>({
+    w: 0,
+    h: 0,
+  });
+  const [selectedCodeSection, setSelectedCodeSection] = useState<string>("");
+  const [codeEditorContent, setCodeEditorContent] = useState("");
+  const [showCodeEditor, setShowCodeEditor] = useState(false);
+  const [isExecutingCode, setIsExecutingCode] = useState(false);
+  const [codeExecutionResult, setCodeExecutionResult] = useState("");
+
+  // 用户认证与项目管理状态
+  const [currentUser, setCurrentUser] = useState<string | null>(null);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [isLoginMode, setIsLoginMode] = useState(true);
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [projectName, setProjectName] = useState("");
+  const [showProjectManager, setShowProjectManager] = useState(false);
+  const [userProjects, setUserProjects] = useState<any[]>([]);
+
+  // 预览弹窗状态
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [previewTitle, setPreviewTitle] = useState<string>("");
+  const [previewContent, setPreviewContent] = useState<string>("");
+  const [previewType, setPreviewType] = useState<
+    "text" | "image" | "pdf" | "binary"
+  >("text");
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewDownloadUrl, setPreviewDownloadUrl] = useState<string>("");
+  const previewScrollRef = useRef<HTMLDivElement>(null);
+  const [deleteConfirmPath, setDeleteConfirmPath] = useState<string | null>(
+    null
+  );
+  const [deleteIsDir, setDeleteIsDir] = useState<boolean>(false);
+  const fileRefreshTimerRef = useRef<number | null>(null);
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const singleClickTimerRef = useRef<number | null>(null);
+  const [contextPos, setContextPos] = useState<{ x: number; y: number } | null>(
+    null
+  );
+  const [contextTarget, setContextTarget] = useState<WorkspaceNode | null>(
+    null
+  );
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+  const [dropActive, setDropActive] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState<string>("");
+
+  const lastScrollTimeRef = useRef(0);
+  const scrollRafRef = useRef<number | null>(null);
+  const stickToBottomRef = useRef(true);
+  // const aiUpdateTimerRef = useRef<number | null>(null); // Removed in favor of RAF
+  const aiPendingContentRef = useRef<string>("");
+  const aiDisplayedContentRef = useRef<string>("");
+  const streamRafRef = useRef<number | null>(null);
+  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(
+    null
+  );
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const exportReportBackendRef = useRef<any>(null); // Initialize as null
+  const saveChatTimerRef = useRef<number | null>(null);
+
   // 组件挂载后从 localStorage 读取主题
   useEffect(() => {
     setMounted(true);
@@ -449,6 +534,133 @@ export function ThreePanelInterface() {
     }
   }, [activeSection]);
 
+  // --- 用户认证与项目管理函数 ---
+  const handleAuth = async () => {
+    if (!authUsername || !authPassword) {
+      toast({ description: "请输入用户名和密码", variant: "destructive" });
+      return;
+    }
+
+    try {
+      const url = isLoginMode ? API_URLS.AUTH_LOGIN : API_URLS.AUTH_REGISTER;
+      const formData = new FormData();
+      formData.append("username", authUsername);
+      formData.append("password", authPassword);
+
+      const res = await fetch(url, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "认证失败");
+
+      if (isLoginMode) {
+        setCurrentUser(data.username);
+        setIsLoggedIn(true);
+        setShowAuthModal(false);
+        toast({ description: `欢迎回来, ${data.username}` });
+        // 登录后重置并拉取文件
+        await loadWorkspaceFiles();
+        await loadWorkspaceTree();
+      } else {
+        toast({ description: "注册成功，请登录" });
+        setIsLoginMode(true);
+      }
+    } catch (e: any) {
+      toast({ description: e.message, variant: "destructive" });
+    }
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    setIsLoggedIn(false);
+    toast({ description: "已退出登录" });
+  };
+
+  const saveProject = async () => {
+    if (!isLoggedIn) {
+      setShowAuthModal(true);
+      return;
+    }
+    if (!projectName) {
+      toast({ description: "请输入项目名称", variant: "destructive" });
+      return;
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append("username", currentUser!);
+      formData.append("session_id", sessionId);
+      formData.append("name", projectName);
+      formData.append("messages", JSON.stringify(messages));
+
+      const res = await fetch(API_URLS.PROJECTS_SAVE, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) throw new Error("保存失败");
+      toast({ description: "项目已保存" });
+      setShowSaveDialog(false);
+      setProjectName("");
+    } catch (e) {
+      toast({ description: "保存失败", variant: "destructive" });
+    }
+  };
+
+  const listProjects = async () => {
+    if (!currentUser) return;
+    try {
+      const res = await fetch(`${API_URLS.PROJECTS_LIST}?username=${currentUser}`);
+      if (res.ok) {
+        const data = await res.json();
+        setUserProjects(data.projects);
+      }
+    } catch (e) {
+      console.error("List projects error", e);
+    }
+  };
+
+  const loadProject = async (projectId: number) => {
+    try {
+      const res = await fetch(`${API_URLS.PROJECTS_LOAD}?project_id=${projectId}`);
+      if (!res.ok) throw new Error("加载失败");
+      const data = await res.json();
+
+      setSessionId(data.session_id);
+      setMessages(data.messages.map((m: any) => ({
+        ...m,
+        timestamp: new Date(m.timestamp)
+      })));
+      setShowProjectManager(false);
+      toast({ description: "项目已加载" });
+    } catch (e) {
+      toast({ description: "加载失败", variant: "destructive" });
+    }
+  };
+
+  const deleteProject = async (projectId: number) => {
+    try {
+      const res = await fetch(`${API_URLS.PROJECTS_DELETE}?project_id=${projectId}&username=${currentUser}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        toast({ description: "项目已删除" });
+        listProjects();
+      }
+    } catch (e) {
+      toast({ description: "删除失败", variant: "destructive" });
+    }
+  };
+
+  // 监听登录状态变化以同步项目列表
+  useEffect(() => {
+    if (showProjectManager && isLoggedIn) {
+      listProjects();
+    }
+  }, [showProjectManager, isLoggedIn]);
+
   // 更新主题 class
   const updateThemeClass = (isDark: boolean) => {
     if (typeof document !== "undefined") {
@@ -517,7 +729,7 @@ export function ThreePanelInterface() {
       toast({ description: "导出失败", variant: "destructive" });
     }
   };
-  const exportReportBackendRef = useRef(exportReportBackend);
+
   useEffect(() => {
     exportReportBackendRef.current = exportReportBackend;
   }, [exportReportBackend]);
@@ -561,77 +773,6 @@ export function ThreePanelInterface() {
     document.addEventListener("mousemove", handleMouseMove);
     document.addEventListener("mouseup", handleMouseUp);
   };
-
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "welcome-1",
-      content: "您好！我是 DeepAnalyze。我是一位精通 Python 与 R 语言的双重分析专家，专门从事中国海关风险管理与风险防控。\n\n我将为您深入分析进出口业务数据，运用统计学与逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
-      sender: "ai",
-      timestamp: new Date(),
-      localOnly: true,
-    },
-  ]);
-  const [inputValue, setInputValue] = useState("");
-  const [isTyping, setIsTyping] = useState(false);
-  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
-  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
-  const [workspaceTree, setWorkspaceTree] = useState<WorkspaceNode | null>(
-    null
-  );
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const treeContainerRef = useRef<HTMLDivElement>(null);
-  const [treeSize, setTreeSize] = useState<{ w: number; h: number }>({
-    w: 0,
-    h: 0,
-  });
-  const [selectedCodeSection, setSelectedCodeSection] = useState<string>("");
-  const [codeEditorContent, setCodeEditorContent] = useState("");
-  const [showCodeEditor, setShowCodeEditor] = useState(false);
-  const [isExecutingCode, setIsExecutingCode] = useState(false);
-  const [codeExecutionResult, setCodeExecutionResult] = useState("");
-
-  // 预览弹窗状态
-  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const [previewTitle, setPreviewTitle] = useState<string>("");
-  const [previewContent, setPreviewContent] = useState<string>("");
-  const [previewType, setPreviewType] = useState<
-    "text" | "image" | "pdf" | "binary"
-  >("text");
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewDownloadUrl, setPreviewDownloadUrl] = useState<string>("");
-  const previewScrollRef = useRef<HTMLDivElement>(null);
-  const [deleteConfirmPath, setDeleteConfirmPath] = useState<string | null>(
-    null
-  );
-  const [deleteIsDir, setDeleteIsDir] = useState<boolean>(false);
-  const fileRefreshTimerRef = useRef<number | null>(null);
-
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const singleClickTimerRef = useRef<number | null>(null);
-  const [contextPos, setContextPos] = useState<{ x: number; y: number } | null>(
-    null
-  );
-  const [contextTarget, setContextTarget] = useState<WorkspaceNode | null>(
-    null
-  );
-  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
-  const [dropActive, setDropActive] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadMsg, setUploadMsg] = useState<string>("");
-
-  const lastScrollTimeRef = useRef(0);
-  const scrollRafRef = useRef<number | null>(null);
-  const stickToBottomRef = useRef(true);
-  // const aiUpdateTimerRef = useRef<number | null>(null); // Removed in favor of RAF
-  const aiPendingContentRef = useRef<string>("");
-  const aiDisplayedContentRef = useRef<string>("");
-  const streamRafRef = useRef<number | null>(null);
-  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(
-    null
-  );
-  const abortControllerRef = useRef<AbortController | null>(null);
 
   const stopGeneration = () => {
     if (abortControllerRef.current) {
@@ -722,8 +863,6 @@ export function ThreePanelInterface() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 消息本地缓存：流式生成时节流保存，避免每个 chunk 都写 localStorage 导致卡顿
-  const saveChatTimerRef = useRef<number | null>(null);
   useEffect(() => {
     try {
       if (!chatLoaded) return; // 避免首屏用欢迎消息覆盖已有缓存
@@ -866,7 +1005,7 @@ export function ThreePanelInterface() {
     if (!sessionId) return;
     try {
       const response = await fetch(
-        `${API_URLS.WORKSPACE_FILES}?session_id=${sessionId}`
+        `${API_URLS.WORKSPACE_FILES}?session_id=${sessionId}&username=${currentUser || "default"}`
       );
       if (response.ok) {
         const data = await response.json();
@@ -881,7 +1020,7 @@ export function ThreePanelInterface() {
     if (!sessionId) return;
     try {
       const res = await fetch(
-        `${API_URLS.WORKSPACE_TREE}?session_id=${sessionId}`
+        `${API_URLS.WORKSPACE_TREE}?session_id=${sessionId}&username=${currentUser || "default"}`
       );
       if (res.ok) {
         const data = await res.json();
@@ -925,7 +1064,7 @@ export function ThreePanelInterface() {
     try {
       const url = `${API_URLS.WORKSPACE_DELETE_FILE}?path=${encodeURIComponent(
         p
-      )}&session_id=${encodeURIComponent(sessionId)}`;
+      )}&session_id=${encodeURIComponent(sessionId)}&username=${currentUser || "default"}`;
       const res = await fetch(url, { method: "DELETE" });
       if (res.ok) {
         await loadWorkspaceTree();
@@ -940,7 +1079,7 @@ export function ThreePanelInterface() {
     try {
       const url = `${API_URLS.WORKSPACE_DELETE_DIR}?path=${encodeURIComponent(
         p
-      )}&recursive=true&session_id=${encodeURIComponent(sessionId)}`;
+      )}&recursive=true&session_id=${encodeURIComponent(sessionId)}&username=${currentUser || "default"}`;
       const res = await fetch(url, { method: "DELETE" });
       if (res.ok) {
         await loadWorkspaceTree();
@@ -959,7 +1098,7 @@ export function ThreePanelInterface() {
           srcPath
         )}&dst_dir=${encodeURIComponent(dstDir)}&session_id=${encodeURIComponent(
           sessionId
-        )}`;
+        )}&username=${currentUser || "default"}`;
       const res = await fetch(url, { method: "POST" });
       if (res.ok) {
         await loadWorkspaceTree();
@@ -978,7 +1117,7 @@ export function ThreePanelInterface() {
       arr.forEach((f) => form.append("files", f));
       const url = `${API_URLS.WORKSPACE_UPLOAD_TO}?dir=${encodeURIComponent(
         dirPath || ""
-      )}&session_id=${encodeURIComponent(sessionId)}`;
+      )}&session_id=${encodeURIComponent(sessionId)}&username=${currentUser || "default"}`;
       await fetch(url, { method: "POST", body: form });
       await loadWorkspaceTree();
       await loadWorkspaceFiles();
@@ -2955,6 +3094,13 @@ export function ThreePanelInterface() {
                         <span>执行中…</span>
                       </div>
                     )}
+                    {isLoggedIn && (
+                      <div className="flex items-center gap-2 px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full text-[10px] font-medium">
+                        <User className="h-2.5 w-2.5" />
+                        <span>{currentUser}</span>
+                        <button onClick={handleLogout} className="hover:text-red-500 ml-1">退出</button>
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
                     <span>自动折叠</span>
@@ -2977,7 +3123,26 @@ export function ThreePanelInterface() {
                       }}
                     />
                   </div>
-                  {/* 旧菜单已移除 */}
+                  <div className="flex items-center gap-1 ml-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-[11px] px-2 gap-1 border-blue-200 text-blue-600 hover:bg-blue-50 dark:border-blue-900 dark:text-blue-400"
+                      onClick={() => isLoggedIn ? setShowSaveDialog(true) : setShowAuthModal(true)}
+                    >
+                      <Save className="h-3 w-3" />
+                      保存项目
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-[11px] px-2 gap-1 border-purple-200 text-purple-600 hover:bg-purple-50 dark:border-purple-900 dark:text-purple-400"
+                      onClick={() => isLoggedIn ? setShowProjectManager(true) : setShowAuthModal(true)}
+                    >
+                      <FolderOpen className="h-3 w-3" />
+                      项目中心
+                    </Button>
+                  </div>
                 </div>
                 <div className="flex items-center gap-1">
                   <AlertDialog>
@@ -3740,11 +3905,137 @@ export function ThreePanelInterface() {
               </div>
             )}
           </div>
-          <div className="absolute bottom-4 right-4">
-            <Button onClick={handleDownload} size="sm" variant="outline">
-              <Download className="h-4 w-4" />
-              下载
+        </DialogContent>
+      </Dialog>
+
+      {/* 认证弹窗 */}
+      <Dialog open={showAuthModal} onOpenChange={setShowAuthModal}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle>{isLoginMode ? "用户登录" : "用户注册"}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">用户名</label>
+              <Input
+                value={authUsername}
+                onChange={(e) => setAuthUsername(e.target.value)}
+                placeholder="请输入用户名"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">密码</label>
+              <Input
+                type="password"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                placeholder={isLoginMode ? "请输入密码" : "最少 8 位密码"}
+              />
+            </div>
+            <Button className="w-full" onClick={handleAuth}>
+              {isLoginMode ? "登录" : "注册"}
             </Button>
+            <div className="text-center text-xs text-gray-500">
+              {isLoginMode ? "没有账号？" : "已有账号？"}
+              <button
+                className="text-blue-600 hover:underline ml-1"
+                onClick={() => setIsLoginMode(!isLoginMode)}
+              >
+                {isLoginMode ? "立即注册" : "去登录"}
+              </button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 保存项目弹窗 */}
+      <Dialog open={showSaveDialog} onOpenChange={setShowSaveDialog}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle>保存当前分析项目</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">项目名称</label>
+              <Input
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                placeholder="例如：某进出口企业风险专项分析"
+              />
+            </div>
+            <Button className="w-full" onClick={saveProject}>
+              确认保存
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 项目中心弹窗 */}
+      <Dialog open={showProjectManager} onOpenChange={setShowProjectManager}>
+        <DialogContent className="sm:max-w-[600px] max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>项目中心</DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-y-auto py-4">
+            {userProjects.length === 0 ? (
+              <div className="text-center py-10 text-gray-500 italic text-sm">
+                暂无保存的项目
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {userProjects.map((proj) => (
+                  <div
+                    key={proj.id}
+                    className="flex items-center justify-between p-3 border border-gray-200 dark:border-gray-800 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium truncate">{proj.name}</div>
+                      <div className="text-[10px] text-gray-500 mt-1">
+                        保存时间：{new Date(proj.created_at).toLocaleString()}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 ml-4">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 px-3 text-xs"
+                        onClick={() => loadProject(proj.id)}
+                      >
+                        打开
+                      </Button>
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 w-8 p-0 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>确认删除项目？</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              这将永久删除项目记录及其相关的工作空间文件。
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>取消</AlertDialogCancel>
+                            <AlertDialogAction
+                              className="bg-red-600 hover:bg-red-700"
+                              onClick={() => deleteProject(proj.id)}
+                            >
+                              确认删除
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </DialogContent>
       </Dialog>

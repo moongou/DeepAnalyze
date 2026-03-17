@@ -30,6 +30,16 @@ export const API_CONFIG = {
     WORKSPACE_UPLOAD_TO: "/workspace/upload-to",
     WORKSPACE_DELETE_DIR: "/workspace/dir",
 
+    // 认证
+    AUTH_REGISTER: "/api/auth/register",
+    AUTH_LOGIN: "/api/auth/login",
+
+    // 项目管理
+    PROJECTS_SAVE: "/api/projects/save",
+    PROJECTS_LIST: "/api/projects/list",
+    PROJECTS_LOAD: "/api/projects/load",
+    PROJECTS_DELETE: "/api/projects/delete",
+
     // 代码执行
     EXECUTE_CODE: "/execute",
 
@@ -60,6 +70,16 @@ export const API_URLS = {
   WORKSPACE_DELETE_DIR: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_DELETE_DIR),
   EXECUTE_CODE: buildApiUrl(API_CONFIG.ENDPOINTS.EXECUTE_CODE),
   EXPORT_REPORT: buildApiUrl(API_CONFIG.ENDPOINTS.EXPORT_REPORT),
+
+  // 认证
+  AUTH_REGISTER: buildApiUrl(API_CONFIG.ENDPOINTS.AUTH_REGISTER),
+  AUTH_LOGIN: buildApiUrl(API_CONFIG.ENDPOINTS.AUTH_LOGIN),
+
+  // 项目管理
+  PROJECTS_SAVE: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_SAVE),
+  PROJECTS_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_LIST),
+  PROJECTS_LOAD: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_LOAD),
+  PROJECTS_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_DELETE),
 
   // AI服务
   CHAT_COMPLETIONS: buildApiUrl(API_CONFIG.ENDPOINTS.CHAT_COMPLETIONS),
