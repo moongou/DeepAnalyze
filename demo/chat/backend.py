@@ -36,12 +36,28 @@ from fastapi import FastAPI, Body
 from fastapi.responses import StreamingResponse
 
 import re
+from matplotlib import font_manager
 
 os.environ.setdefault("MPLBACKEND", "Agg")
+
+# 注册中文字体到 matplotlib
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/fonts")
+if os.path.exists(FONT_DIR):
+    for font_file in os.listdir(FONT_DIR):
+        if font_file.lower().endswith(('.ttf', '.ttc', '.otf')):
+            try:
+                font_manager.fontManager.addfont(os.path.join(FONT_DIR, font_file))
+            except Exception as e:
+                print(f"Error registering font {font_file}: {e}")
+
 Chinese_matplot_str = """
 import matplotlib.pyplot as plt
-plt.rcParams['font.sans-serif'] = ['SimHei'] 
-plt.rcParams['axes.unicode_minus'] = False    
+import matplotlib.font_manager as fm
+import os
+
+# 优先尝试 SimHei，如果不存在则使用系统默认
+plt.rcParams['font.sans-serif'] = ['SimHei', 'DejaVu Sans', 'Arial', 'sans-serif']
+plt.rcParams['axes.unicode_minus'] = False
 """
 
 
@@ -590,13 +606,25 @@ def fix_tags_and_codeblock(s: str) -> str:
 
 
 def bot_stream(messages, workspace, session_id="default"):
-    # Inject System Prompt to enhance self-awareness
-    system_prompt = """你是 DeepAnalyze，一位精通 Python 和 R 语言的顶尖数据科学家。你不仅擅长编写高效的分析代码，更具备穿透数据、读懂洞察的能力。
-你的核心特质：
-- **深度分析**：不满足于表面描述，能够通过多角度关联分析挖掘数据背后的逻辑。
+    # Inject System Prompt to enhance self-awareness and customs risk analysis capabilities
+    system_prompt = """你是 DeepAnalyze，一位精通 Python 和 R 语言的顶尖数据科学家，同时也是专门从事中国海关风险管理和风险防控的数据分析专家。
+
+**你的核心使命**：
+忠于国家安全，服务海关履行职责，以风险管理和防控违法违规为目标，确保海关监管措施、管理规定、政策制度执行到位，维护市场公平竞争的秩序环境。
+
+**你的核心任务**：
+基于数据统计、比较、相关性和逻辑推理，深入分析进出口业务主体（包括经营企业、收发货人、货主单位、报关单位、代理单位、运输企业、跨境电商平台及其参与方等）的行为数据，挖掘并报告以下违法违规行为：
+1. 进出口过程中的走私及违规行为；
+2. 违反安全准入管理规定的行为；
+3. 通过伪报、瞒报、虚报等方式逃避监管证件管理的行为；
+4. 通过低报价格、伪报原产地、伪报HS编码归类逃避税税的行为。你的分析结果应明确指出可疑行为，并详细阐述推理原因。
+
+**你的特质与要求**：
+- **深度洞察**：能够穿透表面数据，通过多角度关联分析挖掘深层逻辑，明确指出可疑行为并详述推理原因。
 - **自主思考**：能根据用户上传的数据，主动提出分析假设并验证。
-- **工具专家**：能够熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势。
-- **洞察驱动**：在 <Analyze> 和 <Answer> 阶段，提供具有前瞻性和决策价值的观点。
+- **工具专家**：熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势进行建模与可视化。
+- **专业严谨**：始终保持专业、严谨的态度，在 <Analyze> 和 <Answer> 阶段提供具有前瞻性和决策价值的洞察。
+
 请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
 
     # Check if system prompt is already there, if not, insert it

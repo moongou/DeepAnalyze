@@ -17,6 +17,16 @@ echo "   DeepAnalyze MLX (Apple Silicon) Startup Script   "
 echo "   Optimized for M3 Max / GPU Acceleration          "
 echo "===================================================="
 
+# 0. Install R packages if needed
+echo "Checking R environment..."
+if command -v Rscript >/dev/null 2>&1; then
+    Rscript -e "if (!requireNamespace('showtext', quietly = TRUE)) install.packages('showtext', repos='https://cloud.r-project.org/')"
+    Rscript -e "if (!requireNamespace('sysfonts', quietly = TRUE)) install.packages('sysfonts', repos='https://cloud.r-project.org/')"
+    echo "R packages verified."
+else
+    echo "Warning: Rscript not found, skipping R package installation."
+fi
+
 # 1. Check if MLX model exists
 if [ ! -d "$MODEL_DIR" ]; then
     echo "MLX model not found at $MODEL_DIR"

@@ -23,6 +23,7 @@ wheels/
 #other
 DeepAnalyze-8B/
 DeepAnalyze-8B-MLX-4bit/
+DeepAnalyze-8B-MLX-FP16/
 models/
 **/.cache/
 **/.claude/

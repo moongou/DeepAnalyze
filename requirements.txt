@@ -18,3 +18,4 @@ uvicorn
 fastapi
 openai
 pypandoc
+reportlab
