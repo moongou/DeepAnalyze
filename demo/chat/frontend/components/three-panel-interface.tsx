@@ -384,6 +384,7 @@ export function ThreePanelInterface() {
     },
   ]);
   const [inputValue, setInputValue] = useState("");
+  const [historyInputs, setHistoryInputs] = useState<string[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
@@ -975,6 +976,8 @@ export function ThreePanelInterface() {
     localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify([welcome]));
 
     // 4. 重置 UI 状态
+    setAttachments([]);
+    setHistoryInputs([]);
     setWorkspaceFiles([]);
     setWorkspaceTree(null);
     setCollapsedSections({});
@@ -1823,6 +1826,7 @@ export function ThreePanelInterface() {
         body: JSON.stringify({
           code: codeEditorContent,
           session_id: sessionId,
+          username: currentUser || "default",
         }),
       });
 
@@ -2719,6 +2723,10 @@ export function ThreePanelInterface() {
       timestamp: new Date(),
       attachments: attachments.length > 0 ? [...attachments] : undefined,
     };
+
+    if (inputValue.trim()) {
+      setHistoryInputs((prev) => [...prev, inputValue.trim()]);
+    }
 
     setMessages((prev) => [...prev, newMessage]);
     setInputValue("");
@@ -3655,58 +3663,80 @@ export function ThreePanelInterface() {
                         />
                       </div>
                     </div>
-                    <div className="flex justify-end gap-2 mt-3">
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            title="清空聊天"
-                            className="h-9 px-3"
-                            disabled={isTyping}
-                          >
-                            <Eraser className="h-4 w-4 mr-2" />
-                            清空
-                          </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>清空聊天？</AlertDialogTitle>
-                            <AlertDialogDescription>
-                              将删除当前会话内的所有消息，仅保留欢迎提示。
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>取消</AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={clearChat}
-                              className="bg-red-600 hover:bg-red-700"
+                    <div className="flex justify-between items-center mt-3">
+                      <div className="flex-1 overflow-x-auto scrollbar-none mr-2">
+                        <div className="flex gap-1 items-center min-w-max">
+                          {historyInputs.length > 0 && (
+                            <>
+                              <span className="text-[10px] text-gray-400 dark:text-gray-600 mr-1 shrink-0">历史:</span>
+                              {historyInputs.map((hist, idx) => (
+                                <Button
+                                  key={idx}
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => setInputValue(hist)}
+                                  className="h-6 px-2 text-[10px] bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-full shrink-0"
+                                >
+                                  {idx + 1}
+                                </Button>
+                              ))}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex justify-end gap-2 shrink-0">
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              title="清空聊天"
+                              className="h-9 px-3"
+                              disabled={isTyping}
                             >
-                              确认清空
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
-                      {isTyping ? (
-                        <Button
-                          size="sm"
-                          onClick={stopGeneration}
-                          className="h-9 px-4 rounded-md bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50"
-                        >
-                          <Square className="h-4 w-4 mr-2 fill-current" />
-                          停止
-                        </Button>
-                      ) : (
-                        <Button
-                          onClick={handleSendMessage}
-                          size="sm"
-                          disabled={!inputValue.trim()}
-                          className="h-9 px-4 bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
-                        >
-                          <Send className="h-4 w-4 mr-2" />
-                          发送
-                        </Button>
-                      )}
+                              <Eraser className="h-4 w-4 mr-2" />
+                              清空
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>清空聊天？</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                将删除当前会话内的所有消息，仅保留欢迎提示。
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>取消</AlertDialogCancel>
+                              <AlertDialogAction
+                                onClick={clearChat}
+                                className="bg-red-600 hover:bg-red-700"
+                              >
+                                确认清空
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                        {isTyping ? (
+                          <Button
+                            size="sm"
+                            onClick={stopGeneration}
+                            className="h-9 px-4 rounded-md bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50"
+                          >
+                            <Square className="h-4 w-4 mr-2 fill-current" />
+                            停止
+                          </Button>
+                        ) : (
+                          <Button
+                            onClick={handleSendMessage}
+                            size="sm"
+                            disabled={!inputValue.trim()}
+                            className="h-9 px-4 bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
+                          >
+                            <Send className="h-4 w-4 mr-2" />
+                            发送
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
