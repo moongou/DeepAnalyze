@@ -812,7 +812,8 @@ def bot_stream(messages, workspace, session_id="default", username="default"):
 4. 通过低报价格、伪报原产地、伪报HS编码归类逃避税税的行为。你的分析结果应明确指出可疑行为，并详细阐述推理原因。
 
 **你的特质与要求**：
-- **环境就绪（极重要）**：系统已为你安装了充足的 Python 和 R 语言工具包，包括但不限于 `fpdf2`, `python-docx`, `pandas`, `matplotlib`, `seaborn`, `chardet`, `reportlab` 等。你拥有完整的 PDF 和 DOCX 文档处理与生成能力，请充分利用这些能力。
+- **环境就绪（极重要）**：系统已为你安装了充足的 Python 和 R 语言工具包，包括但不限于 `fpdf2`, `python-docx`, `pandas`, `matplotlib`, `seaborn`, `chardet`, `reportlab` 等。
+- **R 语言中文/PDF 增强（极重要）**：在 R 环境中，已为你安装了 `showtext`, `extrafont`, `Cairo`, `grDevices`, `ggplot2`, `lattice`, `knitr`, `rmarkdown`, `tinytex` 等核心包。在生成包含中文的 PDF 或图形时，请务必调用 `showtext_auto()`，并优先使用 `CairoPDF()` 或 `xelatex` 引擎进行渲染，确保中文字符完美显示。
 - **UTF-8 编码优先（极重要）**：系统已自动将上传的文本文件转换为 UTF-8 编码并添加了 `_utf8` 后缀。**请务必优先使用带有 `_utf8` 后缀的文件进行分析**，以确保 Python 和 R 能够正确识别中文字符，彻底杜绝乱码。
 - **中文字符与编码处理**：在处理任何数据文件前，应确认使用 UTF-8 编码。对于任何包含中文的内容，必须确保在所有输出文件（Png, Jpg, Pdf, Txt, Csv, Docx 等）中正确显示中文。
 - **可视化支持**：在 Python 绘图时，务必配置 `plt.rcParams['font.sans-serif']` 使用 `SimHei`, `PingFang SC` 或其他系统中文字体，防止出现乱码或方框。在 R 中使用 `showtext` 处理中文。
@@ -1267,14 +1268,27 @@ async def save_project(
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO projects (username, session_id, name, messages) VALUES (?, ?, ?, ?)",
-            (username, session_id, name, messages)
-        )
+
+        # Check if project name already exists for this user to support "overwrite" logic
+        cursor.execute("SELECT id FROM projects WHERE username = ? AND name = ?", (username, name))
+        existing = cursor.fetchone()
+
+        if existing:
+            cursor.execute(
+                "UPDATE projects SET session_id = ?, messages = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (session_id, messages, existing["id"])
+            )
+            project_id = existing["id"]
+        else:
+            cursor.execute(
+                "INSERT INTO projects (username, session_id, name, messages) VALUES (?, ?, ?, ?)",
+                (username, session_id, name, messages)
+            )
+            project_id = cursor.lastrowid
+
         conn.commit()
-        lastrowid = cursor.lastrowid
         conn.close()
-        return {"message": "Project saved successfully", "project_id": lastrowid}
+        return {"message": "Project saved successfully", "project_id": project_id}
     except Exception as e:
         print(f"Save project error: {e}")
         traceback.print_exc()

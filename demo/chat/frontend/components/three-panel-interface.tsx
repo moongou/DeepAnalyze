@@ -2964,7 +2964,7 @@ export function ThreePanelInterface() {
       >
         <ResizablePanelGroup direction="horizontal" className="h-full">
           {/* Left Panel - Workspace Tree */}
-          <ResizablePanel defaultSize={25} minSize={15}>
+          <ResizablePanel defaultSize={16} minSize={10}>
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12">
                 <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
@@ -3106,7 +3106,7 @@ export function ThreePanelInterface() {
           <ResizableHandle withHandle />
 
           {/* Middle Panel - Chat & Analysis */}
-          <ResizablePanel defaultSize={40} minSize={25}>
+          <ResizablePanel defaultSize={60} minSize={25}>
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               {/* Header */}
               <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0">
@@ -3473,10 +3473,10 @@ export function ThreePanelInterface() {
           <ResizableHandle withHandle />
 
           {/* Right Panel - Code Editor & Input */}
-          <ResizablePanel defaultSize={35} minSize={20}>
+          <ResizablePanel defaultSize={34} minSize={20}>
             <ResizablePanelGroup direction="vertical">
               {/* Upper: Code/Preview */}
-              <ResizablePanel defaultSize={70} minSize={30}>
+              <ResizablePanel defaultSize={40} minSize={30}>
                 <div className="flex flex-col bg-gray-50 dark:bg-gray-900 min-h-0 h-full">
                   <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0">
                     <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
@@ -3624,9 +3624,12 @@ export function ThreePanelInterface() {
               <ResizableHandle withHandle />
 
               {/* Lower: Chat Input */}
-              <ResizablePanel defaultSize={30} minSize={20}>
+              <ResizablePanel defaultSize={60} minSize={20}>
                 <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
-                  <div className="p-4 flex-1 flex flex-col min-h-0">
+                  <div className="py-2 text-center border-b border-gray-100 dark:border-gray-900">
+                    <span className="text-blue-600 dark:text-blue-400 font-bold text-sm">请风控专家指示分析目标</span>
+                  </div>
+                  <div className="p-4 flex-1 flex flex-col min-h-0 pt-2">
                     <div className="flex gap-3 items-start flex-1">
                       <input
                         ref={fileInputRef}
@@ -3636,14 +3639,6 @@ export function ThreePanelInterface() {
                         className="hidden"
                         accept="*"
                       />
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => fileInputRef.current?.click()}
-                        className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 mt-1"
-                      >
-                        <Paperclip className="h-4 w-4" />
-                      </Button>
                       <div className="flex-1 relative flex flex-col h-full min-h-0">
                         <Textarea
                           value={inputValue}
@@ -3990,18 +3985,38 @@ export function ThreePanelInterface() {
 
       {/* 保存项目弹窗 */}
       <Dialog open={showSaveDialog} onOpenChange={setShowSaveDialog}>
-        <DialogContent className="sm:max-w-[400px]">
+        <DialogContent className="sm:max-w-[450px]">
           <DialogHeader>
-            <DialogTitle>保存当前分析项目</DialogTitle>
+            <DialogTitle>保存分析项目</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">项目名称</label>
-              <Input
-                value={projectName}
-                onChange={(e) => setProjectName(e.target.value)}
-                placeholder="例如：某进出口企业风险专项分析"
-              />
+              <div className="relative">
+                <Input
+                  value={projectName}
+                  onChange={(e) => setProjectName(e.target.value)}
+                  placeholder="请输入或选择已有项目名称"
+                  className="pr-10"
+                />
+                {userProjects.length > 0 && (
+                  <div className="mt-2 max-h-[150px] overflow-y-auto border rounded-md p-1 bg-gray-50 dark:bg-gray-900">
+                    <div className="text-[10px] text-gray-500 px-2 py-1 uppercase font-bold">已有项目 (点击覆盖)</div>
+                    {userProjects.map(p => (
+                      <button
+                        key={p.id}
+                        onClick={() => setProjectName(p.name)}
+                        className="w-full text-left px-2 py-1.5 text-xs hover:bg-blue-100 dark:hover:bg-blue-900 rounded transition-colors truncate"
+                      >
+                        {p.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="text-[10px] text-gray-500 italic bg-amber-50 dark:bg-amber-950/20 p-2 rounded">
+              提示：保存操作将同时记录当前的聊天历史、上传的数据文件以及生成的分析结果。
             </div>
             <Button className="w-full" onClick={saveProject}>
               确认保存
