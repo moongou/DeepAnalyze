@@ -813,7 +813,16 @@ def fix_tags_and_codeblock(s: str) -> str:
     return s
 
 
-def bot_stream(messages, workspace, session_id="default", username="default"):
+def bot_stream(messages, workspace, session_id="default", username="default", strategy="聚焦诉求"):
+    # Strategy-specific prompts
+    strategy_prompts = {
+        "聚焦诉求": "\n**分析策略：聚焦诉求**。请严格遵守用户指令，仅针对用户直接提出的问题进行分析和回答，不要进行任何不必要的发散或多余的关联分析。保持回答简洁、高效、直击要点。",
+        "适度扩展": "\n**分析策略：适度扩展**。在满足用户核心需求的基础上，请基于数据表现进行适量的关联性分析。你可以简要探讨与核心指标相关的其他因素，提供一些背景信息或浅层的风险提示，但请注意分寸，不要过度发散。",
+        "广泛延展": "\n**分析策略：广泛延展**。请进行深度发散分析，充分挖掘数据间的潜在联系。你可以大胆发挥想象力，结合海关业务逻辑进行全方位的风险预判、趋势分析和关联挖掘。鼓励你提供多维度的洞察和前瞻性的建议。"
+    }
+
+    selected_strategy_prompt = strategy_prompts.get(strategy, strategy_prompts["聚焦诉求"])
+
     # Inject System Prompt to enhance self-awareness and customs risk analysis capabilities
     system_prompt = """你是 DeepAnalyze，一位精通 Python 和 R 语言的顶尖数据科学家，同时也是专门从事中国海关风险管理和风险防控的数据分析专家。
 
@@ -838,8 +847,13 @@ def bot_stream(messages, workspace, session_id="default", username="default"):
 - **自主思考**：能根据用户上传的数据，主动提出分析假设并验证。
 - **工具专家**：熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势进行建模与可视化。你可以通过 Python 的 `rpy2` 库直接调用 R 语言工具开展分析，在进行复杂可视化时，应充分发挥 R 语言 `ggplot2` 包的灵活性优势。**注意：使用 rpy2 (版本 3.x+) 时，请使用 `rpy2.robjects.pandas2ri.activate()` 或 `with rpy2.robjects.conversion.localconverter(rpy2.robjects.default_converter + rpy2.robjects.pandas2ri.converter):` 进行数据转换，不要使用已废弃的 `conversion.register` 属性。**
 - **专业严谨**：始终保持专业、严谨的态度，提供具有前瞻性和决策价值的洞察。
+""" + selected_strategy_prompt + """
 
-请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
+**终止逻辑与防循环（极重要）**：
+- 每一轮完整的分析任务**必须**以 `<Answer>` 标签包裹的最终结论结束。
+- 禁止在没有新进展的情况下重复生成相同的代码或进行循环逻辑。
+- 如果已达成分析目标，请立即输出 `<Answer>`。
+- 请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
 
     # Check if system prompt is already there, if not, insert it
     if not messages or messages[0]["role"] != "system":
@@ -1018,12 +1032,13 @@ async def chat(body: dict = Body(...)):
     workspace = body.get("workspace", [])
     session_id = body.get("session_id", "default")
     username = body.get("username", "default")
+    strategy = body.get("strategy", "聚焦诉求")
 
     # 动态构建 workspace 目录，确保能正确识别当前 session 的文件
     actual_workspace_dir = get_session_workspace(session_id, username)
 
     def generate():
-        for delta_content in bot_stream(messages, workspace, session_id, username):
+        for delta_content in bot_stream(messages, workspace, session_id, username, strategy):
             # print(delta_content)
             chunk = {
                 "id": "chatcmpl-stream",

@@ -60,6 +60,13 @@ import { Tree, NodeApi } from "react-arborist";
 import { useToast } from "@/hooks/use-toast";
 import { FileIcon, defaultStyles } from "react-file-icon";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -402,6 +409,7 @@ export function ThreePanelInterface() {
   const [showCodeEditor, setShowCodeEditor] = useState(false);
   const [isExecutingCode, setIsExecutingCode] = useState(false);
   const [codeExecutionResult, setCodeExecutionResult] = useState("");
+  const [analysisStrategy, setAnalysisStrategy] = useState<string>("聚焦诉求");
 
   // 用户认证与项目管理状态
   const [currentUser, setCurrentUser] = useState<string | null>(null);
@@ -2760,6 +2768,7 @@ export function ThreePanelInterface() {
           ],
           stream: true, // [修改] 明确开启流式模式
           session_id: sessionId,
+          strategy: analysisStrategy,
         }),
       });
 
@@ -3634,8 +3643,21 @@ export function ThreePanelInterface() {
               {/* Lower: Chat Input */}
               <ResizablePanel defaultSize={60} minSize={20}>
                 <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
-                  <div className="py-2 text-center border-b border-gray-100 dark:border-gray-900">
+                  <div className="py-2 px-4 flex justify-between items-center border-b border-gray-100 dark:border-gray-900 bg-gray-50/50 dark:bg-gray-900/30">
                     <span className="text-blue-600 dark:text-blue-400 font-bold text-sm">请风控专家指示分析目标</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-gray-400 dark:text-gray-500">分析策略:</span>
+                      <Select value={analysisStrategy} onValueChange={setAnalysisStrategy}>
+                        <SelectTrigger className="h-7 w-[100px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
+                          <SelectValue placeholder="策略" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
+                          <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
+                          <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
                   <div className="p-4 flex-1 flex flex-col min-h-0 pt-2">
                     <div className="flex gap-3 items-start flex-1">
