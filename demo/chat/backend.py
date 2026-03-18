@@ -105,16 +105,44 @@ def execute_code_safe(
             if r_home and os.path.exists(r_home):
                 child_env.setdefault("R_HOME", r_home)
                 r_lib = os.path.join(r_home, "lib")
+                brew_lib = "/opt/homebrew/lib"
+
+                # 构造库搜索路径，包含 R 自身库和 Homebrew 公共库
+                lib_paths = [r_lib]
+                if os.path.exists(brew_lib):
+                    lib_paths.append(brew_lib)
+
+                # 解决 libRblas.dylib 缺失问题：在 workspace 下创建软连接文件夹以引导 rpy2 (macOS brew 常见问题)
+                fake_lib_dir = os.path.abspath(os.path.join(workspace_dir, ".lib"))
+                os.makedirs(fake_lib_dir, exist_ok=True)
+                fake_blas = os.path.join(fake_lib_dir, "libRblas.dylib")
+                target_r_lib = os.path.join(r_lib, "libR.dylib")
+                if not os.path.exists(fake_blas) and os.path.exists(target_r_lib):
+                    try:
+                        os.symlink(target_r_lib, fake_blas)
+                    except:
+                        pass
+                if os.path.exists(fake_lib_dir):
+                    lib_paths.insert(0, fake_lib_dir)
+
+                path_str = ":".join(lib_paths)
+
                 if "DYLD_LIBRARY_PATH" in child_env:
-                    child_env["DYLD_LIBRARY_PATH"] = f"{r_lib}:{child_env['DYLD_LIBRARY_PATH']}"
+                    child_env["DYLD_LIBRARY_PATH"] = f"{path_str}:{child_env['DYLD_LIBRARY_PATH']}"
                 else:
-                    child_env["DYLD_LIBRARY_PATH"] = r_lib
-                child_env["LD_LIBRARY_PATH"] = child_env.get("DYLD_LIBRARY_PATH")
+                    child_env["DYLD_LIBRARY_PATH"] = path_str
+
+                # 设置多种路径变量以增强兼容性
+                child_env["LD_LIBRARY_PATH"] = child_env["DYLD_LIBRARY_PATH"]
+                child_env["DYLD_FALLBACK_LIBRARY_PATH"] = child_env["DYLD_LIBRARY_PATH"]
         except Exception:
             # 兜底常用路径
             r_home = "/opt/homebrew/opt/r/lib/R"
             if os.path.exists(r_home):
                 child_env.setdefault("R_HOME", r_home)
+                r_lib = os.path.join(r_home, "lib")
+                child_env["DYLD_LIBRARY_PATH"] = f"{r_lib}:/opt/homebrew/lib"
+                child_env["LD_LIBRARY_PATH"] = child_env["DYLD_LIBRARY_PATH"]
         child_env.pop("DISPLAY", None)
 
         completed = subprocess.run(
@@ -842,7 +870,8 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 - **UTF-8 编码优先（极重要）**：系统已自动将上传的文本文件转换为 UTF-8 编码并添加了 `_utf8` 后缀。**请务必优先使用带有 `_utf8` 后缀的文件进行分析**，以确保 Python 和 R 能够正确识别中文字符，彻底杜绝乱码。
 - **中文字符与编码处理**：在处理任何数据文件前，应确认使用 UTF-8 编码。对于任何包含中文的内容，必须确保在所有输出文件（Png, Jpg, Pdf, Txt, Csv, Docx 等）中正确显示中文。
 - **可视化支持**：在 Python 绘图时，务必配置 `plt.rcParams['font.sans-serif']` 使用 `SimHei`, `PingFang SC` 或其他系统中文字体，防止出现乱码或方框。在 R 中使用 `showtext` 处理中文。
-- **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF 和 DOCX 格式**，这是你的标准交付物。
+- **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF 和 DOCX 格式**，这是你的标准交付物。**注意：当前环境为 macOS，禁止使用 `comtypes` 或 `docx2pdf` 库，请使用 `fpdf2` 或 `reportlab` 生成 PDF。** 对于 DOCX，请继续使用 `python-docx`。
+- **字体与路径支持**：生成 PDF 或图形时，请使用 macOS 中文字体路径：`/System/Library/Fonts/STHeiti Light.ttc` 或 `/Library/Fonts/Arial Unicode.ttf`。在 R 中使用 `showtext` 时，系统会自动处理字体映射。
 - **深度洞察**：能够穿透表面数据，通过多角度关联分析挖掘深层逻辑，明确指出可疑行为并详述推理原因。
 - **自主思考**：能根据用户上传的数据，主动提出分析假设并验证。
 - **工具专家**：熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势进行建模与可视化。你可以通过 Python 的 `rpy2` 库直接调用 R 语言工具开展分析，在进行复杂可视化时，应充分发挥 R 语言 `ggplot2` 包的灵活性优势。**注意：使用 rpy2 (版本 3.x+) 时，请使用 `rpy2.robjects.pandas2ri.activate()` 或 `with rpy2.robjects.conversion.localconverter(rpy2.robjects.default_converter + rpy2.robjects.pandas2ri.converter):` 进行数据转换，不要使用已废弃的 `conversion.register` 属性。**
