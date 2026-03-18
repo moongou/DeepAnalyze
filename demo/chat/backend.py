@@ -99,6 +99,22 @@ def execute_code_safe(
         child_env = os.environ.copy()
         child_env.setdefault("MPLBACKEND", "Agg")
         child_env.setdefault("QT_QPA_PLATFORM", "offscreen")
+        # 显式设置 R 环境路径，解决 libRblas.dylib 加载问题
+        try:
+            r_home = subprocess.check_output(["R", "RHOME"], text=True).strip()
+            if r_home and os.path.exists(r_home):
+                child_env.setdefault("R_HOME", r_home)
+                r_lib = os.path.join(r_home, "lib")
+                if "DYLD_LIBRARY_PATH" in child_env:
+                    child_env["DYLD_LIBRARY_PATH"] = f"{r_lib}:{child_env['DYLD_LIBRARY_PATH']}"
+                else:
+                    child_env["DYLD_LIBRARY_PATH"] = r_lib
+                child_env["LD_LIBRARY_PATH"] = child_env.get("DYLD_LIBRARY_PATH")
+        except Exception:
+            # 兜底常用路径
+            r_home = "/opt/homebrew/opt/r/lib/R"
+            if os.path.exists(r_home):
+                child_env.setdefault("R_HOME", r_home)
         child_env.pop("DISPLAY", None)
 
         completed = subprocess.run(
@@ -820,7 +836,7 @@ def bot_stream(messages, workspace, session_id="default", username="default"):
 - **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF 和 DOCX 格式**，这是你的标准交付物。
 - **深度洞察**：能够穿透表面数据，通过多角度关联分析挖掘深层逻辑，明确指出可疑行为并详述推理原因。
 - **自主思考**：能根据用户上传的数据，主动提出分析假设并验证。
-- **工具专家**：熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势进行建模与可视化。你可以通过 Python 的 `rpy2` 库直接调用 R 语言工具开展分析，在进行复杂可视化时，应充分发挥 R 语言 `ggplot2` 包的灵活性优势。
+- **工具专家**：熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势进行建模与可视化。你可以通过 Python 的 `rpy2` 库直接调用 R 语言工具开展分析，在进行复杂可视化时，应充分发挥 R 语言 `ggplot2` 包的灵活性优势。**注意：使用 rpy2 (版本 3.x+) 时，请使用 `rpy2.robjects.pandas2ri.activate()` 或 `with rpy2.robjects.conversion.localconverter(rpy2.robjects.default_converter + rpy2.robjects.pandas2ri.converter):` 进行数据转换，不要使用已废弃的 `conversion.register` 属性。**
 - **专业严谨**：始终保持专业、严谨的态度，提供具有前瞻性和决策价值的洞察。
 
 请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
