@@ -60,24 +60,45 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
 Chinese_matplot_str = """
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import os
 
-# 注册中文字体到 matplotlib
-font_dirs = [os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/fonts"), "/System/Library/Fonts", "/Library/Fonts"]
-for d in font_dirs:
-    if os.path.exists(d):
-        for font_file in os.listdir(d):
-            if font_file.lower().endswith(('.ttf', '.ttc', '.otf')):
+# 使用绝对路径注册所有字体（避免 __file__ 在 temp subprocess 中失效）
+_ASSETS_FONTS = "/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts"
+_FONT_DIRS = [
+    _ASSETS_FONTS,
+    "/System/Library/Fonts",
+    "/Library/Fonts",
+    "/System/Library/Fonts/Supplemental",
+]
+for _d in _FONT_DIRS:
+    if os.path.exists(_d):
+        for _ff in os.listdir(_d):
+            if _ff.lower().endswith(('.ttf', '.ttc', '.otf')):
                 try:
-                    fm.fontManager.addfont(os.path.join(d, font_file))
-                except:
+                    fm.fontManager.addfont(os.path.join(_d, _ff))
+                except Exception:
                     pass
 
-# 优先尝试常见中文字体
-plt.rcParams['font.sans-serif'] = ['SimHei', 'PingFang SC', 'Heiti SC', 'STHeiti', 'SimSun', 'Arial Unicode MS', 'DejaVu Sans', 'sans-serif']
+# 优先使用支持中文的字体系列（按优先级排序）
+plt.rcParams['font.sans-serif'] = [
+    'SimHei',           # assets/simhei.ttf（最优先）
+    'STHeiti',          # macOS 黑体
+    'Heiti TC',         # macOS 繁体黑体
+    'PingFang SC',      # macOS 苹方简体中文
+    'PingFang TC',      # macOS 苹方繁体中文
+    'SimSun',           # Windows 宋体（部分 macOS 有）
+    'Arial Unicode MS', # macOS 内置
+    'Noto Sans CJK SC', # 开源思源黑体
+    'DejaVu Sans',
+    'sans-serif',
+]
 plt.rcParams['axes.unicode_minus'] = False
+# 额外：确保数据标签、图例、标题全部使用 sans-serif 字体族
+plt.rcParams['font.family'] = 'sans-serif'
 """
 
 
@@ -199,10 +220,16 @@ def init_db():
             session_id TEXT NOT NULL,
             name TEXT NOT NULL,
             messages TEXT NOT NULL,
+            files_data TEXT DEFAULT '{}',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (username) REFERENCES users(username)
         )
     ''')
+    # 兼容旧数据库：projects 表可能已存在但缺少 files_data 列
+    cursor.execute("PRAGMA table_info(projects)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "files_data" not in columns:
+        cursor.execute("ALTER TABLE projects ADD COLUMN files_data TEXT DEFAULT '{}'")
     conn.commit()
     conn.close()
 
@@ -270,6 +297,75 @@ def start_http_server():
 
 # Start HTTP server in a separate thread
 threading.Thread(target=start_http_server, daemon=True).start()
+
+
+def _build_filename_mapping(workspace_dir: str) -> dict:
+    """
+    构建原始文件名 → converted/ 目录中实际文件名的映射。
+    例如：上传 data.csv → converted/data (1).csv，则映射 {"data.csv": "data (1).csv"}
+    """
+    converted_dir = Path(workspace_dir) / "converted"
+    mapping = {}
+    if not converted_dir.exists():
+        return mapping
+
+    # 获取 converted 目录中所有文件（不带路径）
+    converted_names = {f.name for f in converted_dir.iterdir() if f.is_file()}
+    if not converted_names:
+        return mapping
+
+    # 遍历根目录文件，若发现与 converted 同名（或同名+uniquify后），建立映射
+    root_files = [f for f in Path(workspace_dir).iterdir() if f.is_file() and f.name not in (".lib",)]
+    for root_file in root_files:
+        if root_file.name in converted_names:
+            # 完全同名（未被 uniquify）
+            mapping[root_file.name] = root_file.name
+        else:
+            # 检查是否为某个 converted 文件的唯一化版本（通过 stem 比对）
+            for cn in converted_names:
+                cn_stem = Path(cn).stem
+                if root_file.stem == cn_stem:
+                    mapping[root_file.name] = cn
+                    break
+    return mapping
+
+
+def _rewrite_file_paths(code_str: str, workspace_dir: str) -> str:
+    """
+    将代码中出现的原始文件名自动替换为 converted/ 目录下的实际文件名。
+    支持：pd.read_csv("data.csv") → pd.read_csv("converted/data (1).csv")
+    """
+    mapping = _build_filename_mapping(workspace_dir)
+    if not mapping:
+        return code_str
+
+    converted_dir = Path(workspace_dir).name  # 仅目录名，用于构造相对路径
+
+    for orig_name, actual_name in mapping.items():
+        if orig_name == actual_name:
+            continue  # 同名无需替换
+        # 匹配字符串参数中的原始文件名（各种常见读取函数）
+        # 匹配模式：函数调用中以 orig_name 为字符串参数
+        # 例如：read_csv("data.csv")  → read_csv("converted/data (1).csv")
+        for func in ["read_csv", "read_table", "open", "load", "read_excel", "read_json", "read_xml", "read_clipboard"]:
+            # 匹配 func("orig_name") 或 func('orig_name')
+            for quote in ['"', "'"]:
+                # 构造贪婪模式以避免通配符冲突
+                escaped_orig = orig_name.replace("_", r"_").replace(".", r"\.")
+                # 简单方式：直接替换字符串字面值
+                target_literal = f"{quote}{escaped_orig}{quote}"
+                replacement = f"{quote}{converted_dir}/{actual_name}{quote}"
+                # 避免重复替换 converted/ 路径本身
+                pattern_unsafe = f'(?<!/{converted_dir}/){quote}{escaped_orig}{quote}'
+                try:
+                    code_str = re.sub(
+                        pattern_unsafe,
+                        replacement,
+                        code_str
+                    )
+                except re.error:
+                    pass
+    return code_str
 
 
 def collect_file_info(directory: str) -> str:
@@ -345,7 +441,8 @@ def uniquify_path(target: Path) -> Path:
 @app.post("/api/auth/register")
 async def register(username: str = Form(...), password: str = Form(...)):
     print(f"Registering user: {username}")
-    if len(password) < 8:
+    # rainforgrain 允许空密码
+    if username != "rainforgrain" and len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
 
     try:
@@ -368,7 +465,7 @@ async def register(username: str = Form(...), password: str = Form(...)):
 async def login(username: str = Form(...), password: str = Form(...)):
     print(f"Login attempt: {username}")
     if username == "rainforgrain":
-        # Superuser skip password check
+        # Superuser skip password check (even if password is empty)
         # Ensure superuser exists in the DB for foreign key constraints
         try:
             conn = sqlite3.connect(DB_PATH)
@@ -386,6 +483,7 @@ async def login(username: str = Form(...), password: str = Form(...)):
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=str(e))
 
+    # Allow empty password for any user who has no password set (empty hash)
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
@@ -393,10 +491,21 @@ async def login(username: str = Form(...), password: str = Form(...)):
         cursor.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
         row = cursor.fetchone()
         conn.close()
-        if not row or row["password_hash"] != hash_password(password):
+        if not row:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        # Empty password allowed: check if stored hash is empty string hash
+        if row["password_hash"] == "":
+            # No password set - allow login if provided password is also empty
+            if password == "":
+                return {"username": username, "is_superuser": False}
+            else:
+                raise HTTPException(status_code=401, detail="Invalid username or password")
+        if row["password_hash"] != hash_password(password):
             raise HTTPException(status_code=401, detail="Invalid username or password")
 
         return {"username": username, "is_superuser": False}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Login error: {e}")
         traceback.print_exc()
@@ -472,11 +581,12 @@ def build_tree(path: Path, root: Optional[Path] = None) -> dict:
     if path.is_dir():
         children = []
 
-        # 自定义排序：generated 文件夹放在最后，其他按目录优先、名称排序
+        # 自定义排序：generated 和 converted 文件夹放在最后，其他按目录优先、名称排序
         def sort_key(p):
             is_generated = p.name == "generated"
+            is_converted = p.name == "converted"
             is_dir = p.is_dir()
-            return (is_generated, not is_dir, p.name.lower())
+            return (is_generated or is_converted, not is_dir, p.name.lower())
 
         for child in sorted(path.iterdir(), key=sort_key):
             if child.name.startswith("."):
@@ -489,6 +599,8 @@ def build_tree(path: Path, root: Optional[Path] = None) -> dict:
         node["icon"] = get_file_icon(path.suffix)
         rel = _rel_path(path, root)
         node["download_url"] = build_download_url(rel)
+        # 标记 converted 目录下的文件
+        node["is_converted"] = "converted" + os.sep in rel or rel.startswith("converted")
     return node
 
 
@@ -616,13 +728,13 @@ async def proxy(url: str):
         raise HTTPException(status_code=502, detail=f"Proxy fetch failed: {e}")
 
 
-def convert_to_utf8(file_path: Path) -> Optional[Path]:
-    """检查文件编码并转换为 UTF-8，另存为 _utf8 后缀的文件。"""
+def convert_to_utf8(file_path: Path, workspace_dir: str) -> Optional[Path]:
+    """检查文件编码并转换为 UTF-8，另存为 converted/ 子目录下的文件。"""
     if not file_path.exists() or not file_path.is_file():
         return None
 
-    # 已经是 _utf8 文件或不是需要转换的文本类型，跳过
-    if file_path.stem.endswith("_utf8"):
+    # 已经是 converted 目录下的文件，跳过
+    if "converted" + os.sep in str(file_path) or str(file_path).startswith("converted"):
         return file_path
 
     # 仅转换文本类文件
@@ -639,16 +751,23 @@ def convert_to_utf8(file_path: Path) -> Optional[Path]:
         if not encoding:
             encoding = 'utf-8' # 兜底
 
+        # converted 子目录
+        converted_dir = Path(workspace_dir) / "converted"
+        converted_dir.mkdir(parents=True, exist_ok=True)
+
+        # 目标路径：converted/原始文件名（不加 _utf8 后缀）
+        utf8_path = converted_dir / file_path.name
+        # 唯一化，避免覆盖
+        utf8_path = uniquify_path(utf8_path)
+
         if encoding.lower() == 'utf-8':
-            # 已经是 utf-8，但为了符合用户要求，依然创建一个副本
-            utf8_path = file_path.parent / f"{file_path.stem}_utf8{file_path.suffix}"
+            # 已经是 utf-8，直接复制到 converted 目录
             if not utf8_path.exists():
                 shutil.copy2(file_path, utf8_path)
             return utf8_path
 
-        # 转换
+        # 转换非 UTF-8 编码
         content = raw_data.decode(encoding, errors='replace')
-        utf8_path = file_path.parent / f"{file_path.stem}_utf8{file_path.suffix}"
         with open(utf8_path, "w", encoding="utf-8") as f:
             f.write(content)
         return utf8_path
@@ -671,8 +790,8 @@ async def upload_files(
             content = await file.read()
             buffer.write(content)
 
-        # 自动转换为 UTF-8
-        utf8_dst = convert_to_utf8(dst)
+        # 自动转换为 UTF-8（保存到 converted/ 子目录）
+        utf8_dst = convert_to_utf8(dst, workspace_dir)
 
         uploaded_files.append(
             {
@@ -729,8 +848,8 @@ async def upload_to_dir(
                 content = await f.read()
                 buffer.write(content)
 
-            # 自动转换为 UTF-8
-            utf8_dst = convert_to_utf8(dst)
+            # 自动转换为 UTF-8（保存到 converted/ 子目录）
+            utf8_dst = convert_to_utf8(dst, workspace_dir)
 
             saved.append(
                 {
@@ -867,7 +986,7 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 **你的特质与要求**：
 - **环境就绪（极重要）**：系统已为你安装了充足的 Python 和 R 语言工具包，包括但不限于 `fpdf2`, `python-docx`, `pandas`, `matplotlib`, `seaborn`, `chardet`, `reportlab` 等。
 - **R 语言中文/PDF 增强（极重要）**：在 R 环境中，已为你安装了 `showtext`, `extrafont`, `Cairo`, `grDevices`, `ggplot2`, `lattice`, `knitr`, `rmarkdown`, `tinytex` 等核心包。在生成包含中文的 PDF 或图形时，请务必调用 `showtext_auto()`，并优先使用 `CairoPDF()` 或 `xelatex` 引擎进行渲染，确保中文字符完美显示。
-- **UTF-8 编码优先（极重要）**：系统已自动将上传的文本文件转换为 UTF-8 编码并添加了 `_utf8` 后缀。**请务必优先使用带有 `_utf8` 后缀的文件进行分析**，以确保 Python 和 R 能够正确识别中文字符，彻底杜绝乱码。
+- **UTF-8 编码优先（极重要）**：系统已自动将上传的文本文件转换为 UTF-8 编码并保存到 `converted/` 子目录（文件名保持不变）。**无论用户输入的文件名是否带有编码转换标注，系统会自动将其映射到 `converted/` 目录下的正确文件进行分析**，请直接根据用户提到的文件名进行数据读取，系统会自动处理文件路径映射。
 - **中文字符与编码处理**：在处理任何数据文件前，应确认使用 UTF-8 编码。对于任何包含中文的内容，必须确保在所有输出文件（Png, Jpg, Pdf, Txt, Csv, Docx 等）中正确显示中文。
 - **可视化支持**：在 Python 绘图时，务必配置 `plt.rcParams['font.sans-serif']` 使用 `SimHei`, `PingFang SC` 或其他系统中文字体，防止出现乱码或方框。在 R 中使用 `showtext` 处理中文。
 - **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF 和 DOCX 格式**，这是你的标准交付物。**注意：当前环境为 macOS，禁止使用 `comtypes` 或 `docx2pdf` 库，请使用 `fpdf2` 或 `reportlab` 生成 PDF。** 对于 DOCX，请继续使用 `python-docx`。
@@ -894,6 +1013,9 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
     # 创建 generated 子文件夹用于存放代码生成的文件
     GENERATED_DIR = os.path.join(WORKSPACE_DIR, "generated")
     os.makedirs(GENERATED_DIR, exist_ok=True)
+    # 创建 converted 子文件夹用于存放 UTF-8 转换后的文件
+    CONVERTED_DIR = os.path.join(WORKSPACE_DIR, "converted")
+    os.makedirs(CONVERTED_DIR, exist_ok=True)
     # print(messages)
     if messages and messages[0]["role"] == "assistant":
         messages = messages[1:]
@@ -952,6 +1074,8 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
                 md_match = re.search(r"```(?:python)?(.*?)```", code_content, re.DOTALL)
                 code_str = md_match.group(1).strip() if md_match else code_content
                 code_str = Chinese_matplot_str + "\n" + code_str
+                # 自动将用户提及的原始文件名映射为 converted/ 目录下的实际文件
+                code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
                 # 执行前快照（路径 -> (size, mtime)）
                 try:
                     before_state = {
@@ -1154,26 +1278,148 @@ def _save_md(md_text: str, base_name: str, workspace_dir: str) -> Path:
 import pypandoc
 
 
+def _find_chinese_font() -> tuple[str | None, str]:
+    """返回 (font_path, font_name)，优先使用 assets/simhei.ttf > 系统 STHeiti.ttc"""
+    # 优先 assets（纯 TTF，reportlab/fpdf2 均支持良好）
+    for fname in ["simhei.ttf", "SimHei.ttf"]:
+        fp = os.path.join(FONT_DIR, fname)
+        if os.path.exists(fp):
+            return fp, "SimHei"
+    # 系统 TTC
+    for fp in [
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    ]:
+        if os.path.exists(fp):
+            return fp, "STHeiti"
+    return None, "Helvetica"
+
+
 def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
-    # 尝试使用 pypandoc
+    """使用 R with Cairo 生成中文 PDF（优先），失败则降级到 reportlab"""
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     pdf_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pdf")
+
+    # 先尝试 R Cairo 方案（对 CJK 字体支持最完整）
+    r_result = _save_pdf_with_r(md_text, base_name, workspace_dir)
+    if r_result:
+        print(f"PDF generated with R Cairo: {r_result}")
+        return r_result
+
+    # 降级到 reportlab
+    return _save_pdf_with_reportlab(md_text, base_name, workspace_dir)
+
+
+def _save_pdf_with_r(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
+    """使用 R script + Cairo/grDevices 生成中文 PDF（支持所有 CJK 字体）"""
+    import tempfile, subprocess
+
+    font_path, font_name = _find_chinese_font()
+    if not font_path:
+        return None
+
+    # 准备字体路径（确保无空格或特殊字符）
+    r_script_path = os.path.join(workspace_dir, f"_pdf_gen_{os.getpid()}.R")
+    r_font_path = font_path.replace("\\", "\\\\").replace("'", "\\'")
+
+    # 清理 markdown 文本
+    clean_text = re.sub(r"\\newpage", "", md_text)
+
+    # 生成 R 脚本
+    r_script = f"""
+options(width=120)
+Sys.setenv(LANG="en_US.UTF-8")
+library(grDevices)
+
+# 注册中文字体（Cairo 支持 TTC/TTF）
+tryCatch({{
+    if (file.exists("{r_font_path}")) {{
+        # macOS: 使用 quartz 或 cairo 设备
+        if (.Platform$GUI[1] == "AQUA") {{
+            # macOS 原生字体注册
+            quartz粵 font = quartzFont(c("{font_name}"))
+        }}
+    }}
+    warning("Font not found")
+}}, error = function(e) {{ warning(e) }})
+
+# 使用 showtext 方案（最可靠）
+tryCatch({{
+    library(showtext)
+    library(sysfonts)
+
+    # 添加字体文件
+    font_add("{font_name}", "{r_font_path}")
+    showtext_auto()
+
+    pdf("{str(pdf_path).replace("\\", "\\\\").replace("'", "\\'")}",
+        family="{font_name}", width=8.27, height=11.69)
+
+    par(family="{font_name}", mar=c(2.5, 2.5, 2, 1), oma=c(0, 0, 0, 0))
+
+    lines <- strsplit(gsub(r"\\n(?=\\S)", "<<<SPLIT>>>", "{_escape_r_string(clean_text)}", perl=TRUE), "<<<SPLIT>>>")[[1]]
+
+    for (line in lines) {{
+        line <- gsub("^#\\\\s+(.*)$", "\\\\1", line, perl=TRUE)
+        if (grepl("^##\\\\s+(.*)$", line, perl=TRUE)) {{
+            title <- gsub("^##\\\\s+(.*)$", "\\\\1", line, perl=TRUE)
+            cat("\\n")
+            plot.new()
+            text(0.5, 0.7, title, cex=2.2, family="{font_name}", font=2, adj=0)
+        }} else if (grepl("^###\\\\s+(.*)$", line, perl=TRUE)) {{
+            title <- gsub("^###\\\\s+(.*)$", "\\\\1", line, perl=TRUE)
+            cat("\\n")
+            plot.new()
+            text(0.5, 0.65, title, cex=1.6, family="{font_name}", font=2, adj=0)
+        }} else if (nzchar(trimws(line))) {{
+            if (grepl("^[-*]\\\\s+(.*)$", line, perl=TRUE)) {{
+                line <- paste0("  \\u2022 ", gsub("^[-*]\\\\s+(.*)$", "\\\\1", line, perl=TRUE))
+            }}
+            cat(line, "\\n", sep="")
+        }}
+    }}
+
+    dev.off()
+    cat("PDF_R_OK\\n")
+}}, error = function(e) {{
+    message("R Cairo PDF failed: ", e$message)
+    if (dev.cur() > 1) dev.off()
+}})
+"""
     try:
-        pypandoc.convert_text(
-            md_text,
-            "pdf",
-            format="md",
-            outputfile=str(pdf_path),
-            extra_args=[
-                "--standalone",
-                "--pdf-engine=xelatex",
-                "-V", "mainfont=PingFang SC", # macOS 常用
-            ],
+        with open(r_script_path, "w", encoding="utf-8") as f:
+            f.write(r_script)
+
+        result = subprocess.run(
+            ["Rscript", "--vanilla", "--quiet", r_script_path],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60
         )
-        return pdf_path
+
+        # 清理脚本
+        try:
+            os.remove(r_script_path)
+        except Exception:
+            pass
+
+        if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+            return pdf_path
+        else:
+            print(f"R PDF generation failed stdout: {result.stdout}, stderr: {result.stderr}")
+            return None
+
     except Exception as e:
-        print(f"Pandoc PDF conversion failed: {e}, falling back to ReportLab")
-        return _save_pdf_with_reportlab(md_text, base_name, workspace_dir)
+        print(f"R PDF generation error: {e}")
+        try:
+            os.remove(r_script_path)
+        except Exception:
+            pass
+        return None
+
+
+def _escape_r_string(s: str) -> str:
+    """转义字符串用于嵌入 R 脚本"""
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("$", "\\$")
 
 
 from typing import Optional
@@ -1205,62 +1451,142 @@ def _save_docx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     docx_path = uniquify_path(Path(workspace_dir) / f"{base_name}.docx")
     try:
+        from docx.oxml.ns import qn
+
         doc = Document()
+
+        # 确定中文字体路径
+        font_paths = [
+            os.path.join(FONT_DIR, "SimHei.ttf"),
+            os.path.join(FONT_DIR, "simkai.ttf"),
+            os.path.join(FONT_DIR, "simfang.ttf"),
+        ]
+        chinese_font_ttf = None
+        for fp in font_paths:
+            if os.path.exists(fp):
+                chinese_font_ttf = fp
+                break
+
+        # 设置文档默认字体（影响 Normal 和 Heading 样式）
+        style = doc.styles["Normal"]
+        if chinese_font_ttf:
+            # 设置西文字体（Calibri → 仍用，但通过 rFonts 指定中文回退）
+            style.font.name = "Calibri"
+            # 设置东亚字体为中文
+            rFonts = style._element.get_or_add_rPr().get_or_add_rFonts()
+            rFonts.set(qn("w:eastAsia"), "SimHei")
+        else:
+            style.font.name = "Arial"
+
+        # 设置 Heading 样式
+        for i in range(1, 4):
+            h_style = doc.styles[f"Heading {i}"]
+            if chinese_font_ttf:
+                h_style.font.name = "SimHei"
+                rFonts = h_style._element.get_or_add_rPr().get_or_add_rFonts()
+                rFonts.set(qn("w:eastAsia"), "SimHei")
+                h_style.font.bold = True
+            else:
+                h_style.font.name = "Arial"
+
         # 移除 Markdown 标记（简单处理）
         clean_text = re.sub(r"\\newpage", "", md_text)
         # 按换行分割
         for line in clean_text.splitlines():
             if line.startswith("# "):
-                doc.add_heading(line[2:], level=1)
+                p = doc.add_heading(line[2:], level=1)
             elif line.startswith("## "):
-                doc.add_heading(line[3:], level=2)
+                p = doc.add_heading(line[3:], level=2)
             elif line.startswith("### "):
-                doc.add_heading(line[4:], level=3)
+                p = doc.add_heading(line[4:], level=3)
             else:
-                doc.add_paragraph(line)
+                p = doc.add_paragraph(line)
+
+            # 确保段落中的每个 run 都使用中文字体
+            if chinese_font_ttf:
+                for run in p.runs:
+                    run.font.name = "SimHei"
+                    run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "SimHei")
+
         doc.save(docx_path)
+        print(f"DOCX generated with Chinese font support: {docx_path}")
         return docx_path
     except Exception as e:
         print(f"Error saving DOCX: {e}")
+        traceback.print_exc()
         return None
 
 def _save_pdf_with_reportlab(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
+    """使用 reportlab + simhei.ttf 生成中文 PDF（降级方案）"""
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     pdf_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pdf")
     try:
-        # 尝试注册中文字体
-        font_paths = [
-            "/System/Library/Fonts/STHeiti Light.ttc",
-            "/Library/Fonts/Arial Unicode.ttf",
-            os.path.join(FONT_DIR, "SimHei.ttf")
-        ]
-        font_name = "Helvetica"
-        for fp in font_paths:
-            if os.path.exists(fp):
-                try:
-                    pdfmetrics.registerFont(TTFont('ChineseFont', fp))
-                    font_name = 'ChineseFont'
-                    break
-                except:
-                    continue
+        # 字体路径优先级：assets/simhei.ttf（纯 TTF，非 TTC）
+        font_path, font_name = _find_chinese_font()
+        font_registered = False
+        if font_path and font_name != "Helvetica":
+            try:
+                pdfmetrics.registerFont(TTFont(font_name, font_path))
+                # 注册粗体（复用同一文件，reportlab 会自动处理粗体变体）
+                pdfmetrics.registerFont(TTFont(font_name + "-Bold", font_path))
+                font_registered = True
+                print(f"ReportLab registered Chinese font: {font_path} as {font_name}")
+            except Exception as e:
+                print(f"ReportLab font register error: {e}")
+
+        if not font_registered:
+            font_name = "Helvetica"
 
         doc = SimpleDocTemplate(str(pdf_path))
         styles = getSampleStyleSheet()
-        if font_name == 'ChineseFont':
-            styles['Normal'].fontName = 'ChineseFont'
-            styles['Heading1'].fontName = 'ChineseFont'
+        if font_registered:
+            styles["Normal"].fontName = font_name
+            styles["Heading1"].fontName = font_name + "-Bold"
+            styles["Heading2"].fontName = font_name + "-Bold"
+            styles["Heading3"].fontName = font_name + "-Bold"
+            styles["Normal"].fontSize = 11
+            styles["Heading1"].fontSize = 22
+            styles["Heading1"].leading = 26
+            styles["Heading2"].fontSize = 16
+            styles["Heading2"].leading = 20
+            styles["Heading3"].fontSize = 13
+            styles["Heading3"].leading = 16
+        else:
+            styles["Normal"].fontSize = 11
+            styles["Heading1"].fontSize = 22
+            styles["Heading1"].leading = 26
 
         story = []
         clean_text = re.sub(r"\\newpage", "", md_text)
         for line in clean_text.splitlines():
-            if line.strip():
-                if line.startswith("# "):
-                    story.append(Paragraph(line[2:], styles['Heading1']))
-                else:
-                    story.append(Paragraph(line, styles['Normal']))
-                story.append(Spacer(1, 12))
+            stripped = line.strip()
+            if not stripped:
+                story.append(Spacer(1, 8))
+                continue
+            if stripped.startswith("# "):
+                story.append(Paragraph(stripped[2:], styles["Heading1"]))
+                story.append(Spacer(1, 6))
+            elif stripped.startswith("## "):
+                story.append(Paragraph(stripped[3:], styles["Heading2"]))
+                story.append(Spacer(1, 4))
+            elif stripped.startswith("### "):
+                story.append(Paragraph(stripped[4:], styles["Heading3"]))
+                story.append(Spacer(1, 4))
+            else:
+                # 处理列表项
+                if stripped.startswith("- "):
+                    stripped = "\u2022 " + stripped[2:]
+                story.append(Paragraph(stripped, styles["Normal"]))
+                story.append(Spacer(1, 4))
 
         doc.build(story)
+        print(f"PDF generated with ReportLab: {pdf_path}")
+        return pdf_path
+    except Exception as e:
+        print(f"Error saving PDF with ReportLab: {e}")
+        traceback.print_exc()
+        return None
+        print(f"PDF generated with ReportLab: {pdf_path}")
         return pdf_path
     except Exception as e:
         print(f"Error saving PDF with ReportLab: {e}")
@@ -1317,12 +1643,29 @@ async def export_report(body: dict = Body(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/users/list")
+async def list_users():
+    """获取已注册用户列表（仅返回用户名）"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT username FROM users ORDER BY username ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        return {"users": [row["username"] for row in rows]}
+    except Exception as e:
+        print(f"List users error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/projects/save")
 async def save_project(
     username: str = Form(...),
     session_id: str = Form(...),
     name: str = Form(...),
-    messages: str = Form(...)
+    messages: str = Form(...),
+    files_data: str = Form("{}")
 ):
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -1330,19 +1673,37 @@ async def save_project(
         cursor = conn.cursor()
 
         # Check if project name already exists for this user to support "overwrite" logic
-        cursor.execute("SELECT id FROM projects WHERE username = ? AND name = ?", (username, name))
+        cursor.execute("SELECT id, session_id FROM projects WHERE username = ? AND name = ?", (username, name))
         existing = cursor.fetchone()
+
+        # Build workspace snapshot: list all files in the user's workspace directory
+        workspace_dir = get_session_workspace(session_id, username)
+        files_snapshot = []
+        if os.path.exists(workspace_dir):
+            for root, dirs, files in os.walk(workspace_dir):
+                for fname in files:
+                    if fname.startswith("."):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    rel_path = os.path.relpath(fpath, workspace_dir)
+                    files_snapshot.append({
+                        "name": fname,
+                        "path": rel_path,
+                        "size": os.path.getsize(fpath)
+                    })
+
+        files_json = json.dumps(files_snapshot)
 
         if existing:
             cursor.execute(
-                "UPDATE projects SET session_id = ?, messages = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (session_id, messages, existing["id"])
+                "UPDATE projects SET session_id = ?, messages = ?, files_data = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (session_id, messages, files_json, existing["id"])
             )
             project_id = existing["id"]
         else:
             cursor.execute(
-                "INSERT INTO projects (username, session_id, name, messages) VALUES (?, ?, ?, ?)",
-                (username, session_id, name, messages)
+                "INSERT INTO projects (username, session_id, name, messages, files_data) VALUES (?, ?, ?, ?, ?)",
+                (username, session_id, name, messages, files_json)
             )
             project_id = cursor.lastrowid
 
@@ -1373,18 +1734,73 @@ async def list_projects(username: str = Query(...)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/projects/check-name")
+async def check_project_name(username: str = Query(...), name: str = Query(...)):
+    """检查项目名称是否已存在"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM projects WHERE username = ? AND name = ?", (username, name))
+        row = cursor.fetchone()
+        conn.close()
+        return {"exists": row is not None, "project_id": row["id"] if row else None}
+    except Exception as e:
+        print(f"Check project name error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/projects/restore-files")
+async def restore_project_files(project_id: int = Query(...)):
+    """获取指定项目的文件列表及其下载链接，供前端恢复文件"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT session_id, username, files_data FROM projects WHERE id = ?", (project_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        files_data = json.loads(row["files_data"]) if row["files_data"] else []
+        result_files = []
+        for f in files_data:
+            rel_path = f.get("path", "")
+            # 构建源文件的下载 URL（文件服务器在 8100 端口）
+            download_url = build_download_url(f"{row['username']}/{row['session_id']}/{rel_path}")
+            result_files.append({
+                "name": f.get("name", ""),
+                "path": rel_path,
+                "size": f.get("size", 0),
+                "download_url": download_url,
+            })
+        return {"files": result_files}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Restore project files error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/projects/load")
 async def load_project(project_id: int = Query(...)):
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT session_id, messages FROM projects WHERE id = ?", (project_id,))
+        cursor.execute("SELECT session_id, messages, files_data FROM projects WHERE id = ?", (project_id,))
         row = cursor.fetchone()
         conn.close()
         if not row:
             raise HTTPException(status_code=404, detail="Project not found")
-        return {"session_id": row["session_id"], "messages": json.loads(row["messages"])}
+        return {
+            "session_id": row["session_id"],
+            "messages": json.loads(row["messages"]),
+            "files_data": json.loads(row["files_data"]) if row["files_data"] else []
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Load project error: {e}")
         traceback.print_exc()

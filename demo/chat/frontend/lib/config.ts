@@ -39,6 +39,11 @@ export const API_CONFIG = {
     PROJECTS_LIST: "/api/projects/list",
     PROJECTS_LOAD: "/api/projects/load",
     PROJECTS_DELETE: "/api/projects/delete",
+    PROJECTS_CHECK_NAME: "/api/projects/check-name",
+    PROJECTS_RESTORE_FILES: "/api/projects/restore-files",
+
+    // 用户管理
+    USERS_LIST: "/api/users/list",
 
     // 代码执行
     EXECUTE_CODE: "/execute",
@@ -80,6 +85,11 @@ export const API_URLS = {
   PROJECTS_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_LIST),
   PROJECTS_LOAD: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_LOAD),
   PROJECTS_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_DELETE),
+  PROJECTS_CHECK_NAME: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_CHECK_NAME),
+  PROJECTS_RESTORE_FILES: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_RESTORE_FILES),
+
+  // 用户管理
+  USERS_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.USERS_LIST),
 
   // AI服务
   CHAT_COMPLETIONS: buildApiUrl(API_CONFIG.ENDPOINTS.CHAT_COMPLETIONS),

@@ -114,6 +114,7 @@ type WorkspaceNode = {
   download_url?: string;
   children?: WorkspaceNode[];
   is_generated?: boolean; // 标识是否为代码生成的文件或文件夹
+  is_converted?: boolean; // 标识是否为 UTF-8 编码转换后的文件
 };
 
 interface AnalysisSection {
@@ -393,6 +394,8 @@ export function ThreePanelInterface() {
   const [inputValue, setInputValue] = useState("");
   const [historyInputs, setHistoryInputs] = useState<string[]>([]);
   const [isTyping, setIsTyping] = useState(false);
+  // 抑制轮询刷新的计数器（>0 时轮询不更新状态）
+  const suppressWorkspaceRefreshCount = useRef(0);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
   const [workspaceTree, setWorkspaceTree] = useState<WorkspaceNode | null>(
@@ -418,10 +421,14 @@ export function ThreePanelInterface() {
   const [isLoginMode, setIsLoginMode] = useState(true);
   const [authUsername, setAuthUsername] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [registeredUsers, setRegisteredUsers] = useState<string[]>([]);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [showProjectManager, setShowProjectManager] = useState(false);
   const [userProjects, setUserProjects] = useState<any[]>([]);
+  // 保存确认弹窗状态（同名项目覆盖确认）
+  const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
+  const [pendingSaveData, setPendingSaveData] = useState<any>(null);
 
   // 预览弹窗状态
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -589,7 +596,7 @@ export function ThreePanelInterface() {
     toast({ description: "已退出登录" });
   };
 
-  const saveProject = async () => {
+  const saveProject = async (confirmed = false) => {
     if (!isLoggedIn) {
       setShowAuthModal(true);
       return;
@@ -599,13 +606,32 @@ export function ThreePanelInterface() {
       return;
     }
 
+    // 如果未确认且不是新建项目，先检查是否存在同名项目
+    if (!confirmed) {
+      try {
+        const checkRes = await fetch(
+          `${API_URLS.PROJECTS_CHECK_NAME}?username=${encodeURIComponent(currentUser!)}&name=${encodeURIComponent(projectName)}`
+        );
+        if (checkRes.ok) {
+          const checkData = await checkRes.json();
+          if (checkData.exists) {
+            // 存在同名项目，弹出确认覆盖对话框
+            setPendingSaveData({ confirmed: true });
+            setSaveConfirmOpen(true);
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn("Check project name failed, proceeding with save", e);
+      }
+    }
+
     try {
       const formData = new FormData();
       formData.append("username", currentUser!);
       formData.append("session_id", sessionId);
       formData.append("name", projectName);
       formData.append("messages", JSON.stringify(messages));
-
       const res = await fetch(API_URLS.PROJECTS_SAVE, {
         method: "POST",
         body: formData,
@@ -615,6 +641,7 @@ export function ThreePanelInterface() {
       toast({ description: "项目已保存" });
       setShowSaveDialog(false);
       setProjectName("");
+      setPendingSaveData(null);
     } catch (e) {
       toast({ description: "保存失败", variant: "destructive" });
     }
@@ -639,33 +666,84 @@ export function ThreePanelInterface() {
       if (!res.ok) throw new Error("加载失败");
       const data = await res.json();
 
-      // 1. 设置会话 ID 和消息记录
-      setSessionId(data.session_id);
-      localStorage.setItem("sessionId", data.session_id);
+      // 1. 立即获取项目的文件下载链接（在清空工作区之前）
+      const restoreRes = await fetch(`${API_URLS.PROJECTS_RESTORE_FILES}?project_id=${projectId}`);
+      let filesToRestore: Array<{name: string; download_url: string}> = [];
+      if (restoreRes.ok) {
+        const restoreData = await restoreRes.json();
+        filesToRestore = restoreData.files || [];
+      }
+
+      // 2. 清空当前工作区（仅清空当前 session，不影响已保存项目文件）
+      suppressWorkspaceRefreshCount.current += 1;
+      try {
+        await fetch(`${API_URLS.WORKSPACE_CLEAR}?session_id=${sessionId}&username=${currentUser || "default"}`, {
+          method: "DELETE",
+        });
+      } catch (e) {
+        console.warn("Failed to clear workspace before load", e);
+      } finally {
+        suppressWorkspaceRefreshCount.current -= 1;
+      }
+
+      // 3. 设置会话 ID 和消息记录
+      const newSessionId = data.session_id;
+      setSessionId(newSessionId);
+      localStorage.setItem("sessionId", newSessionId);
 
       const restoredMessages = data.messages.map((m: any) => ({
         ...m,
         timestamp: new Date(m.timestamp)
       }));
       setMessages(restoredMessages);
-
-      // 2. 同步到本地缓存，确保刷新不丢失
       localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(restoredMessages));
 
-      // 3. 关闭弹窗并刷新文件列表
+      // 4. 关闭弹窗并刷新文件列表（此时工作区为空）
       setShowProjectManager(false);
 
-      // 4. 设置项目名称
+      // 5. 设置项目名称
       const proj = userProjects.find(p => p.id === projectId);
       if (proj) setProjectName(proj.name);
 
-      toast({ description: "项目已加载" });
+      toast({ description: "正在恢复项目文件..." });
 
-      // 延迟触发文件刷新，确保 sessionId 已更新
-      setTimeout(() => {
+      // 6. 恢复工作区文件：从已保存的项目中重新上传
+      const uploadFiles = async () => {
+        if (filesToRestore.length === 0) {
+          loadWorkspaceFiles();
+          loadWorkspaceTree();
+          toast({ description: "项目已加载" });
+          return;
+        }
+
+        for (const fileInfo of filesToRestore) {
+          try {
+            const fileRes = await fetch(fileInfo.download_url);
+            if (fileRes.ok) {
+              const blob = await fileRes.blob();
+              const file = new File([blob], fileInfo.name, { type: "application/octet-stream" });
+              const uploadForm = new FormData();
+              uploadForm.append("files", file);
+
+              await fetch(`${API_URLS.WORKSPACE_UPLOAD}?session_id=${newSessionId}&username=${currentUser || "default"}`, {
+                method: "POST",
+                body: uploadForm,
+              });
+            }
+          } catch (e) {
+            console.warn(`Failed to restore file: ${fileInfo.name}`, e);
+          }
+        }
+
         loadWorkspaceFiles();
         loadWorkspaceTree();
-      }, 100);
+        toast({ description: `项目已加载（${filesToRestore.length} 个文件已恢复）` });
+      };
+
+      // 延迟触发文件上传恢复，等待清空完成
+      setTimeout(() => {
+        uploadFiles();
+      }, 300);
 
     } catch (e) {
       toast({ description: "加载失败", variant: "destructive" });
@@ -958,39 +1036,45 @@ export function ThreePanelInterface() {
       return;
     }
 
-    // 1. 清空当前工作区文件 (发送 DELETE 请求)
+    // 1. 抑制轮询 + 清空当前工作区文件 (发送 DELETE 请求)
+    suppressWorkspaceRefreshCount.current += 1;
     try {
       await fetch(`${API_URLS.WORKSPACE_CLEAR}?session_id=${sessionId}&username=${currentUser || "default"}`, {
         method: "DELETE",
       });
     } catch (e) {
       console.warn("Failed to clear workspace for new session", e);
+    } finally {
+      suppressWorkspaceRefreshCount.current -= 1;
     }
 
-    // 2. 生成新 Session ID
-    const newSid = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    localStorage.setItem("sessionId", newSid);
-    setSessionId(newSid);
-
-    // 3. 重置聊天历史
-    const welcome: Message = {
-      id: `welcome-${Date.now()}`,
-      content: "您好！我是 DeepAnalyze。我是一位精通 Python 与 R 语言的双重分析专家，专门从事中国海关风险管理与风险防控。\n\n我将为您深入分析进出口业务数据，运用统计学与逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
-      sender: "ai",
-      timestamp: new Date(),
-      localOnly: true,
-    };
-    setMessages([welcome]);
-    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify([welcome]));
-
-    // 4. 重置 UI 状态
-    setAttachments([]);
-    setHistoryInputs([]);
+    // 2. 重置 UI 状态（在设置新 sessionId 之前，防止轮询干扰）
     setWorkspaceFiles([]);
     setWorkspaceTree(null);
+    setAttachments([]);
+    setHistoryInputs([]);
     setCollapsedSections({});
     setManualLocks({});
     setProjectName("");
+    // 清空聊天区域、输入框、代码编辑器
+    setMessages([
+      {
+        id: `welcome-${Date.now()}`,
+        content: "您好！我是 DeepAnalyze。我是一位精通 Python 与 R 语言的双重分析专家，专门从事中国海关风险管理与风险防控。\n\n我将为您深入分析进出口业务数据，运用统计学与逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
+        sender: "ai",
+        timestamp: new Date(),
+        localOnly: true,
+      },
+    ]);
+    localStorage.removeItem(CHAT_STORAGE_KEY);
+    setInputValue("");
+    setCodeEditorContent("");
+    setActiveSection("");
+
+    // 3. 生成新 Session ID（这会触发 useEffect 加载新工作区，但新工作区是空的）
+    const newSid = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    localStorage.setItem("sessionId", newSid);
+    setSessionId(newSid);
 
     toast({ description: "已开启全新分析会话" });
   };
@@ -1001,6 +1085,27 @@ export function ThreePanelInterface() {
       loadWorkspaceTree();
     }
   }, [sessionId]);
+
+  // 页面加载时：获取已注册用户列表 & 弹出登录对话框
+  useEffect(() => {
+    const loadRegisteredUsers = async () => {
+      try {
+        const res = await fetch(API_URLS.USERS_LIST);
+        if (res.ok) {
+          const data = await res.json();
+          setRegisteredUsers(data.users || []);
+        }
+      } catch (e) {
+        console.warn("Failed to load registered users", e);
+      }
+    };
+    loadRegisteredUsers();
+    // 未登录时弹出登录对话框（仅在首次加载时）
+    if (!isLoggedIn) {
+      setShowAuthModal(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // 仅在挂载时执行一次
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -1038,6 +1143,7 @@ export function ThreePanelInterface() {
 
   const loadWorkspaceFiles = async () => {
     if (!sessionId) return;
+    if (suppressWorkspaceRefreshCount.current > 0) return;
     try {
       const response = await fetch(
         `${API_URLS.WORKSPACE_FILES}?session_id=${sessionId}&username=${currentUser || "default"}`
@@ -1053,6 +1159,7 @@ export function ThreePanelInterface() {
 
   const loadWorkspaceTree = async () => {
     if (!sessionId) return;
+    if (suppressWorkspaceRefreshCount.current > 0) return;
     try {
       const res = await fetch(
         `${API_URLS.WORKSPACE_TREE}?session_id=${sessionId}&username=${currentUser || "default"}`
@@ -1096,6 +1203,7 @@ export function ThreePanelInterface() {
     setExpanded((prev) => ({ ...prev, [p]: !prev[p] }));
 
   const deleteFile = async (p: string) => {
+    suppressWorkspaceRefreshCount.current += 1;
     try {
       const url = `${API_URLS.WORKSPACE_DELETE_FILE}?path=${encodeURIComponent(
         p
@@ -1107,10 +1215,13 @@ export function ThreePanelInterface() {
       }
     } catch (e) {
       console.error("delete file error", e);
+    } finally {
+      suppressWorkspaceRefreshCount.current -= 1;
     }
   };
 
   const deleteDir = async (p: string) => {
+    suppressWorkspaceRefreshCount.current += 1;
     try {
       const url = `${API_URLS.WORKSPACE_DELETE_DIR}?path=${encodeURIComponent(
         p
@@ -1122,6 +1233,8 @@ export function ThreePanelInterface() {
       }
     } catch (e) {
       console.error("delete dir error", e);
+    } finally {
+      suppressWorkspaceRefreshCount.current -= 1;
     }
   };
 
@@ -1204,6 +1317,7 @@ export function ThreePanelInterface() {
     size?: number;
     children?: ArborNode[];
     isGenerated?: boolean; // 标识是否为代码生成的文件
+    isConverted?: boolean; // 标识是否为 UTF-8 编码转换后的文件
   };
 
   const toArbor = (node: WorkspaceNode): ArborNode => ({
@@ -1215,6 +1329,7 @@ export function ThreePanelInterface() {
     extension: node.extension,
     size: node.size,
     isGenerated: node.is_generated,
+    isConverted: node.is_converted,
     children: node.children?.map(toArbor),
   });
 
@@ -1404,12 +1519,22 @@ export function ThreePanelInterface() {
   const renderTree = (node: WorkspaceNode, depth = 0) => {
     const isDir = node.is_dir;
     const isGenerated = node.is_generated || false;
+    const isConverted = node.is_converted || false;
     const isGeneratedFolder = isDir && node.name === "generated" && depth === 1;
+    const isConvertedFolder = isDir && node.name === "converted" && depth === 1;
     const pad = { paddingLeft: `${8 + depth * 14}px` } as React.CSSProperties;
 
     return (
       <div key={node.path || "root"}>
-        {/* Generated 文件夹上方添加分隔线 */}
+        {/* Converted (UTF-8) 分隔线 */}
+        {isConvertedFolder && (
+          <div className="mb-2 mt-2 ml-2 border-t-2 border-green-200 dark:border-green-800 relative">
+            <div className="absolute -top-2.5 left-2 bg-white dark:bg-gray-950 px-2 text-[10px] text-green-600 dark:text-green-400 font-medium">
+              编码自动转换
+            </div>
+          </div>
+        )}
+        {/* Generated 分隔线 */}
         {isGeneratedFolder && (
           <div className="mb-2 mt-2 ml-2 border-t-2 border-purple-200 dark:border-purple-800 relative">
             <div className="absolute -top-2.5 left-2 bg-white dark:bg-gray-950 px-2 text-[10px] text-purple-600 dark:text-purple-400 font-medium">
@@ -1418,8 +1543,7 @@ export function ThreePanelInterface() {
           </div>
         )}
         <div
-          className={`flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2 py-1 cursor-default ${isGenerated ? "bg-purple-50 dark:bg-purple-950/20" : ""
-            }`}
+          className={`flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2 py-1 cursor-default ${isGenerated ? "bg-purple-50 dark:bg-purple-950/20" : isConverted ? "bg-green-50 dark:bg-green-950/20" : ""}`}
           style={pad}
           onClick={(e) => {
             if (isDir) return toggleExpand(node.path);
@@ -1486,6 +1610,8 @@ export function ThreePanelInterface() {
                   className={
                     isGenerated
                       ? "text-purple-600 dark:text-purple-400"
+                      : isConverted
+                      ? "text-green-600 dark:text-green-400"
                       : "text-gray-500"
                   }
                 >
@@ -1495,16 +1621,20 @@ export function ThreePanelInterface() {
                   <Code2
                     className={`h-3.5 w-3.5 ${isGenerated
                       ? "text-purple-600 dark:text-purple-400"
+                      : isConverted
+                      ? "text-green-600 dark:text-green-400"
                       : "text-gray-500"
                       }`}
                   />
+                ) : isConverted ? (
+                  <FileText className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />
                 ) : (
                   <FolderOpen className="h-3.5 w-3.5 text-gray-500" />
                 )}
               </>
             ) : (
               <span
-                className={isGenerated ? "text-purple-400" : "text-gray-400"}
+                className={isGenerated ? "text-purple-400" : isConverted ? "text-green-400" : "text-gray-400"}
               >
                 •
               </span>
@@ -1512,10 +1642,12 @@ export function ThreePanelInterface() {
             <span
               className={`truncate ${isGenerated
                 ? "text-purple-700 dark:text-purple-300 font-medium"
+                : isConverted
+                ? "text-green-700 dark:text-green-300"
                 : ""
                 }`}
             >
-              {node.icon && !isGenerated ? `${node.icon} ` : ""}
+              {node.icon && !isGenerated && !isConverted ? `${node.icon} ` : ""}
               {node.name || "workspace"}
             </span>
             {!isDir && typeof node.size === "number" && (
@@ -1538,6 +1670,7 @@ export function ThreePanelInterface() {
 
   const clearWorkspace = async () => {
     if (!sessionId) return;
+    suppressWorkspaceRefreshCount.current += 1;
     try {
       const response = await fetch(
         `${API_URLS.WORKSPACE_CLEAR}?session_id=${sessionId}&username=${currentUser || "default"}`,
@@ -1559,6 +1692,8 @@ export function ThreePanelInterface() {
         description: "清空失败",
         variant: "destructive",
       });
+    } finally {
+      suppressWorkspaceRefreshCount.current -= 1;
     }
   };
 
@@ -4002,11 +4137,35 @@ export function ThreePanelInterface() {
             <DialogTitle>{isLoginMode ? "用户登录" : "用户注册"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-4">
+            {/* 已注册用户快捷选择 */}
+            {registeredUsers.length > 0 && (
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                  {isLoginMode ? "已注册用户（点击快速登录）" : "已注册用户"}
+                </label>
+                <div className="flex flex-wrap gap-2 max-h-[100px] overflow-y-auto">
+                  {registeredUsers.map((u) => (
+                    <button
+                      key={u}
+                      onClick={() => setAuthUsername(u)}
+                      className={`px-3 py-1.5 text-xs rounded-full border transition-colors ${
+                        authUsername === u
+                          ? "bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-900 dark:border-blue-600 dark:text-blue-200"
+                          : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-blue-50 hover:border-blue-200 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-blue-900/30"
+                      }`}
+                    >
+                      {u}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="space-y-2">
               <label className="text-sm font-medium">用户名</label>
               <Input
                 value={authUsername}
                 onChange={(e) => setAuthUsername(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleAuth(); }}
                 placeholder="请输入用户名"
               />
             </div>
@@ -4016,6 +4175,7 @@ export function ThreePanelInterface() {
                 type="password"
                 value={authPassword}
                 onChange={(e) => setAuthPassword(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleAuth(); }}
                 placeholder={isLoginMode ? "请输入密码" : "最少 8 位密码"}
               />
             </div>
@@ -4070,12 +4230,41 @@ export function ThreePanelInterface() {
             <div className="text-[10px] text-gray-500 italic bg-amber-50 dark:bg-amber-950/20 p-2 rounded">
               提示：保存操作将同时记录当前的聊天历史、上传的数据文件以及生成的分析结果。
             </div>
-            <Button className="w-full" onClick={saveProject}>
+            <Button className="w-full" onClick={() => saveProject(false)}>
               确认保存
             </Button>
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 保存项目同名覆盖确认弹窗 */}
+      <AlertDialog open={saveConfirmOpen} onOpenChange={setSaveConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>项目名称已存在</AlertDialogTitle>
+            <AlertDialogDescription>
+              项目中已存在名称为「{projectName}」的分析项目。覆盖将永久替换原项目内容，是否确认覆盖？
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => {
+              setSaveConfirmOpen(false);
+              setPendingSaveData(null);
+            }}>
+              取消
+            </AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-amber-600 hover:bg-amber-700"
+              onClick={() => {
+                setSaveConfirmOpen(false);
+                saveProject(true); // confirmed = true，直接覆盖保存
+              }}
+            >
+              确认覆盖
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* 项目中心弹窗 */}
       <Dialog open={showProjectManager} onOpenChange={setShowProjectManager}>
