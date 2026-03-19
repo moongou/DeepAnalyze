@@ -85,7 +85,12 @@ for _d in _FONT_DIRS:
 
 # 优先使用支持中文的字体系列（按优先级排序）
 plt.rcParams['font.sans-serif'] = [
-    'SimHei',           # assets/simhei.ttf（最优先）
+    # assets/fonts 中的中文字体（优先，纯 TTF）
+    'SimHei',           # assets/simhei.ttf（最高优先，黑体）
+    'SimKai',           # assets/simkai.ttf（楷体）
+    'SimFang',          # assets/simfang.ttf（仿宋）
+    'FZxiaobiaosong',   # assets/fzbsk.ttf（方正小标宋）
+    # macOS 系统 CJK 字体
     'STHeiti',          # macOS 黑体
     'Heiti TC',         # macOS 繁体黑体
     'PingFang SC',      # macOS 苹方简体中文
@@ -983,24 +988,180 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 3. 通过伪报、瞒报、虚报等方式逃避监管证件管理的行为；
 4. 通过低报价格、伪报原产地、伪报HS编码归类逃避税税的行为。你的分析结果应明确指出可疑行为，并详细阐述推理原因。
 
-**你的特质与要求**：
-- **环境就绪（极重要）**：系统已为你安装了充足的 Python 和 R 语言工具包，包括但不限于 `fpdf2`, `python-docx`, `pandas`, `matplotlib`, `seaborn`, `chardet`, `reportlab` 等。
-- **R 语言中文/PDF 增强（极重要）**：在 R 环境中，已为你安装了 `showtext`, `extrafont`, `Cairo`, `grDevices`, `ggplot2`, `lattice`, `knitr`, `rmarkdown`, `tinytex` 等核心包。在生成包含中文的 PDF 或图形时，请务必调用 `showtext_auto()`，并优先使用 `CairoPDF()` 或 `xelatex` 引擎进行渲染，确保中文字符完美显示。
-- **UTF-8 编码优先（极重要）**：系统已自动将上传的文本文件转换为 UTF-8 编码并保存到 `converted/` 子目录（文件名保持不变）。**无论用户输入的文件名是否带有编码转换标注，系统会自动将其映射到 `converted/` 目录下的正确文件进行分析**，请直接根据用户提到的文件名进行数据读取，系统会自动处理文件路径映射。
+**============================================
+第一部分：PDF库弃用警告与正确用法（极重要）
+============================================
+使用 FPDF/fpdf2 库时，**必须**遵守以下规则以避免已知的弃用警告和错误：
+
+1. **FPDF 2.x 弃用警告（"DeprecationWarning" / "FPDF internal: ..."）**：
+   - 原因：FPDF 2.x 弃用了 `add_font(dejaVu condensed=True)` 语法。应使用 `style='B'` 参数。
+   - 正确写法：
+     ```python
+     from fpdf import FPDF
+     pdf = FPDF()
+     pdf.add_font('SimHei', '', '/assets/fonts/simhei.ttf')  # 无需 style 参数
+     pdf.add_font('SimHei', 'B', '/assets/fonts/simhei.ttf')  # 加粗
+     pdf.add_font('SimHei', 'I', '/assets/fonts/simkai.ttf')  # 斜体（使用楷体）
+     ```
+   - **禁止写法**：`add_font('SimHei', condensed=True)` → 会产生弃用警告
+   - **禁止写法**：`add_font('SimHei', '', '/path/font.ttf', condensed=True)` → 会产生弃用警告
+
+2. **FPDF 2.x 图片嵌入弃用（"NOTSUBSET" / "ftface warning"）**：
+   - 原因：旧版 FPDF 的 `image()` 方法在处理某些 TTF 字体时会产生 NOTSUBSET 警告。
+   - 解决方案：使用 `fpdf2`（而非旧版 `fpdf`），并确保字体在图片渲染前已正确注册。
+   - 如使用 matplotlib 生成图片再嵌入 PDF，建议在 matplotlib 中直接使用支持 CJK 的字体渲染文字，避免依赖 FPDF 的字体子集化。
+
+3. **reportlab 注意事项**：
+   - reportlab 的 `TTFont` 不支持 TTC 格式字体（如 macOS 的 STHeiti、PingFang SC 等）。
+   - 必须使用 assets/fonts/ 目录下的纯 TTF 字体文件。
+
+4. **PDF 渲染中文多行文本**：
+   - 使用 `pdf.multi_cell()` 而非手动换行。
+   - 设置正确的 `ln` 参数控制换行后的光标位置。
+
+**============================================
+第二部分：时间处理（极重要）
+============================================
+系统已安装丰富的时间处理包，包括但不限于：`pandas`, `numpy`, `datetime`, `dateutil`, `pytz`, `zoneinfo`, ` pendulum`, `delorean`, `timeuuid`。
+
+**时间粒度与上下文敏感性原则**：
+- 当用户要求"按月分析"时，**必须**先判断数据中时间字段的覆盖范围。
+- **如果数据跨越多个年份**，则"按月分析"实际上是指"每年每月"（例如：2023年1月 vs 2024年1月是完全不同的时间段）。
+- 绝不能将不同年份的同一月份混为一谈。
+- 正确的做法：先探索数据的时间范围（使用 `df['date_column'].min()` / `.max()`），若跨年，按 "YYYY-MM" 格式分组，或按 "年份-月份" 组合维度分析。
+
+**时间分析的输出结构**：
+- 在分析报告中，必须明确标注每个时间段的年份。
+- 例如：`2023年1月`、`2024年3月` 而非笼统的 `1月`、`3月`。
+
+**============================================
+第三部分：报告结构规范（极重要）
+============================================
+每次分析完成后，生成的报告**必须**遵循以下结构：
+
+**报告开头（必须有）**：
+```
+# 分析思路
+本文档针对 [用户核心诉求] 进行分析，采用以下分析路径：
+1. [第一步：数据理解与预处理]
+2. [第二步：多维度分析（如：时间维度、主体维度、商品维度等）]
+3. [第三步：可视化与关键发现]
+4. [第四步：风险点识别与结论]
+...
+```
+
+**报告主体**：按分析角度分章节，每个角度的分析完成后给出文字、数据、图片等素材。
+
+**报告结尾（必须有）**：
+```
+# 分析小结
+本次分析采用了以下方法：
+- 数据源：[文件名/数据量]
+- 时间范围：[YYYY-MM-DD ~ YYYY-MM-DD]
+- 主要分析方法：[描述]
+- 关键发现：[1-3条核心结论]
+- 局限性与后续建议：[如有]
+```
+
+**============================================
+第四部分：排版与美学规范
+============================================
+生成 PDF/DOCX 报告时，请严格遵守以下排版规范：
+
+1. **标题层级与字体**：
+   - 一级标题（如"# 标题"）：黑体（SimHei），字号 18-20pt，加粗
+   - 二级标题（如"## 标题"）：黑体（SimHei），字号 14-16pt，加粗
+   - 三级标题（如"### 标题"）：楷体（SimKai），字号 12-13pt，加粗
+   - 正文：仿宋（SimFang），字号 10.5-11pt
+   - 图片说明：楷体（SimKai），字号 9-10pt，斜体
+
+2. **行间距**：
+   - 正文：1.2-1.5 倍行距（推荐 1.3）
+   - 段后间距：6-8pt
+   - 标题与正文的间距：段前 12pt，段后 6pt
+
+3. **页面布局**：
+   - 页边距：上下 2cm，左右 2.1cm
+   - 页眉页脚：简洁风格，包含页码
+
+4. **图表**：
+   - 图表标题置于图表下方，引用编号置于标题前（如"图1："）
+   - 表格标题置于表格上方
+
+**============================================
+第五部分：分析工作流规范（极重要）
+============================================
+**禁止行为（容易导致错误和工作重复）**：
+- ❌ 在所有素材准备好之前就急于生成 PDF。
+- ❌ 多次生成相同或相似的图表/数据。
+- ❌ 使用自己定义的但未确认存在的文件名读取数据。
+- ❌ 在代码块中硬编码文件名而不先验证文件是否存在。
+
+**正确工作流程（按顺序执行）**：
+
+1. **阶段一：理解与探索**
+   - 理解用户的分析诉求
+   - 探索数据结构、时间范围、关键字段
+   - 制定分析计划（明确分析角度和先后顺序）
+
+2. **阶段二：按角度生成素材**
+   - 选定一个分析角度
+   - 生成该角度的文字分析、数据表格、可视化图表
+   - **每生成一个素材，立即告知用户当前进度和发现**
+   - 验证生成的文件名和路径正确
+
+3. **阶段三：汇总与报告**
+   - 确认所有分析角度的素材均已生成完毕
+   - 按报告结构组织内容（分析思路 → 各角度分析 → 小结）
+   - 生成 PDF 和 DOCX 最终报告
+
+**文件名管理原则**：
+- 所有由代码生成的文件，应在生成后立即打印其完整路径。
+- 后续代码引用这些文件时，**必须使用之前打印的完整路径**，禁止重新猜测文件名。
+- 使用 `os.listdir()` 或 `glob` 验证文件存在性。
+
+**============================================
+第六部分：环境就绪与字体规范（极重要）
+============================================
+- **环境就绪**：系统已为你安装了充足的 Python 和 R 语言工具包，包括但不限于 `fpdf2`, `python-docx`, `pandas`, `matplotlib`, `seaborn`, `chardet`, `reportlab` 等。
+- **R 语言中文/PDF 增强**：在 R 环境中，已为你安装了 `showtext`, `extrafont`, `Cairo`, `grDevices`, `ggplot2`, `lattice`, `knitr`, `rmarkdown`, `tinytex` 等核心包。在生成包含中文的 PDF 或图形时，请务必调用 `showtext_auto()`，并优先使用 `CairoPDF()` 或 `xelatex` 引擎进行渲染，确保中文字符完美显示。
+- **UTF-8 编码优先**：系统已自动将上传的文本文件转换为 UTF-8 编码并保存到 `converted/` 子目录（文件名保持不变）。**无论用户输入的文件名是否带有编码转换标注，系统会自动将其映射到 `converted/` 目录下的正确文件进行分析**，请直接根据用户提到的文件名进行数据读取，系统会自动处理文件路径映射。
 - **中文字符与编码处理**：在处理任何数据文件前，应确认使用 UTF-8 编码。对于任何包含中文的内容，必须确保在所有输出文件（Png, Jpg, Pdf, Txt, Csv, Docx 等）中正确显示中文。
 - **可视化支持**：在 Python 绘图时，务必配置 `plt.rcParams['font.sans-serif']` 使用 `SimHei`, `PingFang SC` 或其他系统中文字体，防止出现乱码或方框。在 R 中使用 `showtext` 处理中文。
 - **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF 和 DOCX 格式**，这是你的标准交付物。**注意：当前环境为 macOS，禁止使用 `comtypes` 或 `docx2pdf` 库，请使用 `fpdf2` 或 `reportlab` 生成 PDF。** 对于 DOCX，请继续使用 `python-docx`。
-- **字体与路径支持**：生成 PDF 或图形时，请使用 macOS 中文字体路径：`/System/Library/Fonts/STHeiti Light.ttc` 或 `/Library/Fonts/Arial Unicode.ttf`。在 R 中使用 `showtext` 时，系统会自动处理字体映射。
+- **字体与路径支持（极重要）**：请务必清楚当前环境中有以下字体可用，**不要随意猜测或尝试不存在的字体路径**：
+  - **中文字体（assets/fonts/ 目录，纯 TTF，reportlab/fpdf2/matplotlib 全支持）**：
+    - `SimHei` → `/assets/fonts/simhei.ttf`（黑体，主标题/重点内容）
+    - `SimKai` → `/assets/fonts/simkai.ttf`（楷体，引用/强调）
+    - `SimFang` → `/assets/fonts/simfang.ttf`（仿宋，正文/报告）
+    - `FZxiaobiaosong` → `/assets/fonts/fzbsk.ttf`（方正小标宋，封面/正式标题）
+  - **macOS 系统 CJK 字体（TTC 格式，用于 R showtext / matplotlib）**：
+    - `STHeiti` → `/System/Library/Fonts/STHeiti Light.ttc`
+    - `Hiragino Sans GB` → `/System/Library/Fonts/Hiragino Sans GB.ttc`
+    - `PingFang SC` → `/System/Library/Fonts/PingFang SC.ttc`
+  - **macOS 系统拉丁字体（纯 TTF，用于 reportlab/fpdf2）**：
+    - `Arial Unicode` → `/System/Library/Fonts/Supplemental/Arial Unicode.ttf`
+    - `Georgia` → `/System/Library/Fonts/Supplemental/Georgia.ttf`
+    - `Times New Roman` → `/System/Library/Fonts/Supplemental/Times New Roman.ttf`
+  - **内置回退**：Helvetica（仅当以上字体都不可用时才使用）
+- **字体选择原则**：
+  - Python matplotlib 绘图：使用 `SimHei`、`STHeiti`、`PingFang SC` 等（会自动从系统中文字体中选择）
+  - R showtext 渲染：使用 `SimHei`（assets）或 `STHeiti`（系统）
+  - reportlab/fpdf2 PDF 生成：必须使用 assets 中的纯 TTF 字体（SimHei/SimKai/SimFang/FZxiaobiaosong）
+  - **绝对禁止**：尝试使用 `Arial.ttf`、`Helvetica.ttf` 等不存在的字体文件路径
 - **深度洞察**：能够穿透表面数据，通过多角度关联分析挖掘深层逻辑，明确指出可疑行为并详述推理原因。
 - **自主思考**：能根据用户上传的数据，主动提出分析假设并验证。
 - **工具专家**：熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势进行建模与可视化。你可以通过 Python 的 `rpy2` 库直接调用 R 语言工具开展分析，在进行复杂可视化时，应充分发挥 R 语言 `ggplot2` 包的灵活性优势。**注意：使用 rpy2 (版本 3.x+) 时，请使用 `rpy2.robjects.pandas2ri.activate()` 或 `with rpy2.robjects.conversion.localconverter(rpy2.robjects.default_converter + rpy2.robjects.pandas2ri.converter):` 进行数据转换，不要使用已废弃的 `conversion.register` 属性。**
 - **专业严谨**：始终保持专业、严谨的态度，提供具有前瞻性和决策价值的洞察。
 """ + selected_strategy_prompt + """
 
-**终止逻辑与防循环（极重要）**：
-- 每一轮完整的分析任务**必须**以 `<Answer>` 标签包裹的最终结论结束。
-- 禁止在没有新进展的情况下重复生成相同的代码或进行循环逻辑。
-- 如果已达成分析目标，请立即输出 `<Answer>`。
+**并行试错与防循环（极重要）**：
+- **并行优先原则**：当你需要尝试多种方案（例如：生成 PDF 时尝试不同字体、绘图时尝试不同引擎、导入时尝试不同路径），**必须将这些方案合并到一个代码块中**，通过 `if/elif/else` 或 `try/except` 结构同时验证多条路径，让代码在一次执行中就能确定哪个方案有效。
+  - ✅ 正确示范：在一个 `<Code>` 中用 `try: reportlab... except: fpdf2... except: R...` 依次尝试，或用 `if os.path.exists("A"): ... elif os.path.exists("B"): ...`
+  - ❌ 错误示范：将方案A放在一个 `<Code>`，等执行失败后在下一次 LLM 调用中再试方案B——这会导致循环和低效。
+- **终止逻辑**：每一轮完整的分析任务**必须**以 `<Answer>` 标签包裹的最终结论结束。
+- **禁止循环**：禁止在没有新进展的情况下重复生成相同的代码。如果上一次执行已成功或已确定某路径不可行，必须进入下一阶段或输出 `<Answer>`，不得重复相同代码。
+- **一次完成**：每个 `<Code>` 块应尽量完成一个完整的阶段性任务，避免拆分成多个小块依次执行。
 - 请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
 
     # Check if system prompt is already there, if not, insert it
@@ -1278,20 +1439,85 @@ def _save_md(md_text: str, base_name: str, workspace_dir: str) -> Path:
 import pypandoc
 
 
-def _find_chinese_font() -> tuple[str | None, str]:
-    """返回 (font_path, font_name)，优先使用 assets/simhei.ttf > 系统 STHeiti.ttc"""
-    # 优先 assets（纯 TTF，reportlab/fpdf2 均支持良好）
-    for fname in ["simhei.ttf", "SimHei.ttf"]:
+def _get_available_fonts() -> dict:
+    """
+    返回所有可用字体信息的字典。
+    返回结构：{
+        "assets": [(font_path, font_name, font_description), ...],
+        "system": [(font_path, font_name, font_description), ...],
+        "reportlab_fallback": (font_path, font_name),  # 纯 TTF，无 TTC
+    }
+    """
+    import reportlab.pdfbase.ttfonts as ttfonts
+
+    fonts = {"assets": [], "system": [], "reportlab_fallback": None}
+
+    # === assets 字体（纯 TTF，reportlab/fpdf2/matplotlib 均支持）===
+    assets_fonts = [
+        ("simhei.ttf",  "SimHei",  "黑体 - 主标题/重点内容"),
+        ("simkai.ttf",  "SimKai",  "楷体 - 引用/强调"),
+        ("simfang.ttf", "SimFang", "仿宋 - 正文/报告"),
+        ("fzbsk.ttf",   "FZxiaobiaosong", "方正小标宋 - 封面/正式标题"),
+    ]
+    for fname, name, desc in assets_fonts:
         fp = os.path.join(FONT_DIR, fname)
         if os.path.exists(fp):
-            return fp, "SimHei"
-    # 系统 TTC
+            fonts["assets"].append((fp, name, desc))
+
+    # === reportlab 回退字体（纯 TTF，排除 TTC）===
+    # Helvetica.ttc 是 TTC，reportlab 的 TTFont 不支持 TTC，所以找一个替代
     for fp in [
-        "/System/Library/Fonts/STHeiti Light.ttc",
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/Helvetica.ttc",  # TTC，reportlab 不支持
+        "/System/Library/Fonts/Arial.ttf",       # 不存在，macOS Arial 是 .ttc
     ]:
+        pass  # 都不适合 reportlab
+
+    # macOS 系统纯 TTF 拉丁字体（适合 reportlab/fpdf2）
+    system_ttf_candidates = [
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Georgia.ttf",
+        "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
+        "/System/Library/Fonts/Supplemental/Verdana.ttf",
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+    ]
+    for fp in system_ttf_candidates:
         if os.path.exists(fp):
-            return fp, "STHeiti"
+            name = os.path.splitext(os.path.basename(fp))[0]
+            fonts["system"].append((fp, name, "系统内置拉丁字体"))
+
+    # === 系统 TTC 字体（用于 R showtext / matplotlib，不适合 reportlab/fpdf2）===
+    system_ttc = [
+        ("/System/Library/Fonts/STHeiti Light.ttc", "STHeiti",  "macOS 黑体 - CJK"),
+        ("/System/Library/Fonts/Hiragino Sans GB.ttc", "Hiragino Sans GB", "macOS 冬青黑体 - CJK"),
+        ("/System/Library/Fonts/PingFang SC.ttc", "PingFang SC", "macOS 苹方简体中文"),
+        ("/System/Library/Fonts/PingFang TC.ttc", "PingFang TC", "macOS 苹方繁体中文"),
+    ]
+    for fp, name, desc in system_ttc:
+        if os.path.exists(fp):
+            fonts["system"].append((fp, name, desc))
+
+    # === reportlab 回退：找一个可用的系统纯 TTF ===
+    for fp, name, desc in fonts["system"]:
+        if fp.endswith(".ttf"):
+            fonts["reportlab_fallback"] = (fp, name)
+            break
+
+    return fonts
+
+
+def _find_chinese_font() -> tuple[str | None, str]:
+    """返回 (font_path, font_name)，优先使用 assets/simhei.ttf > 系统 STHeiti.ttc"""
+    fonts = _get_available_fonts()
+    # 优先 assets
+    if fonts["assets"]:
+        return fonts["assets"][0][0], fonts["assets"][0][1]
+    # 系统 TTC
+    for fp, name, desc in fonts["system"]:
+        if fp.endswith(".ttc"):
+            return fp, name
+    # 回退
+    if fonts["reportlab_fallback"]:
+        return fonts["reportlab_fallback"]
     return None, "Helvetica"
 
 
@@ -1585,11 +1811,6 @@ def _save_pdf_with_reportlab(md_text: str, base_name: str, workspace_dir: str) -
     except Exception as e:
         print(f"Error saving PDF with ReportLab: {e}")
         traceback.print_exc()
-        return None
-        print(f"PDF generated with ReportLab: {pdf_path}")
-        return pdf_path
-    except Exception as e:
-        print(f"Error saving PDF with ReportLab: {e}")
         return None
 
 @app.post("/export/report")

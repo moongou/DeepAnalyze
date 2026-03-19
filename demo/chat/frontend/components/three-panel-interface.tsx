@@ -396,6 +396,8 @@ export function ThreePanelInterface() {
   const [isTyping, setIsTyping] = useState(false);
   // 抑制轮询刷新的计数器（>0 时轮询不更新状态）
   const suppressWorkspaceRefreshCount = useRef(0);
+  // 项目加载期间文件恢复专用抑制（防止轮询干扰文件恢复）
+  const suppressDuringFileRestore = useRef(false);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
   const [workspaceTree, setWorkspaceTree] = useState<WorkspaceNode | null>(
@@ -698,7 +700,7 @@ export function ThreePanelInterface() {
       setMessages(restoredMessages);
       localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(restoredMessages));
 
-      // 4. 关闭弹窗并刷新文件列表（此时工作区为空）
+      // 4. 关闭弹窗
       setShowProjectManager(false);
 
       // 5. 设置项目名称
@@ -708,36 +710,46 @@ export function ThreePanelInterface() {
       toast({ description: "正在恢复项目文件..." });
 
       // 6. 恢复工作区文件：从已保存的项目中重新上传
+      // 启用文件恢复专用抑制，防止轮询在上传期间干扰
+      suppressDuringFileRestore.current = true;
+
       const uploadFiles = async () => {
-        if (filesToRestore.length === 0) {
+        try {
+          if (filesToRestore.length === 0) {
+            suppressDuringFileRestore.current = false;
+            loadWorkspaceFiles();
+            loadWorkspaceTree();
+            toast({ description: "项目已加载" });
+            return;
+          }
+
+          for (const fileInfo of filesToRestore) {
+            try {
+              const fileRes = await fetch(fileInfo.download_url);
+              if (fileRes.ok) {
+                const blob = await fileRes.blob();
+                const file = new File([blob], fileInfo.name, { type: "application/octet-stream" });
+                const uploadForm = new FormData();
+                uploadForm.append("files", file);
+
+                await fetch(`${API_URLS.WORKSPACE_UPLOAD}?session_id=${newSessionId}&username=${currentUser || "default"}`, {
+                  method: "POST",
+                  body: uploadForm,
+                });
+              }
+            } catch (e) {
+              console.warn(`Failed to restore file: ${fileInfo.name}`, e);
+            }
+          }
+
+          suppressDuringFileRestore.current = false;
           loadWorkspaceFiles();
           loadWorkspaceTree();
-          toast({ description: "项目已加载" });
-          return;
+          toast({ description: `项目已加载（${filesToRestore.length} 个文件已恢复）` });
+        } catch (e) {
+          suppressDuringFileRestore.current = false;
+          console.error("File restore failed", e);
         }
-
-        for (const fileInfo of filesToRestore) {
-          try {
-            const fileRes = await fetch(fileInfo.download_url);
-            if (fileRes.ok) {
-              const blob = await fileRes.blob();
-              const file = new File([blob], fileInfo.name, { type: "application/octet-stream" });
-              const uploadForm = new FormData();
-              uploadForm.append("files", file);
-
-              await fetch(`${API_URLS.WORKSPACE_UPLOAD}?session_id=${newSessionId}&username=${currentUser || "default"}`, {
-                method: "POST",
-                body: uploadForm,
-              });
-            }
-          } catch (e) {
-            console.warn(`Failed to restore file: ${fileInfo.name}`, e);
-          }
-        }
-
-        loadWorkspaceFiles();
-        loadWorkspaceTree();
-        toast({ description: `项目已加载（${filesToRestore.length} 个文件已恢复）` });
       };
 
       // 延迟触发文件上传恢复，等待清空完成
@@ -1144,6 +1156,7 @@ export function ThreePanelInterface() {
   const loadWorkspaceFiles = async () => {
     if (!sessionId) return;
     if (suppressWorkspaceRefreshCount.current > 0) return;
+    if (suppressDuringFileRestore.current) return;
     try {
       const response = await fetch(
         `${API_URLS.WORKSPACE_FILES}?session_id=${sessionId}&username=${currentUser || "default"}`
@@ -1160,6 +1173,7 @@ export function ThreePanelInterface() {
   const loadWorkspaceTree = async () => {
     if (!sessionId) return;
     if (suppressWorkspaceRefreshCount.current > 0) return;
+    if (suppressDuringFileRestore.current) return;
     try {
       const res = await fetch(
         `${API_URLS.WORKSPACE_TREE}?session_id=${sessionId}&username=${currentUser || "default"}`
