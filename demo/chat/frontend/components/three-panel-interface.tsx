@@ -735,7 +735,7 @@ export function ThreePanelInterface() {
     setShowLogoutConfirm(true);
   };
 
-  const performLogout = () => {
+  const performLogout = async () => {
     setCurrentUser(null);
     setIsLoggedIn(false);
     setAuthUsername("");
@@ -753,11 +753,28 @@ export function ThreePanelInterface() {
     setWorkspaceFiles([]);
     setWorkspaceTree(null);
     setInputValue("");
-    setRegisteredUsers([]);
+    setRegisteredUsers([]); // 先清空，然后重新加载
     setUserProjects([]);
     setProjectName("");
     setShowSaveDialog(false);
     setShowProjectManager(false);
+
+    // 重新加载已注册用户列表
+    try {
+      const res = await fetch(API_URLS.USERS_LIST);
+      if (res.ok) {
+        const data = await res.json();
+        setRegisteredUsers(data.users || []);
+      }
+    } catch (e) {
+      console.warn("Failed to reload registered users after logout", e);
+    }
+
+    // 生成新的 sessionId 以清空缓存文件
+    const newSid = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    localStorage.setItem("sessionId", newSid);
+    setSessionId(newSid);
+
     setShowAuthModal(true); // 重新显示登录界面
     toast({ description: "已退出登录，所有数据已清空" });
   };
@@ -907,9 +924,12 @@ export function ThreePanelInterface() {
           }
 
           suppressDuringFileRestore.current = false;
-          loadWorkspaceFiles();
-          loadWorkspaceTree();
-          toast({ description: `项目已加载（${filesToRestore.length} 个文件已恢复）` });
+          // 延迟一点再加载，确保上传完成
+          setTimeout(() => {
+            loadWorkspaceFiles();
+            loadWorkspaceTree();
+            toast({ description: `项目已加载（${filesToRestore.length} 个文件已恢复）` });
+          }, 500);
         } catch (e) {
           suppressDuringFileRestore.current = false;
           console.error("File restore failed", e);
@@ -1257,6 +1277,17 @@ export function ThreePanelInterface() {
 
   useEffect(() => {
     if (sessionId) {
+      // 如果文件恢复正在进行，等待完成后再加载
+      if (suppressDuringFileRestore.current) {
+        const interval = setInterval(() => {
+          if (!suppressDuringFileRestore.current) {
+            loadWorkspaceFiles();
+            loadWorkspaceTree();
+            clearInterval(interval);
+          }
+        }, 100);
+        return () => clearInterval(interval);
+      }
       loadWorkspaceFiles();
       loadWorkspaceTree();
     }
@@ -3299,9 +3330,16 @@ export function ThreePanelInterface() {
             setShowAuthModal(open);
           }
         }}>
-          <DialogContent className="sm:max-w-[400px]">
+          <DialogContent className="sm:max-w-[450px]">
             <DialogHeader>
-              <DialogTitle>{isLoginMode ? "用户登录" : "用户注册"}</DialogTitle>
+              <div className="flex flex-col items-center mb-4">
+                <img
+                  src="/logo.png"
+                  alt="DeepAnalyze"
+                  className="w-32 h-auto object-contain mb-2"
+                />
+                <DialogTitle>{isLoginMode ? "用户登录" : "用户注册"}</DialogTitle>
+              </div>
             </DialogHeader>
             <div className="space-y-4 py-4">
               {/* 已注册用户快捷选择 */}
@@ -3932,8 +3970,18 @@ export function ThreePanelInterface() {
                   </div>
 
                   {!showCodeEditor ? (
-                    <div className="flex-1 flex items-center justify-center text-gray-400">
-                      <div className="text-center select-none">
+                    <div className="flex-1 flex flex-col items-center justify-center text-gray-400 relative">
+                      {/* LOGO Display - 占 CODE 下空间的四分之一，居中显示 */}
+                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                        <div className="flex items-center justify-center">
+                          <img
+                            src="/logo.png"
+                            alt="DeepAnalyze"
+                            className="max-w-[200px] max-h-[200px] w-auto h-auto object-contain opacity-80"
+                          />
+                        </div>
+                      </div>
+                      <div className="text-center select-none relative z-10">
                         <p className="text-sm">Click a code block to edit</p>
                       </div>
                     </div>

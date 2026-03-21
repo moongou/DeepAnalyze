@@ -82,8 +82,10 @@ def create_docx_document() -> tuple[Document, Optional[str]]:
     # 设置默认样式
     style = doc.styles["Normal"]
     if font_path:
-        font_name = "STFangSong"  # 使用仿宋作为默认字体
-        style.font.name = "STFangSong"
+        # 使用 STFangsong（注意：实际字体名称是小写 g）
+        # DOCX 格式区分大小写，必须使用正确的字体名称
+        font_name = "STFangsong"  # 仿宋 - 正确的注册名称
+        style.font.name = font_name
         rFonts = style._element.get_or_add_rPr().get_or_add_rFonts()
         rFonts.set(qn("w:eastAsia"), font_name)
         style.font.size = Pt(11)

@@ -20,7 +20,7 @@ import socketserver
 import sqlite3
 import hashlib
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Depends, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import httpx
@@ -235,6 +235,7 @@ client = openai.OpenAI(base_url=API_BASE, api_key="dummy")
 
 # Workspace directory
 WORKSPACE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace")
+PROJECTS_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepanalyze.db")
 
 def init_db():
@@ -322,6 +323,7 @@ app.add_middleware(
 def start_http_server():
     """启动HTTP文件服务器（不修改全局工作目录）。"""
     os.makedirs(WORKSPACE_BASE_DIR, exist_ok=True)
+    os.makedirs(PROJECTS_BASE_DIR, exist_ok=True)
     handler = partial(
         http.server.SimpleHTTPRequestHandler, directory=WORKSPACE_BASE_DIR
     )
@@ -2234,6 +2236,17 @@ async def save_project(
         # Build workspace snapshot: list all files in the user's workspace directory
         workspace_dir = get_session_workspace(session_id, username)
         files_snapshot = []
+
+        if existing:
+            project_id = existing["id"]
+            # Create project directory to store file copies
+            project_dir = os.path.join(PROJECTS_BASE_DIR, str(project_id))
+            os.makedirs(project_dir, exist_ok=True)
+        else:
+            # For new project, use a temporary directory name first
+            project_id = None
+            project_dir = None
+
         if os.path.exists(workspace_dir):
             for root, dirs, files in os.walk(workspace_dir):
                 for fname in files:
@@ -2252,15 +2265,33 @@ async def save_project(
         if existing:
             cursor.execute(
                 "UPDATE projects SET session_id = ?, messages = ?, files_data = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (session_id, messages, files_json, existing["id"])
+                (session_id, messages, files_json, project_id)
             )
-            project_id = existing["id"]
         else:
             cursor.execute(
                 "INSERT INTO projects (username, session_id, name, messages, files_data) VALUES (?, ?, ?, ?, ?)",
                 (username, session_id, name, messages, files_json)
             )
             project_id = cursor.lastrowid
+            # Now create project directory with actual ID
+            project_dir = os.path.join(PROJECTS_BASE_DIR, str(project_id))
+            os.makedirs(project_dir, exist_ok=True)
+
+        # Copy files to project directory
+        if project_dir and os.path.exists(workspace_dir):
+            for root, dirs, files in os.walk(workspace_dir):
+                for fname in files:
+                    if fname.startswith("."):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    rel_path = os.path.relpath(fpath, workspace_dir)
+                    try:
+                        project_file_dir = os.path.join(project_dir, os.path.dirname(rel_path))
+                        os.makedirs(project_file_dir, exist_ok=True)
+                        project_file_path = os.path.join(project_file_dir, fname)
+                        shutil.copy2(fpath, project_file_path)
+                    except Exception as copy_err:
+                        print(f"Warning: Failed to copy file {rel_path} to project directory: {copy_err}")
 
         conn.commit()
         conn.close()
@@ -2322,8 +2353,8 @@ async def restore_project_files(project_id: int = Query(...)):
         result_files = []
         for f in files_data:
             rel_path = f.get("path", "")
-            # 构建源文件的下载 URL（文件服务器在 8100 端口）
-            download_url = build_download_url(f"{row['username']}/{row['session_id']}/{rel_path}")
+            # 构建项目文件的下载 URL（从项目目录读取）
+            download_url = f"/api/projects/file/{project_id}/{quote(rel_path)}"
             result_files.append({
                 "name": f.get("name", ""),
                 "path": rel_path,
@@ -2335,6 +2366,35 @@ async def restore_project_files(project_id: int = Query(...)):
         raise
     except Exception as e:
         print(f"Restore project files error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/projects/file/{project_id}/{file_path}")
+async def get_project_file(project_id: int, file_path: str):
+    """从项目目录中获取文件内容"""
+    try:
+        # 构建项目文件路径
+        project_dir = os.path.join(PROJECTS_BASE_DIR, str(project_id))
+        if not os.path.exists(project_dir):
+            raise HTTPException(status_code=404, detail="Project directory not found")
+
+        # 清理文件路径，防止目录穿越攻击
+        safe_path = os.path.normpath(file_path)
+        file_full_path = os.path.join(project_dir, safe_path)
+
+        # 确保文件在项目目录内
+        if not os.path.abspath(file_full_path).startswith(os.path.abspath(project_dir) + os.sep):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        if not os.path.exists(file_full_path):
+            raise HTTPException(status_code=404, detail="File not found")
+
+        # 返回文件
+        return FileResponse(file_full_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Get project file error: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
