@@ -50,6 +50,14 @@ export const API_CONFIG = {
 
     // 导出报告
     EXPORT_REPORT: "/export/report",
+
+    // 雨途斩疑录
+    YUTU_HTML: "/api/yutu/html",
+    YUTU_ADD: "/api/yutu/add",
+    YUTU_UPDATE: "/api/yutu/update",
+    YUTU_DELETE: "/api/yutu/delete",
+    YUTU_SEARCH: "/api/yutu/search",
+    YUTU_INIT: "/api/yutu/init",
   },
 };
 
@@ -75,6 +83,14 @@ export const API_URLS = {
   WORKSPACE_DELETE_DIR: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_DELETE_DIR),
   EXECUTE_CODE: buildApiUrl(API_CONFIG.ENDPOINTS.EXECUTE_CODE),
   EXPORT_REPORT: buildApiUrl(API_CONFIG.ENDPOINTS.EXPORT_REPORT),
+
+  // 雨途斩疑录
+  YUTU_HTML: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_HTML),
+  YUTU_ADD: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ADD),
+  YUTU_UPDATE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_UPDATE),
+  YUTU_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_DELETE),
+  YUTU_SEARCH: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_SEARCH),
+  YUTU_INIT: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_INIT),
 
   // 认证
   AUTH_REGISTER: buildApiUrl(API_CONFIG.ENDPOINTS.AUTH_REGISTER),

@@ -71,6 +71,18 @@ from docx_utils import (
     extract_markdown_blocks,
 )
 
+# 雨途斩疑录模块
+from yutu_zhanyilu import (
+    init_yutu_if_needed,
+    add_error_solution,
+    search_errors,
+    get_error_by_hash,
+    update_error_solution,
+    delete_error,
+    get_yutu_html,
+    update_yutu_html,
+)
+
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import getSampleStyleSheet
@@ -1425,6 +1437,44 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 - **工具专家**：熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势进行建模与可视化。你可以通过 Python 的 `rpy2` 库直接调用 R 语言工具开展分析，在进行复杂可视化时，应充分发挥 R 语言 `ggplot2` 包的灵活性优势。**注意：使用 rpy2 (版本 3.x+) 时，请使用 `rpy2.robjects.pandas2ri.activate()` 或 `with rpy2.robjects.conversion.localconverter(rpy2.robjects.default_converter + rpy2.robjects.pandas2ri.converter):` 进行数据转换，不要使用已废弃的 `conversion.register` 属性。**
 - **专业严谨**：始终保持专业、严谨的态度，提供具有前瞻性和决策价值的洞察。
 - **语言规范**：与用户交流及生成报告时，**默认使用简体中文中文**。除非用户明确指定使用其他语言（如英文），否则不得使用英文或其他语言输出分析内容、报告文本。
+
+**============================================
+第七部分：雨途斩疑录 - 错误修正知识库（极重要）
+============================================
+
+雨途斩疑录是智能体的错误修正知识库，记录了所有已解决的错误及其解决方案。每次工作前，请务必参考这本笔记。
+
+**雨途斩疑录功能说明**：
+1. **自动记录**：当代码执行出现错误时，智能体应自动记录错误类型、错误消息、错误上下文，并提供解决方案
+2. **快速查找**：遇到相似错误时，优先查询雨途斩疑录获取已知解决方案
+3. **持续优化**：每次成功解决问题后，更新雨途斩疑录以提升未来工作效率
+
+**超级用户管理功能**：
+- 超级用户 `rainforgrain` 可以通过前端界面管理雨途斩疑录
+- 功能包括：查看、搜索、编辑、删除错误记录
+- 其他用户只能查看，不能管理
+
+**雨途斩疑录API端点**：
+- `GET /api/yutu/html` - 获取HTML格式的雨途斩疑录
+- `POST /api/yutu/add` - 添加新记录（仅超级用户）
+- `POST /api/yutu/update` - 更新记录（仅超级用户）
+- `POST /api/yutu/delete` - 删除记录（仅超级用户）
+- `POST /api/yutu/search` - 搜索记录
+- `POST /api/yutu/init` - 初始化雨途斩疑录
+
+**使用雨途斩疑录的场景**：
+1. 当代码执行出现 ImportError、ValueError、TypeError 等常见错误时
+2. 当遇到环境配置问题（如字体缺失、库版本冲突）时
+3. 当找到有效的解决方案后，应记录到雨途斩疑录
+4. 在尝试新方案前，先查询雨途斩疑录是否有类似问题的解决方案
+
+**记录格式**：
+- error_type: 错误类型（如 ImportError, ValueError）
+- error_message: 错误消息全文
+- error_context: 错误发生的上下文
+- solution: 解决方案描述
+- solution_code: 解决方案代码（如有）
+- confidence: 解决方案置信度（0.0-1.0）
 """ + selected_strategy_prompt + """
 
 **并行试错与死循环检测（极重要）**：
@@ -2342,6 +2392,155 @@ async def delete_project(project_id: int = Query(...), username: str = Query(...
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ========== 雨途斩疑录 API ==========
+@app.get("/api/yutu/html")
+async def get_yutu_html_api():
+    """获取雨途斩疑录HTML内容（所有人都可以查看）"""
+    try:
+        html = get_yutu_html()
+        return {"success": True, "html": html}
+    except Exception as e:
+        print(f"Get yutu HTML error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/yutu/add")
+async def add_yutu_record(body: dict = Body(...), username: str = Query("default")):
+    """
+    添加错误记录和解决方案（仅超级用户）
+    """
+    try:
+        # 检查是否为超级用户
+        if username != "rainforgrain":
+            raise HTTPException(status_code=403, detail="Only superuser can add records")
+
+        error_type = body.get("error_type", "Unknown")
+        error_message = body.get("error_message", "")
+        error_context = body.get("error_context")
+        solution = body.get("solution", "")
+        solution_code = body.get("solution_code")
+        confidence = body.get("confidence", 0.0)
+
+        success = add_error_solution(
+            error_type=error_type,
+            error_message=error_message,
+            error_context=error_context,
+            solution=solution,
+            solution_code=solution_code,
+            confidence=confidence,
+            created_by=username
+        )
+
+        if success:
+            return {"success": True, "message": "Record added successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to add record")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Add yutu record error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/yutu/update")
+async def update_yutu_record(body: dict = Body(...), username: str = Query("default")):
+    """
+    更新错误记录（仅超级用户）
+    """
+    try:
+        # 检查是否为超级用户
+        if username != "rainforgrain":
+            raise HTTPException(status_code=403, detail="Only superuser can update records")
+
+        error_hash = body.get("error_hash")
+        solution = body.get("solution")
+        solution_code = body.get("solution_code")
+        confidence = body.get("confidence", 0.0)
+
+        if not error_hash:
+            raise HTTPException(status_code=400, detail="error_hash is required")
+
+        success = update_error_solution(
+            error_hash=error_hash,
+            solution=solution,
+            solution_code=solution_code,
+            confidence=confidence,
+            updated_by=username
+        )
+
+        if success:
+            return {"success": True, "message": "Record updated successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update record")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Update yutu record error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/yutu/delete")
+async def delete_yutu_record(body: dict = Body(...), username: str = Query("default")):
+    """
+    删除错误记录（仅超级用户）
+    """
+    try:
+        # 检查是否为超级用户
+        if username != "rainforgrain":
+            raise HTTPException(status_code=403, detail="Only superuser can delete records")
+
+        error_hash = body.get("error_hash")
+
+        if not error_hash:
+            raise HTTPException(status_code=400, detail="error_hash is required")
+
+        success = delete_error(error_hash)
+
+        if success:
+            return {"success": True, "message": "Record deleted successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete record")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Delete yutu record error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/yutu/search")
+async def search_yutu_records(body: dict = Body(...)):
+    """
+    搜索错误记录（所有人都可以搜索）
+    """
+    try:
+        keywords = body.get("keywords", [])
+        error_type = body.get("error_type")
+        page = body.get("page", 1)
+        page_size = body.get("page_size", 20)
+
+        results = search_errors(
+            keywords=keywords,
+            error_type=error_type,
+            page=page,
+            page_size=page_size
+        )
+
+        return {"success": True, "data": results}
+    except Exception as e:
+        print(f"Search yutu records error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/yutu/init")
+async def init_yutu_api():
+    """初始化雨途斩疑录（超级用户专用）"""
+    try:
+        init_yutu_if_needed()
+        return {"success": True, "message": "Yutu initialized successfully"}
+    except Exception as e:
+        print(f"Init yutu error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

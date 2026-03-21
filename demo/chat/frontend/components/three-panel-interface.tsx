@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Card } from "@/components/ui/card";
+import { Slider } from "@/components/ui/slider";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -54,6 +55,7 @@ import {
   Square,
   Code2,
   Terminal,
+  BookOpen,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Tree, NodeApi } from "react-arborist";
@@ -276,7 +278,7 @@ const ChatMessageItem = memo(
             </Avatar>
             <div className="min-w-0 flex-1 message-appear">
               <div className="text-sm font-medium text-gray-600 dark:text-gray-400 mb-2">
-                Assistant
+                观雨
               </div>
               <div className="space-y-4 min-w-0">
                 {isStreaming ? (
@@ -385,7 +387,7 @@ export function ThreePanelInterface() {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "welcome-1",
-      content: "您好！我是 DeepAnalyze。我是一位精通 Python 与 R 语言的双重分析专家，专门从事中国海关风险管理与风险防控。\n\n我将为您深入分析进出口业务数据，运用统计学与逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
+      content: "您好！很高兴和您一起运用大数据开展海关风险分析。我将按您的分析目标和要求，协助您深入分析进出口业务数据，运用规律分析、统计分析、对比分析、关联分析等方法，开展多角度逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
       sender: "ai",
       timestamp: new Date(),
       localOnly: true,
@@ -415,6 +417,7 @@ export function ThreePanelInterface() {
   const [isExecutingCode, setIsExecutingCode] = useState(false);
   const [codeExecutionResult, setCodeExecutionResult] = useState("");
   const [analysisStrategy, setAnalysisStrategy] = useState<string>("聚焦诉求");
+  const [temperature, setTemperature] = useState<number | null>(null); // null means auto based on strategy
 
   // 用户认证与项目管理状态
   const [currentUser, setCurrentUser] = useState<string | null>(null);
@@ -431,6 +434,17 @@ export function ThreePanelInterface() {
   // 保存确认弹窗状态（同名项目覆盖确认）
   const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
   const [pendingSaveData, setPendingSaveData] = useState<any>(null);
+  // 退出登录确认弹窗状态
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  // 雨途斩疑录面板状态
+  const [showYutuPanel, setShowYutuPanel] = useState(false);
+  const [yutuHtmlContent, setYutuHtmlContent] = useState<string>("");
+  const [yutuRecords, setYutuRecords] = useState<any[]>([]);
+  const [searchKeyword, setSearchKeyword] = useState("");
+  const [editRecord, setEditRecord] = useState<any>(null);
+  const [viewMode, setViewMode] = useState<"list" | "html">("list");
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // 预览弹窗状态
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -476,6 +490,8 @@ export function ThreePanelInterface() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const exportReportBackendRef = useRef<any>(null); // Initialize as null
   const saveChatTimerRef = useRef<number | null>(null);
+  // 雨途斩疑录相关ref
+  const yutuPanelRef = useRef<HTMLDivElement>(null);
 
   // 组件挂载后从 localStorage 读取主题
   useEffect(() => {
@@ -502,6 +518,9 @@ export function ThreePanelInterface() {
       if (savedAuto !== null) {
         setAutoCollapseEnabled(savedAuto !== "false");
       }
+      // 加载雨途斩疑录HTML
+      loadYutuHtml();
+      loadYutuRecords();
     }
   }, []);
 
@@ -554,10 +573,130 @@ export function ThreePanelInterface() {
     }
   }, [activeSection]);
 
+  // --- 雨途斩疑录函数 ---
+  const loadYutuHtml = async () => {
+    try {
+      const res = await fetch(API_URLS.YUTU_HTML);
+      if (res.ok) {
+        const data = await res.json();
+        setYutuHtmlContent(data.html || "");
+      }
+    } catch (e) {
+      console.error("加载雨途斩疑录失败:", e);
+      setYutuHtmlContent("<html><body><h1>加载失败</h1></body></html>");
+    }
+  };
+
+  const loadYutuRecords = async (keywords: string[] = [], errorType: string = "") => {
+    try {
+      const res = await fetch(API_URLS.YUTU_SEARCH, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          keywords: keywords,
+          error_type: errorType,
+          page: 1,
+          page_size: 50
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setYutuRecords(data.data?.items || []);
+      }
+    } catch (e) {
+      console.error("加载记录失败:", e);
+    }
+  };
+
+  const handleSaveYutuRecord = async (record: any) => {
+    try {
+      const res = await fetch(API_URLS.YUTU_ADD, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error_type: record.error_type,
+          error_message: record.error_message,
+          error_context: record.error_context,
+          solution: record.solution,
+          solution_code: record.solution_code,
+          confidence: record.confidence
+        })
+      });
+      if (res.ok) {
+        toast({ description: "记录保存成功" });
+        loadYutuHtml();
+        return true;
+      }
+    } catch (e) {
+      toast({ description: "保存失败: " + (e as Error).message, variant: "destructive" });
+    }
+    return false;
+  };
+
+  const handleUpdateYutuRecord = async (record: any) => {
+    try {
+      const res = await fetch(API_URLS.YUTU_UPDATE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          error_hash: record.error_hash,
+          solution: record.solution,
+          solution_code: record.solution_code,
+          confidence: record.confidence
+        })
+      });
+      if (res.ok) {
+        toast({ description: "记录更新成功" });
+        loadYutuHtml();
+        return true;
+      }
+    } catch (e) {
+      toast({ description: "更新失败: " + (e as Error).message, variant: "destructive" });
+    }
+    return false;
+  };
+
+  const handleDeleteYutuRecord = async (errorHash: string) => {
+    try {
+      const res = await fetch(API_URLS.YUTU_DELETE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ error_hash: errorHash })
+      });
+      if (res.ok) {
+        toast({ description: "记录已删除" });
+        loadYutuHtml();
+        loadYutuRecords();
+        return true;
+      }
+    } catch (e) {
+      toast({ description: "删除失败: " + (e as Error).message, variant: "destructive" });
+    }
+    return false;
+  };
+
+  const initYutu = async () => {
+    try {
+      const res = await fetch(API_URLS.YUTU_INIT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      });
+      if (res.ok) {
+        toast({ description: "雨途斩疑录初始化成功" });
+        loadYutuHtml();
+        loadYutuRecords();
+        return true;
+      }
+    } catch (e) {
+      toast({ description: "初始化失败: " + (e as Error).message, variant: "destructive" });
+    }
+    return false;
+  };
+
   // --- 用户认证与项目管理函数 ---
   const handleAuth = async () => {
-    if (!authUsername || !authPassword) {
-      toast({ description: "请输入用户名和密码", variant: "destructive" });
+    if (!authUsername) {
+      toast({ description: "请输入用户名", variant: "destructive" });
       return;
     }
 
@@ -593,9 +732,34 @@ export function ThreePanelInterface() {
   };
 
   const handleLogout = () => {
+    setShowLogoutConfirm(true);
+  };
+
+  const performLogout = () => {
     setCurrentUser(null);
     setIsLoggedIn(false);
-    toast({ description: "已退出登录" });
+    setAuthUsername("");
+    setAuthPassword("");
+    setMessages([
+      {
+        id: "welcome-1",
+        content: "您好！很高兴和您一起运用大数据开展海关风险分析。我将按您的分析目标和要求，协助您深入分析进出口业务数据，运用规律分析、统计分析、对比分析、关联分析等方法，开展多角度逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
+        sender: "ai",
+        timestamp: new Date(),
+        localOnly: true,
+      },
+    ]);
+    setAttachments([]);
+    setWorkspaceFiles([]);
+    setWorkspaceTree(null);
+    setInputValue("");
+    setRegisteredUsers([]);
+    setUserProjects([]);
+    setProjectName("");
+    setShowSaveDialog(false);
+    setShowProjectManager(false);
+    setShowAuthModal(true); // 重新显示登录界面
+    toast({ description: "已退出登录，所有数据已清空" });
   };
 
   const saveProject = async (confirmed = false) => {
@@ -1027,7 +1191,7 @@ export function ThreePanelInterface() {
     }
     const welcome: Message = {
       id: `welcome-${Date.now()}`,
-      content: "您好！我是 DeepAnalyze。作为您的专属数据科学家，我精通 Python 与 R 语言的双重分析引擎。\n请上传您的数据，我将为您开展具有深度与广度的关联分析，助您洞察数据背后的深层逻辑与核心价值。",
+      content: "您好！很高兴和您一起运用大数据开展海关风险分析。我将按您的分析目标和要求，协助您深入分析进出口业务数据，运用规律分析、统计分析、对比分析、关联分析等方法，开展多角度逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
       sender: "ai",
       timestamp: new Date(),
       localOnly: true,
@@ -1072,7 +1236,7 @@ export function ThreePanelInterface() {
     setMessages([
       {
         id: `welcome-${Date.now()}`,
-        content: "您好！我是 DeepAnalyze。我是一位精通 Python 与 R 语言的双重分析专家，专门从事中国海关风险管理与风险防控。\n\n我将为您深入分析进出口业务数据，运用统计学与逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
+        content: "您好！很高兴和您一起运用大数据开展海关风险分析。我将按您的分析目标和要求，协助您深入分析进出口业务数据，运用规律分析、统计分析、对比分析、关联分析等方法，开展多角度逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
         sender: "ai",
         timestamp: new Date(),
         localOnly: true,
@@ -1371,7 +1535,7 @@ export function ThreePanelInterface() {
     const ext = getExt(data.name, data.extension);
 
     return (
-      <div style={style}>
+      <div style={style} className="w-full overflow-hidden">
         {/* Generated 分组标题 + 删除按钮（不遮挡、不受折叠影响） */}
         {isGeneratedFolder && (
           <div className="mt-2 mb-1 px-2 flex items-center justify-between select-none">
@@ -1394,7 +1558,7 @@ export function ThreePanelInterface() {
           </div>
         )}
         <div
-          className={`flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2 py-1 ${isGenerated ? "bg-purple-50 dark:bg-purple-950/20" : ""
+          className={`flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2 py-1 w-full overflow-hidden ${isGenerated ? "bg-purple-50 dark:bg-purple-950/20" : ""
             }`}
           onClick={(e) => {
             if (isDir) {
@@ -1468,7 +1632,7 @@ export function ThreePanelInterface() {
           }}
         >
           <div
-            className="flex items-center gap-2 text-sm"
+            className="flex items-center gap-2 text-sm w-full min-w-0"
             ref={dragHandle}
             draggable={!isDir}
             onDragStart={(e) => {
@@ -2918,6 +3082,7 @@ export function ThreePanelInterface() {
           stream: true, // [修改] 明确开启流式模式
           session_id: sessionId,
           strategy: analysisStrategy,
+          ...(temperature !== null && { temperature }),
         }),
       });
 
@@ -3122,6 +3287,84 @@ export function ThreePanelInterface() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
   };
 
+  if (!isLoggedIn) {
+    return (
+      <>
+        {/* 认证弹窗 */}
+        <Dialog open={showAuthModal} onOpenChange={(open) => {
+          if (!isLoggedIn && !open) {
+            // 如果用户未登录但尝试关闭弹窗，保持弹窗打开
+            setShowAuthModal(true);
+          } else {
+            setShowAuthModal(open);
+          }
+        }}>
+          <DialogContent className="sm:max-w-[400px]">
+            <DialogHeader>
+              <DialogTitle>{isLoginMode ? "用户登录" : "用户注册"}</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              {/* 已注册用户快捷选择 */}
+              {registeredUsers.length > 0 && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                    {isLoginMode ? "已注册用户（点击快速登录）" : "已注册用户"}
+                  </label>
+                  <div className="flex flex-wrap gap-2 max-h-[100px] overflow-y-auto">
+                    {registeredUsers.map((u) => (
+                      <button
+                        key={u}
+                        onClick={() => setAuthUsername(u)}
+                        className={`px-3 py-1.5 text-xs rounded-full border transition-colors ${
+                          authUsername === u
+                            ? "bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-900 dark:border-blue-600 dark:text-blue-200"
+                            : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-blue-50 hover:border-blue-200 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-blue-900/30"
+                        }`}
+                      >
+                        {u}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="space-y-2">
+                <label className="text-sm font-medium">用户名</label>
+                <Input
+                  value={authUsername}
+                  onChange={(e) => setAuthUsername(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleAuth(); }}
+                  placeholder="请输入用户名"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">密码</label>
+                <Input
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleAuth(); }}
+                  placeholder={isLoginMode ? "请输入密码（可为空）" : "最少 8 位密码"}
+                />
+              </div>
+              <Button className="w-full" onClick={handleAuth}>
+                {isLoginMode ? "登录" : "注册"}
+              </Button>
+              <div className="text-center text-xs text-gray-500">
+                {isLoginMode ? "没有账号？" : "已有账号？"}
+                <button
+                  className="text-blue-600 hover:underline ml-1"
+                  onClick={() => setIsLoginMode(!isLoginMode)}
+                >
+                  {isLoginMode ? "立即注册" : "去登录"}
+                </button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+      </>
+    );
+  }
+
   return (
     <>
       <div
@@ -3130,7 +3373,7 @@ export function ThreePanelInterface() {
       >
         <ResizablePanelGroup direction="horizontal" className="h-full">
           {/* Left Panel - Workspace Tree */}
-          <ResizablePanel defaultSize={16} minSize={10}>
+          <ResizablePanel defaultSize={25} minSize={10}>
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12">
                 <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
@@ -3251,8 +3494,6 @@ export function ThreePanelInterface() {
                 )}
                 {workspaceTree ? (
                   <Tree
-                    width={treeSize.w || 300}
-                    height={treeSize.h || 400}
                     data={toArbor(workspaceTree).children || []}
                     openByDefault
                     indent={14}
@@ -3272,13 +3513,13 @@ export function ThreePanelInterface() {
           <ResizableHandle withHandle />
 
           {/* Middle Panel - Chat & Analysis */}
-          <ResizablePanel defaultSize={60} minSize={25}>
+          <ResizablePanel defaultSize={50} minSize={25}>
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               {/* Header */}
               <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0">
                 <div className="flex items-center gap-3">
                   <div className="flex items-center gap-2">
-                    <h1 className="text-sm font-medium">Assistant</h1>
+                    <h1 className="text-sm font-medium">观雨</h1>
                     {isTyping && (
                       <div className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
                         <div className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
@@ -3639,7 +3880,7 @@ export function ThreePanelInterface() {
           <ResizableHandle withHandle />
 
           {/* Right Panel - Code Editor & Input */}
-          <ResizablePanel defaultSize={34} minSize={20}>
+          <ResizablePanel defaultSize={25} minSize={20}>
             <ResizablePanelGroup direction="vertical">
               {/* Upper: Code/Preview */}
               <ResizablePanel defaultSize={40} minSize={30}>
@@ -3648,30 +3889,46 @@ export function ThreePanelInterface() {
                     <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
                       Code
                     </h2>
-                    {showCodeEditor && (
-                      <div className="flex gap-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            setShowCodeEditor(false);
-                            setCodeEditorContent("");
-                            setSelectedCodeSection("");
-                          }}
-                          className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                        >
-                          Close
-                        </Button>
-                        <Button
-                          size="sm"
-                          onClick={executeCode}
-                          disabled={!codeEditorContent || isExecutingCode}
-                          className="h-6 px-3 text-xs bg-black text-white dark:bg-white dark:text-black"
-                        >
-                          {isExecutingCode ? "Running..." : "Run"}
-                        </Button>
-                      </div>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {/* 雨途斩疑录按钮 */}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          setShowYutuPanel(true);
+                          loadYutuHtml();
+                        }}
+                        className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                        title="雨途斩疑录 - 错误修正记录"
+                      >
+                        <BookOpen className="h-3.5 w-3.5 mr-1" />
+                        <span>雨途</span>
+                      </Button>
+                      {showCodeEditor && (
+                        <div className="flex gap-2">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              setShowCodeEditor(false);
+                              setCodeEditorContent("");
+                              setSelectedCodeSection("");
+                            }}
+                            className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                          >
+                            Close
+                          </Button>
+                          <Button
+                            size="sm"
+                            onClick={executeCode}
+                            disabled={!codeEditorContent || isExecutingCode}
+                            className="h-6 px-3 text-xs bg-black text-white dark:bg-white dark:text-black"
+                          >
+                            {isExecutingCode ? "Running..." : "Run"}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   {!showCodeEditor ? (
@@ -3792,20 +4049,53 @@ export function ThreePanelInterface() {
               {/* Lower: Chat Input */}
               <ResizablePanel defaultSize={60} minSize={20}>
                 <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
-                  <div className="py-2 px-4 flex justify-between items-center border-b border-gray-100 dark:border-gray-900 bg-gray-50/50 dark:bg-gray-900/30">
-                    <span className="text-blue-600 dark:text-blue-400 font-bold text-sm">请风控专家指示分析目标</span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-gray-400 dark:text-gray-500">分析策略:</span>
-                      <Select value={analysisStrategy} onValueChange={setAnalysisStrategy}>
-                        <SelectTrigger className="h-7 w-[100px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
-                          <SelectValue placeholder="策略" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
-                          <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
-                          <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
-                        </SelectContent>
-                      </Select>
+                  <div className="py-2 px-4 flex flex-col gap-2 border-b border-gray-100 dark:border-gray-900 bg-gray-50/50 dark:bg-gray-900/30">
+                    <div className="flex justify-center items-center">
+                      <span className="text-blue-600 dark:text-blue-400 font-bold text-sm">请风控专家指示分析目标</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-gray-400 dark:text-gray-500">分析策略:</span>
+                        <Select value={analysisStrategy} onValueChange={(val) => {
+                          setAnalysisStrategy(val);
+                          // When auto (null), slider position follows strategy default
+                          // When manual, keep user's choice
+                        }}>
+                          <SelectTrigger className="h-7 w-[100px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
+                            <SelectValue placeholder="策略" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
+                            <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
+                            <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-gray-400 dark:text-gray-500">热度:</span>
+                        <Slider
+                          value={[temperature ?? (analysisStrategy === "聚焦诉求" ? 0.2 : analysisStrategy === "适度扩展" ? 0.4 : 0.6)]}
+                          min={0.0}
+                          max={1.0}
+                          step={0.05}
+                          onValueChange={(vals) => setTemperature(vals[0])}
+                          className="w-20 h-4"
+                        />
+                        <span className="text-[10px] text-gray-500 dark:text-gray-400 w-8">
+                          {temperature !== null ? temperature.toFixed(2) : "auto"}
+                        </span>
+                        {temperature !== null ? (
+                          <button
+                            onClick={() => setTemperature(null)}
+                            className="text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                            title="恢复自动"
+                          >
+                            ↺
+                          </button>
+                        ) : (
+                          <span className="text-[10px] text-gray-300 dark:text-gray-600">↺</span>
+                        )}
+                      </div>
                     </div>
                   </div>
                   <div className="p-4 flex-1 flex flex-col min-h-0 pt-2">
@@ -4144,70 +4434,6 @@ export function ThreePanelInterface() {
         </DialogContent>
       </Dialog>
 
-      {/* 认证弹窗 */}
-      <Dialog open={showAuthModal} onOpenChange={setShowAuthModal}>
-        <DialogContent className="sm:max-w-[400px]">
-          <DialogHeader>
-            <DialogTitle>{isLoginMode ? "用户登录" : "用户注册"}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            {/* 已注册用户快捷选择 */}
-            {registeredUsers.length > 0 && (
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                  {isLoginMode ? "已注册用户（点击快速登录）" : "已注册用户"}
-                </label>
-                <div className="flex flex-wrap gap-2 max-h-[100px] overflow-y-auto">
-                  {registeredUsers.map((u) => (
-                    <button
-                      key={u}
-                      onClick={() => setAuthUsername(u)}
-                      className={`px-3 py-1.5 text-xs rounded-full border transition-colors ${
-                        authUsername === u
-                          ? "bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-900 dark:border-blue-600 dark:text-blue-200"
-                          : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-blue-50 hover:border-blue-200 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-blue-900/30"
-                      }`}
-                    >
-                      {u}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            <div className="space-y-2">
-              <label className="text-sm font-medium">用户名</label>
-              <Input
-                value={authUsername}
-                onChange={(e) => setAuthUsername(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") handleAuth(); }}
-                placeholder="请输入用户名"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">密码</label>
-              <Input
-                type="password"
-                value={authPassword}
-                onChange={(e) => setAuthPassword(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") handleAuth(); }}
-                placeholder={isLoginMode ? "请输入密码" : "最少 8 位密码"}
-              />
-            </div>
-            <Button className="w-full" onClick={handleAuth}>
-              {isLoginMode ? "登录" : "注册"}
-            </Button>
-            <div className="text-center text-xs text-gray-500">
-              {isLoginMode ? "没有账号？" : "已有账号？"}
-              <button
-                className="text-blue-600 hover:underline ml-1"
-                onClick={() => setIsLoginMode(!isLoginMode)}
-              >
-                {isLoginMode ? "立即注册" : "去登录"}
-              </button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
 
       {/* 保存项目弹窗 */}
       <Dialog open={showSaveDialog} onOpenChange={setShowSaveDialog}>
@@ -4349,6 +4575,291 @@ export function ThreePanelInterface() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 退出登录确认弹窗 */}
+      <AlertDialog open={showLogoutConfirm} onOpenChange={setShowLogoutConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>确认退出登录？</AlertDialogTitle>
+            <AlertDialogDescription>
+              退出登录将清空当前所有区域信息、聊天记录和工作区文件，并返回登录界面。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700"
+              onClick={() => {
+                performLogout();
+                setShowLogoutConfirm(false);
+              }}
+            >
+              确认退出
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 雨途斩疑录面板 */}
+      <Dialog open={showYutuPanel} onOpenChange={setShowYutuPanel}>
+        <DialogContent className="sm:max-w-[90vw] max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <BookOpen className="h-5 w-5" />
+              雨途斩疑录
+              <span className="text-xs font-normal text-gray-500 dark:text-gray-400 ml-2">
+                - 智能体错误修正记录 -
+              </span>
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-hidden flex flex-col">
+            {/* 管理模式切换 - 仅超级用户可见 */}
+            {currentUser === "rainforgrain" && (
+              <div className="flex items-center gap-2 mb-2 px-1">
+                <span className="text-xs text-gray-500">管理模式:</span>
+                <Button
+                  size="sm"
+                  variant={viewMode === "list" ? "default" : "outline"}
+                  onClick={() => setViewMode("list")}
+                >
+                  记录列表
+                </Button>
+                <Button
+                  size="sm"
+                  variant={viewMode === "html" ? "default" : "outline"}
+                  onClick={() => setViewMode("html")}
+                >
+                  HTML预览
+                </Button>
+                <div className="flex-1"></div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={initYutu}
+                >
+                  初始化
+                </Button>
+              </div>
+            )}
+
+            {/* 搜索栏 - 仅超级用户可见 */}
+            {currentUser === "rainforgrain" && viewMode === "list" && (
+              <div className="flex items-center gap-2 mb-3 p-2 border rounded-md bg-gray-50 dark:bg-gray-900">
+                <Input
+                  placeholder="搜索错误消息..."
+                  value={searchKeyword}
+                  onChange={(e) => setSearchKeyword(e.target.value)}
+                  className="flex-1"
+                />
+                <Button
+                  size="sm"
+                  onClick={() => loadYutuRecords(searchKeyword ? [searchKeyword] : [])}
+                >
+                  搜索
+                </Button>
+              </div>
+            )}
+
+            {/* 记录列表 - 管理模式 */}
+            {currentUser === "rainforgrain" && viewMode === "list" && (
+              <div className="flex-1 overflow-auto border rounded-md bg-white dark:bg-gray-950">
+                <table className="w-full text-sm text-left">
+                  <thead className="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-800 dark:text-gray-400 sticky top-0">
+                    <tr>
+                      <th className="px-3 py-2">错误类型</th>
+                      <th className="px-3 py-2">错误消息</th>
+                      <th className="px-3 py-2">解决方案</th>
+                      <th className="px-3 py-2">置信度</th>
+                      <th className="px-3 py-2">使用次数</th>
+                      <th className="px-3 py-2">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                    {yutuRecords.length > 0 ? (
+                      yutuRecords.map((record: any) => (
+                        <tr key={record.error_hash} className="bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-800">
+                          <td className="px-3 py-2">{record.error_type || "Unknown"}</td>
+                          <td className="px-3 py-2 max-w-[200px] truncate" title={record.error_message || ""}>
+                            {record.error_message || ""} {record.error_hash}
+                          </td>
+                          <td className="px-3 py-2 max-w-[200px] truncate" title={record.solution || ""}>
+                            {record.solution?.substring(0, 50) || ""}{record.solution && record.solution.length > 50 ? "..." : ""}
+                          </td>
+                          <td className="px-3 py-2">{(record.confidence * 100).toFixed(0)}%</td>
+                          <td className="px-3 py-2">{record.usage_count || 0}</td>
+                          <td className="px-3 py-2">
+                            <div className="flex gap-1">
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 w-6 p-0"
+                                onClick={() => {
+                                  setEditRecord(record);
+                                  setShowEditDialog(true);
+                                }}
+                              >
+                                <Edit className="h-3 w-3" />
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 w-6 p-0 text-red-500 hover:text-red-600"
+                                onClick={() => handleDeleteYutuRecord(record.error_hash)}
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={6} className="px-3 py-8 text-center text-gray-500">
+                          暂无记录
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* HTML内容显示区域 - 查看模式 */}
+            {(currentUser !== "rainforgrain" || viewMode === "html") && (
+              <div
+                ref={yutuPanelRef}
+                className="flex-1 min-h-0 overflow-auto rounded-md border bg-white dark:bg-gray-950"
+              >
+                {yutuHtmlContent ? (
+                  <div
+                    className="p-4 prose prose-sm dark:prose-invert max-w-none"
+                    dangerouslySetInnerHTML={{ __html: yutuHtmlContent }}
+                  />
+                ) : (
+                  <div className="h-full flex items-center justify-center text-gray-500">
+                    加载中...
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="flex justify-end gap-2 mt-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowYutuPanel(false)}
+            >
+              关闭
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 编辑记录对话框 - 超级用户专用 */}
+      {currentUser === "rainforgrain" && (
+        <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
+          <DialogContent className="sm:max-w-[600px]">
+            <DialogHeader>
+              <DialogTitle>编辑错误记录</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 py-4 max-h-[70vh] overflow-y-auto">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">错误类型</label>
+                <Input
+                  value={editRecord?.error_type || ""}
+                  onChange={(e) => setEditRecord({ ...editRecord, error_type: e.target.value })}
+                  placeholder="例如: ImportError"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">错误哈希</label>
+                <Input
+                  value={editRecord?.error_hash || ""}
+                  disabled
+                  className="bg-gray-100 dark:bg-gray-800"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">错误消息</label>
+                <textarea
+                  value={editRecord?.error_message || ""}
+                  onChange={(e) => setEditRecord({ ...editRecord, error_message: e.target.value })}
+                  className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-h-[80px]"
+                  placeholder="错误消息..."
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">解决方案</label>
+                <textarea
+                  value={editRecord?.solution || ""}
+                  onChange={(e) => setEditRecord({ ...editRecord, solution: e.target.value })}
+                  className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-h-[100px]"
+                  placeholder="解决方案描述..."
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">解决方案代码</label>
+                <textarea
+                  value={editRecord?.solution_code || ""}
+                  onChange={(e) => setEditRecord({ ...editRecord, solution_code: e.target.value })}
+                  className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-h-[120px] font-mono text-xs"
+                  placeholder="解决方案代码..."
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">置信度 (0-1)</label>
+                <Input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  value={editRecord?.confidence || 0}
+                  onChange={(e) => setEditRecord({ ...editRecord, confidence: parseFloat(e.target.value) || 0 })}
+                />
+              </div>
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogCancel onClick={() => setShowEditDialog(false)}>取消</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  handleUpdateYutuRecord(editRecord);
+                  setShowEditDialog(false);
+                }}
+              >
+                保存修改
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* 删除确认对话框 */}
+      {currentUser === "rainforgrain" && (
+        <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>确认删除记录？</AlertDialogTitle>
+              <AlertDialogDescription>
+                这将软删除该错误记录，使其在界面中不再显示。此操作可逆（通过数据库恢复）。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>取消</AlertDialogCancel>
+              <AlertDialogAction
+                className="bg-red-600 hover:bg-red-700"
+                onClick={() => {
+                  if (editRecord?.error_hash) {
+                    handleDeleteYutuRecord(editRecord.error_hash);
+                  }
+                  setShowDeleteConfirm(false);
+                }}
+              >
+                确认删除
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
     </>
   );
 }
