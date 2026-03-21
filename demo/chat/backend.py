@@ -71,7 +71,7 @@ from docx_utils import (
     extract_markdown_blocks,
 )
 
-# 雨途斩疑录模块
+# 雨途斩棘录模块
 from yutu_zhanyilu import (
     init_yutu_if_needed,
     add_error_solution,
@@ -87,7 +87,7 @@ from yutu_zhanyilu import (
 # ========== 自动错误记录功能 ==========
 def detect_and_record_error(exe_output: str, code_str: str, workspace_dir: str) -> dict:
     """
-    检测代码执行输出中的错误，并自动记录到雨途斩疑录
+    检测代码执行输出中的错误，并自动记录到雨途斩棘录
 
     Returns:
         dict: {
@@ -209,7 +209,7 @@ def detect_and_record_error(exe_output: str, code_str: str, workspace_dir: str) 
     except Exception as e:
         print(f"检查相似错误失败: {e}")
 
-    # 自动记录错误到雨途斩疑录（如果没有相似记录）
+    # 自动记录错误到雨途斩棘录（如果没有相似记录）
     if not result["similar_found"]:
         try:
             # 生成解决方案建议
@@ -227,9 +227,9 @@ def detect_and_record_error(exe_output: str, code_str: str, workspace_dir: str) 
                 created_by="system_auto"
             )
             result["recorded"] = True
-            print(f"[雨途斩疑录] 自动记录错误: {error_type} - {error_message[:50]}...")
+            print(f"[雨途斩棘录] 自动记录错误: {error_type} - {error_message[:50]}...")
         except Exception as e:
-            print(f"[雨途斩疑录] 自动记录失败: {e}")
+            print(f"[雨途斩棘录] 自动记录失败: {e}")
 
     return result
 
@@ -1651,20 +1651,20 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 - **语言规范**：与用户交流及生成报告时，**默认使用简体中文中文**。除非用户明确指定使用其他语言（如英文），否则不得使用英文或其他语言输出分析内容、报告文本。
 
 **============================================
-第七部分：雨途斩疑录 - 错误修正知识库（极重要）
+第七部分：雨途斩棘录 - 错误修正知识库（极重要）
 ============================================
 
-雨途斩疑录是智能体的错误修正知识库，记录了所有已解决的错误及其解决方案。**你必须在每次开始新分析任务时，首先查询这本笔记，避免重复曾经犯过的错误！**
+雨途斩棘录是智能体的错误修正知识库，记录了所有已解决的错误及其解决方案。**你必须在每次开始新分析任务时，首先查询这本笔记，避免重复曾经犯过的错误！**
 
 **启动时必须执行的查询命令**：
-在开始任何分析之前，你**必须**先用以下代码查询雨途斩疑录中的已知错误和解决方案：
+在开始任何分析之前，你**必须**先用以下代码查询雨途斩棘录中的已知错误和解决方案：
 ```python
 import requests
-# 获取雨途斩疑录中最近的错误记录
+# 获取雨途斩棘录中最近的错误记录
 response = requests.get("http://localhost:8200/api/yutu/search", json={"keywords": [], "page": 1, "page_size": 10})
 data = response.json()
 if data.get("success") and data.get("data", {}).get("items"):
-    print("=== 雨途斩疑录 - 历史错误记录 ===")
+    print("=== 雨途斩棘录 - 历史错误记录 ===")
     for item in data["data"]["items"]:
         print(f"错误类型: {item['error_type']}")
         print(f"错误消息: {item['error_message']}")
@@ -1672,30 +1672,30 @@ if data.get("success") and data.get("data", {}).get("items"):
         print("---")
 ```
 
-**雨途斩疑录功能说明**：
+**雨途斩棘录功能说明**：
 1. **自动记录**：【重要变化】系统现在已经**自动**记录你执行代码时遇到的错误。当你遇到错误并成功解决后，系统会自动把错误和解决方案记录到知识库中，你无需手动记录（但如果是你自己发现的额外解决方案，也可以手动记录）。
-2. **快速查找**：遇到相似错误时，优先查询雨途斩疑录获取已知解决方案
-3. **持续优化**：每次成功解决问题后，更新雨途斩疑录以提升未来工作效率
+2. **快速查找**：遇到相似错误时，优先查询雨途斩棘录获取已知解决方案
+3. **持续优化**：每次成功解决问题后，更新雨途斩棘录以提升未来工作效率
 
 **超级用户管理功能**：
-- 超级用户 `rainforgrain` 可以通过前端界面管理雨途斩疑录
+- 超级用户 `rainforgrain` 可以通过前端界面管理雨途斩棘录
 - 功能包括：查看、搜索、编辑、删除错误记录
 - 其他用户只能查看，不能管理
 
-**雨途斩疑录API端点**：
-- `GET /api/yutu/html` - 获取HTML格式的雨途斩疑录
+**雨途斩棘录API端点**：
+- `GET /api/yutu/html` - 获取HTML格式的雨途斩棘录
 - `POST /api/yutu/add` - 添加新记录（仅超级用户）
 - `POST /api/yutu/update` - 更新记录（仅超级用户）
 - `POST /api/yutu/delete` - 删除记录（仅超级用户）
 - `POST /api/yutu/search` - 搜索记录
-- `POST /api/yutu/init` - 初始化雨途斩疑录
+- `POST /api/yutu/init` - 初始化雨途斩棘录
 
-**使用雨途斩疑录的场景**：
-1. **【必须】每次开始新任务时**：查询雨途斩疑录，避免使用曾经失败的代码方式
+**使用雨途斩棘录的场景**：
+1. **【必须】每次开始新任务时**：查询雨途斩棘录，避免使用曾经失败的代码方式
 2. **【必须】代码执行出现错误后**：系统会自动记录错误，但你也可以补充解决方案
 3. 当遇到环境配置问题（如字体缺失、库版本冲突）时
-4. 当找到有效的解决方案后，应记录到雨途斩疑录
-5. 在尝试新方案前，先查询雨途斩疑录是否有类似问题的解决方案
+4. 当找到有效的解决方案后，应记录到雨途斩棘录
+5. 在尝试新方案前，先查询雨途斩棘录是否有类似问题的解决方案
 
 **记录格式**：
 - error_type: 错误类型（如 ImportError, ValueError）
@@ -1711,7 +1711,7 @@ if data.get("success") and data.get("data", {}).get("items"):
 <Analyze>
 # 工作前查询
 
-根据雨途斩疑录，以下是需要避免的错误模式：
+根据雨途斩棘录，以下是需要避免的错误模式：
 1. 错误类型: XXX - 解决方案: XXX
 2. 错误类型: YYY - 解决方案: YYY
 
@@ -1834,17 +1834,17 @@ if data.get("success") and data.get("data", {}).get("items"):
                 # 在子进程中以固定工作区执行
                 exe_output = execute_code_safe(code_str, WORKSPACE_DIR)
 
-                # ========== 自动检测并记录错误到雨途斩疑录 ==========
+                # ========== 自动检测并记录错误到雨途斩棘录 ==========
                 try:
                     error_info = detect_and_record_error(exe_output, code_str, WORKSPACE_DIR)
                     if error_info.get("has_error"):
-                        print(f"[雨途斩疑录] 检测到错误: {error_info.get('error_type')}")
+                        print(f"[雨途斩棘录] 检测到错误: {error_info.get('error_type')}")
                         if error_info.get("recorded"):
-                            print(f"[雨途斩疑录] 已自动记录到知识库")
+                            print(f"[雨途斩棘录] 已自动记录到知识库")
                         elif error_info.get("similar_found"):
-                            print(f"[雨途斩疑录] 发现相似错误记录，跳过重复记录")
+                            print(f"[雨途斩棘录] 发现相似错误记录，跳过重复记录")
                 except Exception as e:
-                    print(f"[雨途斩疑录] 错误检测失败: {e}")
+                    print(f"[雨途斩棘录] 错误检测失败: {e}")
                 # ========== 错误检测结束 ==========
 
                 # 执行后快照
@@ -2710,10 +2710,10 @@ async def delete_project(project_id: int = Query(...), username: str = Query(...
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ========== 雨途斩疑录 API ==========
+# ========== 雨途斩棘录 API ==========
 @app.get("/api/yutu/html")
 async def get_yutu_html_api():
-    """获取雨途斩疑录HTML内容（所有人都可以查看）"""
+    """获取雨途斩棘录HTML内容（所有人都可以查看）"""
     try:
         html = get_yutu_html()
         return {"success": True, "html": html}
@@ -2851,7 +2851,7 @@ async def search_yutu_records(body: dict = Body(...)):
 
 @app.post("/api/yutu/init")
 async def init_yutu_api():
-    """初始化雨途斩疑录（超级用户专用）"""
+    """初始化雨途斩棘录（超级用户专用）"""
     try:
         init_yutu_if_needed()
         return {"success": True, "message": "Yutu initialized successfully"}
@@ -2862,22 +2862,118 @@ async def init_yutu_api():
 
 @app.post("/api/yutu/organize")
 async def organize_yutu_api(records: List[dict], username: str = ""):
-    """整理雨途斩疑录 - AI重新组织所有记录（超级用户专用）"""
+    """整理雨途斩棘录 - 使用VLLM AI重新组织所有记录（超级用户专用）"""
     # 验证超级用户
     if username != "rainforgrain":
         raise HTTPException(status_code=403, detail="只有超级用户可以整理笔记")
 
     if not records or len(records) == 0:
-        return {"success": False, "detail": "没有记录可整理", "updated_count": 0}
+        return {"success": False, "detail": "没有记录可整理", "updated_count": 0, "records": []}
 
     try:
-        # 调用Yutu模块进行整理
-        from yutu_zhanyilu import reorganize_all_records
-        updated_count = reorganize_all_records(records)
-        return {"success": True, "updated_count": updated_count}
+        # 1. 导出原始笔记到本地文件
+        import json
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yutu_backups")
+        os.makedirs(export_dir, exist_ok=True)
+        backup_file = os.path.join(export_dir, f"yutu_backup_{timestamp}.json")
+        with open(backup_file, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+
+        # 2. 使用VLLM进行整理
+        prompt = f"""你是雨途斩棘录的智能整理助手。请分析以下所有错误记录，将每条记录的solution字段重新整理，使其：
+1. 更清晰地描述错误场景
+2. 提供更具体可执行的解决方案
+3. 添加"关键要点"总结
+
+请为每条记录生成改进后的solution，保持原有error_type和error_message不变。
+
+原始记录：
+{json.dumps(records, ensure_ascii=False, indent=2)}
+
+请直接返回JSON数组格式的整理结果，每条记录包含：error_hash, error_type, error_message, improved_solution（改进后的solution）。"""
+
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_PATH,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=4000
+            )
+            improved_content = response.choices[0].message.content
+
+            # 解析改进内容
+            import re
+            json_match = re.search(r'\[.*\]', improved_content, re.DOTALL)
+            if json_match:
+                improved_records = json.loads(json_match.group())
+            else:
+                # 如果无法解析，返回原始记录
+                improved_records = records
+
+            # 保存整理后的预览版本到临时文件
+            preview_file = os.path.join(export_dir, f"yutu_preview_{timestamp}.json")
+            with open(preview_file, "w", encoding="utf-8") as f:
+                json.dump(improved_records, f, ensure_ascii=False, indent=2)
+
+            # 返回预览数据给前端
+            return {
+                "success": True,
+                "updated_count": len(improved_records),
+                "records": improved_records,
+                "backup_file": backup_file,
+                "preview_file": preview_file,
+                "timestamp": timestamp
+            }
+        except Exception as vllm_err:
+            print(f"VLLM调用失败: {vllm_err}")
+            # VLLM失败时使用本地简单整理
+            from yutu_zhanyilu import reorganize_all_records
+            updated_count = reorganize_all_records(records)
+            return {
+                "success": True,
+                "updated_count": updated_count,
+                "records": records,
+                "backup_file": backup_file,
+                "note": "VLLM不可用，使用本地整理"
+            }
+
     except Exception as e:
         print(f"Organize yutu error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/yutu/organize/confirm")
+async def confirm_organize(data: dict, username: str = ""):
+    """确认整理结果：应用改进后的方案"""
+    if username != "rainforgrain":
+        raise HTTPException(status_code=403, detail="只有超级用户可以确认")
+
+    improved_records = data.get("records", [])
+    if not improved_records:
+        return {"success": False, "detail": "没有记录可更新"}
+
+    try:
+        from yutu_zhanyilu import update_solution
+        updated_count = 0
+        for record in improved_records:
+            if update_solution(record.get("error_hash"), record.get("improved_solution", "")):
+                updated_count += 1
+
+        return {"success": True, "updated_count": updated_count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/yutu/organize/cancel")
+async def cancel_organize(data: dict, username: str = ""):
+    """取消整理：恢复到原始备份"""
+    if username != "rainforgrain":
+        raise HTTPException(status_code=403, detail="只有超级用户可以取消")
+
+    # 取消操作不需要实际恢复，因为原始数据未修改
+    return {"success": True, "message": "已取消整理，原始记录保持不变"}
 
 
 if __name__ == "__main__":

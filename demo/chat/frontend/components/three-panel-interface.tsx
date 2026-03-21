@@ -436,7 +436,7 @@ export function ThreePanelInterface() {
   const [pendingSaveData, setPendingSaveData] = useState<any>(null);
   // 退出登录确认弹窗状态
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
-  // 雨途斩疑录面板状态
+  // 雨途斩棘录面板状态
   const [showYutuPanel, setShowYutuPanel] = useState(false);
   const [yutuHtmlContent, setYutuHtmlContent] = useState<string>("");
   const [yutuRecords, setYutuRecords] = useState<any[]>([]);
@@ -445,8 +445,10 @@ export function ThreePanelInterface() {
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [yutuViewAsRegular, setYutuViewAsRegular] = useState(false); // 超级用户查看模式：false=管理界面, true=只读HTML
+  const [showOrganizePreview, setShowOrganizePreview] = useState(false); // 整理预览弹窗
+  const [organizedRecords, setOrganizedRecords] = useState<any[]>([]); // 整理后的记录
 
-  // 雨途斩疑功能状态
+  // 雨途斩棘录功能状态
   const [hasAnalysisCompleted, setHasAnalysisCompleted] = useState(false); // 分析任务是否完成
   const [knowledgeBaseEnabled, setKnowledgeBaseEnabled] = useState(true); // 知识库是否启用
   const [isRecordingKnowledge, setIsRecordingKnowledge] = useState(false); // 是否正在记录知识
@@ -496,7 +498,7 @@ export function ThreePanelInterface() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const exportReportBackendRef = useRef<any>(null); // Initialize as null
   const saveChatTimerRef = useRef<number | null>(null);
-  // 雨途斩疑录相关ref
+  // 雨途斩棘录相关ref
   const yutuPanelRef = useRef<HTMLDivElement>(null);
 
   // 组件挂载后从 localStorage 读取主题
@@ -524,7 +526,7 @@ export function ThreePanelInterface() {
       if (savedAuto !== null) {
         setAutoCollapseEnabled(savedAuto !== "false");
       }
-      // 加载雨途斩疑录HTML
+      // 加载雨途斩棘录HTML
       loadYutuHtml();
       loadYutuRecords();
     }
@@ -579,7 +581,7 @@ export function ThreePanelInterface() {
     }
   }, [activeSection]);
 
-  // --- 雨途斩疑录函数 ---
+  // --- 雨途斩棘录函数 ---
   const loadYutuHtml = async () => {
     try {
       const res = await fetch(API_URLS.YUTU_HTML);
@@ -588,7 +590,7 @@ export function ThreePanelInterface() {
         setYutuHtmlContent(data.html || "");
       }
     } catch (e) {
-      console.error("加载雨途斩疑录失败:", e);
+      console.error("加载雨途斩棘录失败:", e);
       setYutuHtmlContent("<html><body><h1>加载失败</h1></body></html>");
     }
   };
@@ -710,7 +712,7 @@ export function ThreePanelInterface() {
       return false;
     }
     // 确认初始化操作
-    if (!window.confirm("确定要初始化雨途斩疑录吗？此操作将重置所有记录！")) {
+    if (!window.confirm("确定要初始化雨途斩棘录吗？此操作将重置所有记录！")) {
       return false;
     }
     try {
@@ -719,7 +721,7 @@ export function ThreePanelInterface() {
         headers: { "Content-Type": "application/json" }
       });
       if (res.ok) {
-        toast({ description: "雨途斩疑录初始化成功" });
+        toast({ description: "雨途斩棘录初始化成功" });
         loadYutuHtml();
         loadYutuRecords();
         return true;
@@ -733,7 +735,7 @@ export function ThreePanelInterface() {
     return false;
   };
 
-  // 整理雨途斩疑笔记 - AI重新组织所有记录
+  // 整理雨途斩棘录笔记 - AI重新组织所有记录（预览模式）
   const organizeYutuNotes = async () => {
     if (currentUser !== "rainforgrain") {
       toast({ description: "只有超级用户可以整理笔记", variant: "destructive" });
@@ -754,9 +756,14 @@ export function ThreePanelInterface() {
       });
       if (res.ok) {
         const data = await res.json();
-        toast({ description: `笔记整理完成，已更新 ${data.updated_count || yutuRecords.length} 条记录` });
-        loadYutuRecords();
-        loadYutuHtml();
+        if (data.records && data.records.length > 0) {
+          // 显示预览
+          setOrganizedRecords(data.records);
+          setShowOrganizePreview(true);
+          toast({ description: `整理完成，请预览并确认` });
+        } else {
+          toast({ description: "整理失败：无可用记录", variant: "destructive" });
+        }
       } else {
         const data = await res.json();
         toast({ description: data.detail || "整理失败", variant: "destructive" });
@@ -766,7 +773,93 @@ export function ThreePanelInterface() {
     }
   };
 
-  // 记录知识到雨途斩疑录
+  // 确认整理结果
+  const confirmOrganize = async () => {
+    try {
+      const res = await fetch(`/api/yutu/organize/confirm?username=${encodeURIComponent(currentUser || "")}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ records: organizedRecords })
+      });
+      if (res.ok) {
+        toast({ description: "已确认整理结果" });
+        setShowOrganizePreview(false);
+        loadYutuRecords();
+        loadYutuHtml();
+      }
+    } catch (e) {
+      toast({ description: "确认失败", variant: "destructive" });
+    }
+  };
+
+  // 取消整理（回退）
+  const cancelOrganize = async () => {
+    setShowOrganizePreview(false);
+    setOrganizedRecords([]);
+    toast({ description: "已取消，原始记录保持不变" });
+  };
+
+  // 总结分析任务完成情况和亮点
+  const [showSuccessSummary, setShowSuccessSummary] = useState(false);
+  const [successSummary, setSuccessSummary] = useState<string>("");
+  const summarizeSuccessPoints = async () => {
+    if (!hasAnalysisCompleted) return;
+    setIsRecordingKnowledge(true);
+
+    try {
+      // 从消息中提取分析结果
+      const aiMessages = messages.filter(m => m.sender === "ai" && m.content);
+      if (aiMessages.length === 0) {
+        toast({ description: "暂无分析内容", variant: "destructive" });
+        setIsRecordingKnowledge(false);
+        return;
+      }
+
+      const lastContent = aiMessages[aiMessages.length - 1].content;
+
+      // 使用VLLM生成总结（简化版）
+      const prompt = `请从以下分析内容中提取本次分析的亮点和成功要点（最多10条，总300字以内）。只列出要点，用简洁的中文描述。
+分析内容摘要：${lastContent.slice(0, 2000)}
+请直接输出要点列表，每条一行，不要有额外说明。`;
+
+      try {
+        const response = await fetch("/api/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: 500,
+            temperature: 0.3
+          })
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          const summary = data.choices?.[0]?.message?.content || "";
+          // 限制总长度
+          const truncated = summary.length > 300 ? summary.slice(0, 300) + "..." : summary;
+          setSuccessSummary(truncated);
+        } else {
+          // 如果API失败，使用本地简单提取
+          setSuccessSummary(extractLocalSuccessPoints(lastContent));
+        }
+      } catch {
+        setSuccessSummary(extractLocalSuccessPoints(lastContent));
+      }
+
+      setShowSuccessSummary(true);
+    } finally {
+      setIsRecordingKnowledge(false);
+    }
+  };
+
+  // 本地提取亮点（API失败时的备选方案）
+  const extractLocalSuccessPoints = (content: string): string => {
+    const lines = content.split('\n').filter(l => l.trim().length > 10).slice(0, 10);
+    return lines.map(l => `• ${l.trim().slice(0, 50)}${l.length > 50 ? "..." : ""}`).join('\n').slice(0, 300);
+  };
+
+  // 记录知识到雨途斩棘录
   const recordKnowledgeFromAnalysis = async () => {
     if (isRecordingKnowledge || !knowledgeBaseEnabled) return;
 
@@ -787,7 +880,7 @@ export function ThreePanelInterface() {
       }
 
       // 构造提示让AI分析并提取知识
-      const prompt = `你是雨途斩疑录的知识提取助手。请分析以下智能体分析过程，提取其中出现的错误和解决方案。
+      const prompt = `你是雨途斩棘录的知识提取助手。请分析以下智能体分析过程，提取其中出现的错误和解决方案。
 
 分析过程：
 ${analysisContent}
@@ -879,7 +972,7 @@ ${analysisContent}
                 }
               }
 
-              toast({ description: `已记录 ${recordedCount} 条知识到雨途斩疑录` });
+              toast({ description: `已记录 ${recordedCount} 条知识到雨途斩棘录` });
               loadYutuRecords();
             } catch (e) {
               console.error("解析知识记录失败:", e);
@@ -3718,7 +3811,7 @@ ${analysisContent}
 
               <div
                 ref={treeContainerRef}
-                className="flex-1 min-h-0 overflow-y-auto overflow-x-visible pl-3 pr-1 py-2"
+                className="flex-1 w-full min-h-0 overflow-y-auto overflow-x-hidden pl-3 pr-1 py-2"
               >
                 <div
                   className={`mb-2 rounded border border-dashed flex items-center justify-center h-20 text-xs select-none ${dropActive
@@ -3758,7 +3851,7 @@ ${analysisContent}
                   </div>
                 )}
 
-                {/* 雨途斩疑按钮 - 仅在分析完成后可用 */}
+                {/* 雨途斩棘录按钮 - 仅在分析完成后可用 */}
                 <div className="px-2 py-2 border-b border-gray-200 dark:border-gray-700">
                   <Button
                     size="sm"
@@ -3770,7 +3863,7 @@ ${analysisContent}
                     disabled={!hasAnalysisCompleted || isRecordingKnowledge}
                     onClick={() => {
                       if (currentUser === "rainforgrain") {
-                        recordKnowledgeFromAnalysis();
+                        summarizeSuccessPoints();
                       } else {
                         toast({ description: "只有管理员可以执行此操作", variant: "destructive" });
                       }
@@ -4198,7 +4291,7 @@ ${analysisContent}
                       Code
                     </h2>
                     <div className="flex items-center gap-2">
-                      {/* 雨途斩疑录按钮 */}
+                      {/* 雨途斩棘录按钮 */}
                       <Button
                         variant="ghost"
                         size="sm"
@@ -4207,10 +4300,10 @@ ${analysisContent}
                           loadYutuHtml();
                         }}
                         className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                        title="雨途斩疑录 - 错误修正记录"
+                        title="雨途斩棘录 - 错误修正记录"
                       >
                         <BookOpen className="h-3.5 w-3.5 mr-1" />
-                        <span>雨途</span>
+                        <span>雨途斩棘录</span>
                       </Button>
                       {showCodeEditor && (
                         <div className="flex gap-2">
@@ -4908,13 +5001,13 @@ ${analysisContent}
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* 雨途斩疑录面板 */}
+      {/* 雨途斩棘录面板 */}
       <Dialog open={showYutuPanel} onOpenChange={setShowYutuPanel}>
         <DialogContent className="sm:max-w-[90vw] max-h-[90vh] flex flex-col">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <BookOpen className="h-5 w-5" />
-              雨途斩疑录
+              雨途斩棘录
               <span className="text-xs font-normal text-gray-500 dark:text-gray-400 ml-2">
                 - 智能体错误修正记录知识库 -
               </span>
@@ -5121,8 +5214,8 @@ ${analysisContent}
                 使用说明
               </div>
               <ul className="text-xs text-blue-600 dark:text-blue-400 space-y-1">
-                <li>• 启用后，智能体在每次分析开始时会查询雨途斩疑录</li>
-                <li>• "雨途斩疑"按钮在分析完成后变为可用</li>
+                <li>• 启用后，智能体在每次分析开始时会查询雨途斩棘录</li>
+                <li>• "雨途斩棘录"按钮在分析完成后变为可用</li>
                 <li>• 点击可自动提取分析过程中的问题和解决方案</li>
                 <li>• 重复的记录会自动过滤，不会重复添加</li>
               </ul>

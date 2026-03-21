@@ -1,5 +1,5 @@
 """
-雨途斩疑录 - 智能体错误修正记录管理模块
+雨途斩棘录 - 智能体错误修正记录管理模块
 
 这个模块管理智能体在执行代码时遇到的错误及其解决方案，
 形成知识库，帮助智能体在将来遇到类似问题时快速解决。
@@ -20,12 +20,12 @@ logger = logging.getLogger(__name__)
 # 数据库路径
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepanalyze.db")
 
-# 雨途斩疑录HTML文件路径
+# 雨途斩棘录HTML文件路径
 YUTU_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yutu_zhanyilu.html")
 
 
 def init_yutu_db():
-    """初始化雨途斩疑录数据库"""
+    """初始化雨途斩棘录数据库"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -61,7 +61,7 @@ def init_yutu_db():
     conn.commit()
     conn.close()
 
-    logger.info("雨途斩疑录数据库初始化完成")
+    logger.info("雨途斩棘录数据库初始化完成")
 
 
 def compute_error_hash(error_type: str, error_message: str) -> str:
@@ -462,7 +462,7 @@ def _extract_key_cause(error_type: str) -> str:
 
 
 def generate_yutu_html() -> str:
-    """生成雨途斩疑录HTML内容"""
+    """生成雨途斩棘录HTML内容"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -480,7 +480,7 @@ def generate_yutu_html() -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>雨途斩疑录 - 智能体错误修正记录</title>
+    <title>雨途斩棘录 - 智能体错误修正记录</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -665,7 +665,7 @@ def generate_yutu_html() -> str:
 <body>
     <div class="container">
         <div class="header">
-            <h1>📖 雨途斩疑录</h1>
+            <h1>📖 雨途斩棘录</h1>
             <p>智能体错误修正记录与解决方案知识库</p>
             <div class="stats">
                 <div class="stat-item">
@@ -750,7 +750,7 @@ def generate_yutu_html() -> str:
         </div>
 
         <div class="footer">
-            <p>雨途斩疑录 - 智能体的错误修正知识库</p>
+            <p>雨途斩棘录 - 智能体的错误修正知识库</p>
             <p>超级用户: rainforgrain</p>
         </div>
     </div>
@@ -765,7 +765,7 @@ def generate_yutu_html() -> str:
 
 
 def update_yutu_html():
-    """更新雨途斩疑录HTML文件"""
+    """更新雨途斩棘录HTML文件"""
     try:
         html_content = generate_yutu_html()
 
@@ -773,7 +773,7 @@ def update_yutu_html():
         with open(YUTU_HTML_PATH, "w", encoding="utf-8") as f:
             f.write(html_content)
 
-        logger.info(f"雨途斩疑录HTML已更新: {YUTU_HTML_PATH}")
+        logger.info(f"雨途斩棘录HTML已更新: {YUTU_HTML_PATH}")
 
         # 同时保存到数据库的special_files表（如果存在）
         try:
@@ -789,7 +789,7 @@ def update_yutu_html():
                     VALUES ('yutu_zhanyilu', ?, CURRENT_TIMESTAMP)
                 ''', (html_content,))
                 conn.commit()
-                logger.info("雨途斩疑录HTML已同步到数据库")
+                logger.info("雨途斩棘录HTML已同步到数据库")
 
             conn.close()
         except Exception as e:
@@ -800,7 +800,7 @@ def update_yutu_html():
 
 
 def get_yutu_html() -> str:
-    """获取雨途斩疑录HTML内容"""
+    """获取雨途斩棘录HTML内容"""
     try:
         if os.path.exists(YUTU_HTML_PATH):
             with open(YUTU_HTML_PATH, "r", encoding="utf-8") as f:
@@ -818,7 +818,7 @@ def get_yutu_html() -> str:
 
 
 def init_yutu_if_needed():
-    """初始化雨途斩疑录（如果需要）"""
+    """初始化雨途斩棘录（如果需要）"""
     init_yutu_db()
     update_yutu_html()
 
@@ -829,7 +829,7 @@ init_yutu_if_needed()
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("雨途斩疑录 - 初始化测试")
+    print("雨途斩棘录 - 初始化测试")
     print("=" * 60)
 
     # 添加测试记录
