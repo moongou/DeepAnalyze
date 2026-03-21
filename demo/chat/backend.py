@@ -54,10 +54,29 @@ if os.path.exists(FONT_DIR):
 
 import chardet
 from docx import Document
+
+# 使用新的模块化 PDF 工具
+from pdf_utils import (
+    register_chinese_fonts,
+    get_chinese_style,
+    extract_markdown_sections,
+    clean_md_text,
+    generate_pdf as generate_pdf_module,
+)
+
+from docx_utils import (
+    generate_docx as generate_docx_module,
+    create_docx_document,
+    clean_md_text_for_docx,
+    extract_markdown_blocks,
+)
+
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.pagesizes import A4
+
 
 Chinese_matplot_str = """
 import matplotlib
@@ -86,18 +105,17 @@ for _d in _FONT_DIRS:
 # 优先使用支持中文的字体系列（按优先级排序）
 plt.rcParams['font.sans-serif'] = [
     # assets/fonts 中的中文字体（优先，纯 TTF）
-    'SimHei',           # assets/simhei.ttf（最高优先，黑体）
-    'SimKai',           # assets/simkai.ttf（楷体）
-    'SimFang',          # assets/simfang.ttf（仿宋）
-    'FZxiaobiaosong',   # assets/fzbsk.ttf（方正小标宋）
+    'SimHei',           # assets/simhei.ttf（黑体，主标题）
+    'SimKai',           # assets/simkai.ttf（楷体，引用/强调）
+    'STFangSong',       # assets/STFangSong.ttf（仿宋，正文）
+    'STHeiti',          # assets/STHeiti.ttf（黑体，备选）
     # macOS 系统 CJK 字体
-    'STHeiti',          # macOS 黑体
     'Heiti TC',         # macOS 繁体黑体
     'PingFang SC',      # macOS 苹方简体中文
     'PingFang TC',      # macOS 苹方繁体中文
-    'SimSun',           # Windows 宋体（部分 macOS 有）
+    'Kaiti SC',         # macOS 楷体
+    'Songti SC',        # macOS 宋体
     'Arial Unicode MS', # macOS 内置
-    'Noto Sans CJK SC', # 开源思源黑体
     'DejaVu Sans',
     'sans-serif',
 ]
@@ -374,20 +392,69 @@ def _rewrite_file_paths(code_str: str, workspace_dir: str) -> str:
 
 
 def collect_file_info(directory: str) -> str:
-    """收集文件信息"""
+    """收集文件信息，包括编码映射"""
     all_file_info_str = ""
     dir_path = Path(directory)
     if not dir_path.exists():
         return ""
 
-    files = sorted([f for f in dir_path.iterdir() if f.is_file()])
+    # 读取编码映射文件（如存在）
+    encoding_map = {}
+    encoding_map_path = dir_path / ".encoding_map.json"
+    if encoding_map_path.exists():
+        try:
+            with open(encoding_map_path, "r", encoding="utf-8") as f:
+                encoding_data = json.load(f)
+                # 构建文件名 -> 编码信息的映射
+                for item in encoding_data.get("files", []):
+                    orig_name = item.get("original_name", "")
+                    encoding_map[orig_name] = item
+        except Exception:
+            pass
+
+    # 收集所有文件信息（排除 .encoding_map.json 本身）
+    files = sorted([f for f in dir_path.iterdir() if f.is_file() and f.name != ".encoding_map.json"])
+
     for idx, file_path in enumerate(files, start=1):
         size_bytes = os.path.getsize(file_path)
         size_kb = size_bytes / 1024
         size_str = f"{size_kb:.1f}KB"
-        file_info = {"name": file_path.name, "size": size_str}
+
+        # 获取该文件的编码信息
+        enc_info = encoding_map.get(file_path.name, {})
+        original_encoding = enc_info.get("original_encoding", "unknown")
+        is_converted = enc_info.get("is_converted", False)
+        converted_name = enc_info.get("converted_name", file_path.name)
+
+        # 构建文件信息
+        file_info = {
+            "name": file_path.name,
+            "size": size_str,
+            "encoding": original_encoding,
+            "is_utf8_converted": is_converted
+        }
+
+        # 如果是转换过的文件，标记正确路径
+        if is_converted:
+            file_info["use_path"] = f"converted/{converted_name}"
+
         file_info_str = json.dumps(file_info, indent=4, ensure_ascii=False)
         all_file_info_str += f"File {idx}:\n{file_info_str}\n\n"
+
+    # 添加编码状态汇总
+    if encoding_map:
+        all_utf8 = all(
+            item.get("original_encoding") in ("utf-8", "binary")
+            for item in encoding_map.values()
+        )
+        converted_count = sum(1 for item in encoding_map.values() if item.get("is_converted"))
+
+        if all_utf8:
+            all_file_info_str += "【编码状态】所有文件已是 UTF-8 编码，可直接使用。\n\n"
+        else:
+            all_file_info_str += f"【编码状态】已转换 {converted_count} 个非 UTF-8 文件为 UTF-8 编码。\n"
+            all_file_info_str += "【重要】读取数据文件时请使用 converted/ 目录下的 UTF-8 版本文件。\n\n"
+
     return all_file_info_str
 
 
@@ -733,18 +800,20 @@ async def proxy(url: str):
         raise HTTPException(status_code=502, detail=f"Proxy fetch failed: {e}")
 
 
-def convert_to_utf8(file_path: Path, workspace_dir: str) -> Optional[Path]:
-    """检查文件编码并转换为 UTF-8，另存为 converted/ 子目录下的文件。"""
+def convert_to_utf8(file_path: Path, workspace_dir: str) -> tuple[Optional[Path], str]:
+    """检查文件编码并转换为 UTF-8，另存为 converted/ 子目录下的文件。
+    返回 (目标路径, 原始编码) 元组。
+    """
     if not file_path.exists() or not file_path.is_file():
-        return None
+        return None, "unknown"
 
     # 已经是 converted 目录下的文件，跳过
     if "converted" + os.sep in str(file_path) or str(file_path).startswith("converted"):
-        return file_path
+        return file_path, "utf-8"
 
     # 仅转换文本类文件
     if file_path.suffix.lower() not in [".csv", ".txt", ".md", ".json", ".xml"]:
-        return file_path
+        return file_path, "binary"
 
     try:
         with open(file_path, "rb") as f:
@@ -769,16 +838,16 @@ def convert_to_utf8(file_path: Path, workspace_dir: str) -> Optional[Path]:
             # 已经是 utf-8，直接复制到 converted 目录
             if not utf8_path.exists():
                 shutil.copy2(file_path, utf8_path)
-            return utf8_path
+            return utf8_path, "utf-8"
 
         # 转换非 UTF-8 编码
         content = raw_data.decode(encoding, errors='replace')
         with open(utf8_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return utf8_path
+        return utf8_path, encoding
     except Exception as e:
         print(f"Error converting {file_path} to UTF-8: {e}")
-        return file_path
+        return file_path, "unknown"
 
 @app.post("/workspace/upload")
 async def upload_files(
@@ -787,6 +856,7 @@ async def upload_files(
     """上传文件到工作区（支持 user & session 隔离），并自动转换为 UTF-8"""
     workspace_dir = get_session_workspace(session_id, username)
     uploaded_files = []
+    encoding_report = []  # 记录每个文件的编码状态
 
     for file in files:
         # 唯一化文件名，避免覆盖
@@ -796,7 +866,16 @@ async def upload_files(
             buffer.write(content)
 
         # 自动转换为 UTF-8（保存到 converted/ 子目录）
-        utf8_dst = convert_to_utf8(dst, workspace_dir)
+        utf8_dst, original_encoding = convert_to_utf8(dst, workspace_dir)
+
+        # 记录编码信息
+        encoding_report.append({
+            "original_name": dst.name,
+            "converted_name": utf8_dst.name if utf8_dst else dst.name,
+            "original_encoding": original_encoding,
+            "is_converted": (utf8_dst != dst) if utf8_dst else False,
+            "path": str(utf8_dst.relative_to(Path(workspace_dir))) if utf8_dst else str(dst.relative_to(Path(workspace_dir)))
+        })
 
         uploaded_files.append(
             {
@@ -814,9 +893,26 @@ async def upload_files(
                 }
             )
 
+    # 生成编码状态汇总
+    all_utf8 = all(item["original_encoding"] == "utf-8" or item["original_encoding"] == "binary" for item in encoding_report)
+    converted_count = sum(1 for item in encoding_report if item["is_converted"])
+
+    encoding_summary = {
+        "all_files_utf8": all_utf8,
+        "converted_count": converted_count,
+        "total_files": len(encoding_report),
+        "files": encoding_report
+    }
+
+    # 保存编码映射文件，供智能体后续分析时读取
+    encoding_map_path = Path(workspace_dir) / ".encoding_map.json"
+    with open(encoding_map_path, "w", encoding="utf-8") as f:
+        json.dump(encoding_summary, f, indent=2, ensure_ascii=False)
+
     return {
-        "message": f"Successfully uploaded {len(uploaded_files)} files (including UTF-8 conversions)",
+        "message": f"Successfully uploaded {len(uploaded_files)} files",
         "files": uploaded_files,
+        "encoding_info": encoding_summary
     }
 
 
@@ -846,6 +942,7 @@ async def upload_to_dir(
     target_dir.mkdir(parents=True, exist_ok=True)
 
     saved = []
+    encoding_report = []
     for f in files:
         dst = uniquify_path(target_dir / f.filename)
         try:
@@ -854,7 +951,14 @@ async def upload_to_dir(
                 buffer.write(content)
 
             # 自动转换为 UTF-8（保存到 converted/ 子目录）
-            utf8_dst = convert_to_utf8(dst, workspace_dir)
+            utf8_dst, original_encoding = convert_to_utf8(dst, workspace_dir)
+
+            encoding_report.append({
+                "original_name": dst.name,
+                "converted_name": utf8_dst.name if utf8_dst else dst.name,
+                "original_encoding": original_encoding,
+                "is_converted": (utf8_dst != dst) if utf8_dst else False,
+            })
 
             saved.append(
                 {
@@ -873,7 +977,23 @@ async def upload_to_dir(
                 )
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Save failed: {e}")
-    return {"message": f"uploaded {len(saved)} (including UTF-8 conversions)", "files": saved}
+
+    all_utf8 = all(item["original_encoding"] == "utf-8" or item["original_encoding"] == "binary" for item in encoding_report)
+    converted_count = sum(1 for item in encoding_report if item["is_converted"])
+
+    encoding_summary = {
+        "all_files_utf8": all_utf8,
+        "converted_count": converted_count,
+        "total_files": len(encoding_report),
+        "files": encoding_report
+    }
+
+    # 保存编码映射文件，供智能体后续分析时读取
+    encoding_map_path = Path(workspace_dir) / ".encoding_map.json"
+    with open(encoding_map_path, "w", encoding="utf-8") as f:
+        json.dump(encoding_summary, f, indent=2, ensure_ascii=False)
+
+    return {"message": f"uploaded {len(saved)} files", "files": saved, "encoding_info": encoding_summary}
 
 
 @app.post("/execute")
@@ -965,8 +1085,16 @@ def fix_tags_and_codeblock(s: str) -> str:
     return s
 
 
-def bot_stream(messages, workspace, session_id="default", username="default", strategy="聚焦诉求"):
-    # Strategy-specific prompts
+def bot_stream(messages, workspace, session_id="default", username="default", strategy="聚焦诉求", temperature=0.4):
+    # Strategy-specific prompts and default temperature
+    strategy_temperatures = {
+        "聚焦诉求": 0.2,
+        "适度扩展": 0.4,
+        "广泛延展": 0.6,
+    }
+    # Use provided temperature, or fall back to strategy default
+    effective_temperature = temperature if temperature is not None else strategy_temperatures.get(strategy, 0.4)
+
     strategy_prompts = {
         "聚焦诉求": "\n**分析策略：聚焦诉求**。请严格遵守用户指令，仅针对用户直接提出的问题进行分析和回答，不要进行任何不必要的发散或多余的关联分析。保持回答简洁、高效、直击要点。",
         "适度扩展": "\n**分析策略：适度扩展**。在满足用户核心需求的基础上，请基于数据表现进行适量的关联性分析。你可以简要探讨与核心指标相关的其他因素，提供一些背景信息或浅层的风险提示，但请注意分寸，不要过度发散。",
@@ -995,16 +1123,27 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 
 1. **FPDF 2.x 弃用警告（"DeprecationWarning" / "FPDF internal: ..."）**：
    - 原因：FPDF 2.x 弃用了 `add_font(dejaVu condensed=True)` 语法。应使用 `style='B'` 参数。
-   - 正确写法：
+   - **完整正确写法示例（生成中文PDF）**：
      ```python
      from fpdf import FPDF
      pdf = FPDF()
-     pdf.add_font('SimHei', '', '/assets/fonts/simhei.ttf')  # 无需 style 参数
-     pdf.add_font('SimHei', 'B', '/assets/fonts/simhei.ttf')  # 加粗
-     pdf.add_font('SimHei', 'I', '/assets/fonts/simkai.ttf')  # 斜体（使用楷体）
+     # 添加中文字体（必须使用绝对路径）
+     pdf.add_font('SimHei', '', '/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf')
+     pdf.add_font('SimHei', 'B', '/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf')
+     pdf.add_font('SimHei', 'I', '/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf')
+     pdf.add_font('STFangSong', '', '/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf')
+
+     pdf.add_page()
+     # 设置字体，大小
+     pdf.set_font('SimHei', '', 16)
+     pdf.cell(0, 10, '中文标题', ln=True, align='C')
+     pdf.set_font('STFangSong', '', 12)
+     pdf.multi_cell(0, 10, '这是一段中文正文，可以正常显示。请注意使用 multi_cell 来自动换行。')
+     pdf.output('output.pdf')
      ```
    - **禁止写法**：`add_font('SimHei', condensed=True)` → 会产生弃用警告
    - **禁止写法**：`add_font('SimHei', '', '/path/font.ttf', condensed=True)` → 会产生弃用警告
+   - **重要**：必须使用 `pdf.set_font()` 设置已注册的字体，并使用 `pdf.multi_cell()` 渲染中文文本。
 
 2. **FPDF 2.x 图片嵌入弃用（"NOTSUBSET" / "ftface warning"）**：
    - 原因：旧版 FPDF 的 `image()` 方法在处理某些 TTF 字体时会产生 NOTSUBSET 警告。
@@ -1037,31 +1176,45 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 **============================================
 第三部分：报告结构规范（极重要）
 ============================================
-每次分析完成后，生成的报告**必须**遵循以下结构：
+每次分析完成后，生成的报告**必须**遵循以下结构，**报告内所有内容必须使用简体中文**：
 
-**报告开头（必须有）**：
-```
-# 分析思路
-本文档针对 [用户核心诉求] 进行分析，采用以下分析路径：
-1. [第一步：数据理解与预处理]
-2. [第二步：多维度分析（如：时间维度、主体维度、商品维度等）]
-3. [第三步：可视化与关键发现]
-4. [第四步：风险点识别与结论]
-...
-```
+**报告整体结构（PDF/DOCX/聊天输出均适用）**：
+1. **第一部分：分析思路**（必须放在报告开头）
+   ```
+   # 分析思路
+   本文档针对 [用户核心诉求] 进行分析，采用以下分析路径：
+   1. [第一步：数据理解与预处理]
+   2. [第二步：多维度分析（如：时间维度、主体维度、商品维度等）]
+   3. [第三步：可视化与关键发现]
+   4. [第四步：风险点识别与结论]
+   ...
+   ```
 
-**报告主体**：按分析角度分章节，每个角度的分析完成后给出文字、数据、图片等素材。
+2. **第二部分：分析主体内容**（放在分析思路之后、分析小结之前）
+   - 按分析角度分章节，每个角度的分析完成后给出：
+     - 文字分析（观点、推理、结论）
+     - 数据表格
+     - 可视化图表（图表标题置于图表下方，引用编号置于标题前，如"图1："）
+   - **章节标题**：使用黑体（SimHei）加粗，层级清晰
+   - **正文**：使用仿宋（STFangSong），保持1.2-1.5倍行距
+   - **图表**：保持原始清晰度，确保中文显示正常
 
-**报告结尾（必须有）**：
-```
-# 分析小结
-本次分析采用了以下方法：
-- 数据源：[文件名/数据量]
-- 时间范围：[YYYY-MM-DD ~ YYYY-MM-DD]
-- 主要分析方法：[描述]
-- 关键发现：[1-3条核心结论]
-- 局限性与后续建议：[如有]
-```
+3. **第三部分：分析小结**（必须放在报告结尾）
+   ```
+   # 分析小结
+   本次分析采用了以下方法：
+   - 数据源：[文件名/数据量]
+   - 时间范围：[YYYY-MM-DD ~ YYYY-MM-DD]
+   - 主要分析方法：[描述]
+   - 关键发现：[1-3条核心结论]
+   - 局限性与后续建议：[如有]
+   ```
+
+**重要提醒**：
+- 分析思路和分析小结**必须**出现在聊天输出**和**生成的PDF/DOCX报告中
+- 报告顺序：**分析思路** → **主体分析内容（图表+数据+观点）** → **分析小结**
+- 禁止将分析小结放在开头，或省略分析思路
+- PDF/DOCX排版要求：保持标题层级、使用正确的中文字体（见排版规范）
 
 **============================================
 第四部分：排版与美学规范
@@ -1072,7 +1225,7 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
    - 一级标题（如"# 标题"）：黑体（SimHei），字号 18-20pt，加粗
    - 二级标题（如"## 标题"）：黑体（SimHei），字号 14-16pt，加粗
    - 三级标题（如"### 标题"）：楷体（SimKai），字号 12-13pt，加粗
-   - 正文：仿宋（SimFang），字号 10.5-11pt
+   - 正文：仿宋（STFangSong），字号 10.5-11pt
    - 图片说明：楷体（SimKai），字号 9-10pt，斜体
 
 2. **行间距**：
@@ -1096,29 +1249,138 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 - ❌ 多次生成相同或相似的图表/数据。
 - ❌ 使用自己定义的但未确认存在的文件名读取数据。
 - ❌ 在代码块中硬编码文件名而不先验证文件是否存在。
+- ❌ 重复编写相同的加载数据代码，每次分析都从头开始。
+- ❌ 不判断分析是否已满足用户需求，持续进行不必要的分析。
 
-**正确工作流程（按顺序执行）**：
+**文件编码与映射规范（极重要）**：
+系统已在文件上传时自动完成编码检测和转换，但你仍需遵循以下规范：
 
-1. **阶段一：理解与探索**
-   - 理解用户的分析诉求
-   - 探索数据结构、时间范围、关键字段
-   - 制定分析计划（明确分析角度和先后顺序）
+1. **编码状态告知**：上传完成后，系统会告知你每个文件的编码状态。
+   - 如果所有文件均为 UTF-8 编码，系统会提示"所有文件已是 UTF-8 编码，可直接使用"
+   - 如果存在非 UTF-8 文件，系统会提示"已转换 X 个文件为 UTF-8 编码"
 
-2. **阶段二：按角度生成素材**
-   - 选定一个分析角度
-   - 生成该角度的文字分析、数据表格、可视化图表
-   - **每生成一个素材，立即告知用户当前进度和发现**
-   - 验证生成的文件名和路径正确
+2. **文件映射机制**：系统会自动维护一个文件映射表，在你开始分析时提供：
+   ```
+   文件映射表：
+   - 原始文件名 → converted/文件名（UTF-8版本）
+   - 文件编码记录：[文件名: 编码类型]
+   ```
+   **你必须记住这个映射表，分析时直接使用 mapped 文件路径，无需重新检测编码。**
 
-3. **阶段三：汇总与报告**
-   - 确认所有分析角度的素材均已生成完毕
-   - 按报告结构组织内容（分析思路 → 各角度分析 → 小结）
-   - 生成 PDF 和 DOCX 最终报告
+3. **分析时的文件访问规则**：
+   - **直接使用 converted/ 目录下的 UTF-8 文件进行读取**
+   - **禁止在分析时重新检测编码或重新转换文件**
+   - 使用 pandas 读取 CSV 文件时，直接指定正确路径即可
+   - 示例正确写法：`df = pd.read_csv('workspace/session_xxx/converted/数据文件.csv')`
 
-**文件名管理原则**：
+**任务拆解与分层执行规范（极重要）**：
+
+你必须严格遵循以下三阶段工作流程，**绝对禁止在任务清单完成前进入报告汇总阶段**。
+
+---
+
+### 阶段一：构建任务拆解清单（必须首先完成）
+
+收到用户分析目标后，**立即、全面地拆解任务**，构建结构化的任务清单：
+
+1. **拆解原则**：
+   - 将用户的分析目标分解为若干有逻辑层次的具体子任务
+   - 明确各子任务之间的依赖关系和执行顺序
+   - 按"先数据理解 → 再多维分析 → 后综合汇总"的顺序排列
+
+2. **任务清单格式**（在聊天窗口中明确列出）：
+   ```
+   【任务拆解清单】
+   1. [子任务名称] → 依赖：无 → 预期成果：xxx
+   2. [子任务名称] → 依赖：任务1 → 预期成果：xxx
+   3. [子任务名称] → 依赖：任务1,2 → 预期成果：xxx
+   ...
+   ```
+
+3. **拆解示例**：
+   - 用户目标："分析进出口企业风险"
+   - 拆解清单：
+     1. 数据概览与质量评估 → 依赖：无 → 成果：数据概况报告
+     2. 时间维度分析 → 依赖：1 → 成果：时间趋势图表
+     3. 企业类型分布分析 → 依赖：1 → 成果：企业分布图表
+     4. 高风险企业识别 → 依赖：1,2,3 → 成果：风险企业清单
+     5. 关联关系挖掘 → 依赖：1,3 → 成果：关联分析报告
+     6. 综合报告生成 → 依赖：2,3,4,5 → 成果：最终PDF/DOCX报告
+
+---
+
+### 阶段二：逐个执行任务清单（按顺序执行，禁止跳过）
+
+**核心原则**：按清单顺序逐个完成任务，每个任务完成后才进入下一个。
+
+1. **单任务执行规范**：
+   - 每执行一个子任务前，先确认其依赖任务已全部完成
+   - 在代码中生成该任务的成果（图表/数据/观点），存入工作区
+   - **立即向用户汇报**：当前完成的任务、生成的文件、关键发现
+   - 完成后在任务清单中打勾标记：`[x] 任务1：已完成 → 成果路径`
+
+2. **素材存放规范**：
+   - 每个任务的成果必须存入工作区（workspace/session_xxx/）
+   - 文件命名规范：`{序号}_{任务名}_{内容描述}.{扩展名}`
+   - 示例：`02_time_trend_chart.png`、`03_enterprise_distribution.csv`
+   - 已生成的素材**不得重复生成**，直接引用已有文件
+
+3. **死循环检测与跳出机制（极重要）**：
+   - **循环判定标准**：当发现以下情况时，说明已陷入死循环：
+     - 连续3次以上执行相同的数据处理逻辑且产生相似/相同结果
+     - 相同代码被执行两次以上且没有产生新的数据洞察
+     - 反复尝试相同路径的分析方法
+   - **跳出操作**：检测到死循环后，**立即停止当前循环**，记录问题原因，然后：
+     1. 跳出当前分析路径，转向任务清单中的下一项任务
+     2. 在运行记录中标注：`[死循环跳过] 任务X：原因描述`
+     3. 继续执行后续任务，不得卡在原地
+   - **禁止行为**：禁止在死循环中持续尝试同一方法超过2次
+
+4. **进度追踪**：
+   - 每完成一个任务，更新任务清单状态并向用户展示
+   - 汇总已完成：`[x] 任务1 [x] 任务2 [ ] 任务3...`
+
+---
+
+### 阶段三：汇总生成报告（仅在所有任务完成后执行）
+
+**触发条件**：任务清单中的所有子任务（除综合报告生成外）均已标记为已完成。
+
+1. **报告生成时机**：
+   - ✅ 所有分析子任务完成 → 生成最终报告
+   - ❌ 用户刚提出目标 → 不得立即生成报告
+   - ❌ 仅完成1-2个子任务 → 不得生成最终报告
+
+2. **报告内容组织**：
+   - 按结构组织：分析思路 → 各子任务成果（图表+数据+观点）→ 分析小结
+   - 引用各任务在工作区生成的具体素材文件
+
+3. **分析小结（必须包含运行问题记录）**：
+   分析完成后，必须输出"工作小结"章节，内容包括：
+   ```
+   【工作小结】
+   - 数据处理：描述数据处理过程和关键数据操作
+   - 风险点识别：列出发现的主要风险点
+   - 执行统计：共计完成X个子任务，生成Y个素材文件
+
+   【运行问题记录】（如实填写，即使没有问题也需标注"无"）
+   - 错误信息：[列出执行过程中遇到的各类错误及错误代码]
+   - 死循环情况：[记录检测到的死循环次数、原因及跳出操作]
+   - 环境组件问题：[组件缺失、版本冲突等问题的描述]
+   - 分析重复原因：[如果出现分析结果重复，说明原因]
+   - 其他异常：[其他导致运行不畅顺的因素]
+
+   【改进建议】
+   - 针对上述问题，提出具体的改进方向
+   ```
+
+---
+
+**文件名与路径管理原则**：
 - 所有由代码生成的文件，应在生成后立即打印其完整路径。
 - 后续代码引用这些文件时，**必须使用之前打印的完整路径**，禁止重新猜测文件名。
 - 使用 `os.listdir()` 或 `glob` 验证文件存在性。
+- **已生成的图表和数据不得重复生成**，直接引用已有文件路径。
 
 **============================================
 第六部分：环境就绪与字体规范（极重要）
@@ -1128,41 +1390,69 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 - **UTF-8 编码优先**：系统已自动将上传的文本文件转换为 UTF-8 编码并保存到 `converted/` 子目录（文件名保持不变）。**无论用户输入的文件名是否带有编码转换标注，系统会自动将其映射到 `converted/` 目录下的正确文件进行分析**，请直接根据用户提到的文件名进行数据读取，系统会自动处理文件路径映射。
 - **中文字符与编码处理**：在处理任何数据文件前，应确认使用 UTF-8 编码。对于任何包含中文的内容，必须确保在所有输出文件（Png, Jpg, Pdf, Txt, Csv, Docx 等）中正确显示中文。
 - **可视化支持**：在 Python 绘图时，务必配置 `plt.rcParams['font.sans-serif']` 使用 `SimHei`, `PingFang SC` 或其他系统中文字体，防止出现乱码或方框。在 R 中使用 `showtext` 处理中文。
-- **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF 和 DOCX 格式**，这是你的标准交付物。**注意：当前环境为 macOS，禁止使用 `comtypes` 或 `docx2pdf` 库，请使用 `fpdf2` 或 `reportlab` 生成 PDF。** 对于 DOCX，请继续使用 `python-docx`。
+- **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF 和 DOCX 格式**，这是你的标准交付物。
+  - **PDF 生成推荐方案（按优先级）**：
+    1. **reportlab + 中文字体（首选）**：使用 reportlab 库，注册 assets/fonts/ 下的纯 TTF 字体生成 PDF
+    2. **matplotlib PdfPages（图表为主）**：使用 matplotlib 的 PdfPages 生成包含图表的 PDF
+    3. **python-docx（DOCX）**：使用 python-docx 生成 Word 文档
+  - **注意**：当前环境为 macOS，禁止使用 `comtypes` 或 `docx2pdf` 库。
 - **字体与路径支持（极重要）**：请务必清楚当前环境中有以下字体可用，**不要随意猜测或尝试不存在的字体路径**：
-  - **中文字体（assets/fonts/ 目录，纯 TTF，reportlab/fpdf2/matplotlib 全支持）**：
-    - `SimHei` → `/assets/fonts/simhei.ttf`（黑体，主标题/重点内容）
-    - `SimKai` → `/assets/fonts/simkai.ttf`（楷体，引用/强调）
-    - `SimFang` → `/assets/fonts/simfang.ttf`（仿宋，正文/报告）
-    - `FZxiaobiaosong` → `/assets/fonts/fzbsk.ttf`（方正小标宋，封面/正式标题）
+  - **中文字体（assets/fonts/ 目录，纯 TTF，reportlab/matplotlib 全支持，已验证可用）**：
+    - `SimHei` → `/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf`（黑体，主标题/重点内容，✅已验证）
+    - `SimKai` → `/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf`（楷体，引用/强调/副标题，✅已验证）
+    - `STFangSong` → `/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf`（仿宋，正文/报告，✅已验证）
+    - `STHeiti` → `/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STHeiti.ttf`（黑体备选，✅已验证）
+    - `LiSongPro` → `/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/LiSongPro.ttf`（隶书，可选）
   - **macOS 系统 CJK 字体（TTC 格式，用于 R showtext / matplotlib）**：
-    - `STHeiti` → `/System/Library/Fonts/STHeiti Light.ttc`
-    - `Hiragino Sans GB` → `/System/Library/Fonts/Hiragino Sans GB.ttc`
-    - `PingFang SC` → `/System/Library/Fonts/PingFang SC.ttc`
-  - **macOS 系统拉丁字体（纯 TTF，用于 reportlab/fpdf2）**：
+    - `STHeiti Light` → `/System/Library/Fonts/STHeiti Light.ttc`（黑体）
+    - `STHeiti Medium` → `/System/Library/Fonts/STHeiti Medium.ttc`（中黑）
+    - `PingFang SC` → `/System/Library/Fonts/PingFang SC.ttc`（苹方）
+    - `Songti SC` → `/System/Library/Fonts/Supplemental/Songti.ttc`（宋体）
+  - **macOS 系统拉丁字体（纯 TTF，用于 reportlab）**：
     - `Arial Unicode` → `/System/Library/Fonts/Supplemental/Arial Unicode.ttf`
     - `Georgia` → `/System/Library/Fonts/Supplemental/Georgia.ttf`
     - `Times New Roman` → `/System/Library/Fonts/Supplemental/Times New Roman.ttf`
-  - **内置回退**：Helvetica（仅当以上字体都不可用时才使用）
-- **字体选择原则**：
-  - Python matplotlib 绘图：使用 `SimHei`、`STHeiti`、`PingFang SC` 等（会自动从系统中文字体中选择）
-  - R showtext 渲染：使用 `SimHei`（assets）或 `STHeiti`（系统）
-  - reportlab/fpdf2 PDF 生成：必须使用 assets 中的纯 TTF 字体（SimHei/SimKai/SimFang/FZxiaobiaosong）
-  - **绝对禁止**：尝试使用 `Arial.ttf`、`Helvetica.ttf` 等不存在的字体文件路径
+  - **字体选择原则**：
+    - **PDF 报告生成**：使用 reportlab + assets/fonts/ 下的纯 TTF 字体（SimHei/SimKai/STFangSong）
+    - Python matplotlib 绘图：使用 `SimHei`、`STHeiti`、`PingFang SC`、`Songti SC` 等中文字体
+    - R showtext 渲染：使用 `SimHei`（assets）或 `STHeiti`/`Kaiti SC`（系统）
+    - **正式报告场景**：使用 `SimHei` 作为标题，`STFangSong` 作为正文
+    - **强调/引用场景**：使用 `SimKai`（楷体）
+    - **绝对禁止**：尝试使用 `Arial.ttf`、`Helvetica.ttf` 等不存在的字体文件路径。禁止在 PDF 或图表中使用 `Arial`、`Helvetica`、`Times New Roman` 等不支持中文的字体名称。
+    - **注意**：`simfang.ttf` 和 `fzbsk.ttf` 是损坏的字体文件（实际是 HTML 文件），请勿使用。`SimFang` 字体不可用，请使用 `STFangSong` 替代。
 - **深度洞察**：能够穿透表面数据，通过多角度关联分析挖掘深层逻辑，明确指出可疑行为并详述推理原因。
 - **自主思考**：能根据用户上传的数据，主动提出分析假设并验证。
 - **工具专家**：熟练切换并结合 Python (Pandas, Scikit-learn, Seaborn) 和 R (Tidyverse, ggplot2, stats) 的优势进行建模与可视化。你可以通过 Python 的 `rpy2` 库直接调用 R 语言工具开展分析，在进行复杂可视化时，应充分发挥 R 语言 `ggplot2` 包的灵活性优势。**注意：使用 rpy2 (版本 3.x+) 时，请使用 `rpy2.robjects.pandas2ri.activate()` 或 `with rpy2.robjects.conversion.localconverter(rpy2.robjects.default_converter + rpy2.robjects.pandas2ri.converter):` 进行数据转换，不要使用已废弃的 `conversion.register` 属性。**
 - **专业严谨**：始终保持专业、严谨的态度，提供具有前瞻性和决策价值的洞察。
+- **语言规范**：与用户交流及生成报告时，**默认使用简体中文中文**。除非用户明确指定使用其他语言（如英文），否则不得使用英文或其他语言输出分析内容、报告文本。
 """ + selected_strategy_prompt + """
 
-**并行试错与防循环（极重要）**：
-- **并行优先原则**：当你需要尝试多种方案（例如：生成 PDF 时尝试不同字体、绘图时尝试不同引擎、导入时尝试不同路径），**必须将这些方案合并到一个代码块中**，通过 `if/elif/else` 或 `try/except` 结构同时验证多条路径，让代码在一次执行中就能确定哪个方案有效。
-  - ✅ 正确示范：在一个 `<Code>` 中用 `try: reportlab... except: fpdf2... except: R...` 依次尝试，或用 `if os.path.exists("A"): ... elif os.path.exists("B"): ...`
-  - ❌ 错误示范：将方案A放在一个 `<Code>`，等执行失败后在下一次 LLM 调用中再试方案B——这会导致循环和低效。
-- **终止逻辑**：每一轮完整的分析任务**必须**以 `<Answer>` 标签包裹的最终结论结束。
-- **禁止循环**：禁止在没有新进展的情况下重复生成相同的代码。如果上一次执行已成功或已确定某路径不可行，必须进入下一阶段或输出 `<Answer>`，不得重复相同代码。
-- **一次完成**：每个 `<Code>` 块应尽量完成一个完整的阶段性任务，避免拆分成多个小块依次执行。
-- 请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
+**并行试错与死循环检测（极重要）**：
+
+1. **并行优先原则**：当你需要尝试多种方案（例如：生成 PDF 时尝试不同字体、绘图时尝试不同引擎、导入时尝试不同路径），**必须将这些方案合并到一个代码块中**，通过 `if/elif/else` 或 `try/except` 结构同时验证多条路径，让代码在一次执行中就能确定哪个方案有效。
+   - ✅ 正确示范：在一个 `<Code>` 中用 `try: reportlab... except: fpdf2... except: R...` 依次尝试，或用 `if os.path.exists("A"): ... elif os.path.exists("B"): ...`
+   - ❌ 错误示范：将方案A放在一个 `<Code>`，等执行失败后在下一次 LLM 调用中再试方案B——这会导致循环和低效。
+
+2. **死循环检测与强制跳出机制（极重要）**：
+   - **死循环判定标准**（满足任一即判定）：
+     - 相同的数据处理逻辑被执行 ≥3 次且结果相似/相同
+     - 相同代码块被执行 ≥2 次且没有产生新的数据洞察
+     - 反复尝试相同路径的分析方法 ≥3 次
+     - 在同一子任务内停留超过预期的迭代次数
+   - **强制跳出操作步骤**：
+     1. 立即停止当前循环/重复操作
+     2. 记录问题：`[死循环跳过] 任务X - 原因：{具体描述}`
+     3. 转向任务清单中的下一项任务
+     4. 继续执行，不得卡在原地
+   - **禁止行为**：
+     - ❌ 死循环中持续尝试同一方法超过2次
+     - ❌ 在同一任务内无限迭代
+     - ❌ 不记录问题就跳过
+
+3. **终止逻辑**：每一轮完整的分析任务**必须**以 `<Answer>` 标签包裹的最终结论结束。
+4. **禁止循环**：禁止在没有新进展的情况下重复生成相同的代码。如果上一次执行已成功或已确定某路径不可行，必须进入下一阶段或输出 `<Answer>`，不得重复相同代码。
+5. **一次完成**：每个 `<Code>` 块应尽量完成一个完整的阶段性任务，避免拆分成多个小块依次执行。
+6. 请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
 
     # Check if system prompt is already there, if not, insert it
     if not messages or messages[0]["role"] != "system":
@@ -1203,7 +1493,7 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
         response = client.chat.completions.create(
             model=MODEL_PATH,
             messages=messages,
-            temperature=0.4,
+            temperature=effective_temperature,
             stream=True,
             stop=["</Code>", "</s>", "<|endoftext|>", "<|im_end|>"],
             extra_body={
@@ -1347,12 +1637,13 @@ async def chat(body: dict = Body(...)):
     session_id = body.get("session_id", "default")
     username = body.get("username", "default")
     strategy = body.get("strategy", "聚焦诉求")
+    temperature = body.get("temperature", None)  # Optional: user can override temperature
 
     # 动态构建 workspace 目录，确保能正确识别当前 session 的文件
     actual_workspace_dir = get_session_workspace(session_id, username)
 
     def generate():
-        for delta_content in bot_stream(messages, workspace, session_id, username, strategy):
+        for delta_content in bot_stream(messages, workspace, session_id, username, strategy, temperature):
             # print(delta_content)
             chunk = {
                 "id": "chatcmpl-stream",
@@ -1456,8 +1747,10 @@ def _get_available_fonts() -> dict:
     assets_fonts = [
         ("simhei.ttf",  "SimHei",  "黑体 - 主标题/重点内容"),
         ("simkai.ttf",  "SimKai",  "楷体 - 引用/强调"),
-        ("simfang.ttf", "SimFang", "仿宋 - 正文/报告"),
-        ("fzbsk.ttf",   "FZxiaobiaosong", "方正小标宋 - 封面/正式标题"),
+        ("STFangSong.ttf", "STFangSong", "仿宋 - 正文/报告"),
+        ("STHeiti.ttf", "STHeiti", "黑体备选"),
+        ("LiSongPro.ttf", "LiSongPro", "隶书 - 可选"),
+        # 注意：simfang.ttf 和 fzbsk.ttf 是损坏的 HTML 文件，已排除
     ]
     for fname, name, desc in assets_fonts:
         fp = os.path.join(FONT_DIR, fname)
@@ -1674,142 +1967,133 @@ def _save_pdf_from_text(text: str, base_name: str) -> Path:
 
 
 def _save_docx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
+    """
+    使用模块化方式生成中文 DOCX 文件
+
+    优化要点：
+    1. 使用 docx_utils 模块处理中文编码问题
+    2. 正确设置中文字体（STFangSong）
+    3. 确保使用 UTF-8 编码
+    4. 避免乱码问题
+
+    关键修复：
+    - 使用 create_docx_document() 创建配置好字体的文档
+    - 使用 clean_md_text_for_docx() 清理 Markdown 标记
+    - 使用 extract_markdown_blocks() 解析内容结构
+    - 确保所有中文 run 都设置正确的 eastAsia 字体
+    """
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     docx_path = uniquify_path(Path(workspace_dir) / f"{base_name}.docx")
+
     try:
-        from docx.oxml.ns import qn
+        print(f"开始生成 DOCX: {docx_path}")
 
-        doc = Document()
+        # 使用 docx_utils 模块生成 DOCX
+        success = generate_docx_module(md_text, str(docx_path), title=base_name)
 
-        # 确定中文字体路径
-        font_paths = [
-            os.path.join(FONT_DIR, "SimHei.ttf"),
-            os.path.join(FONT_DIR, "simkai.ttf"),
-            os.path.join(FONT_DIR, "simfang.ttf"),
-        ]
-        chinese_font_ttf = None
-        for fp in font_paths:
-            if os.path.exists(fp):
-                chinese_font_ttf = fp
-                break
-
-        # 设置文档默认字体（影响 Normal 和 Heading 样式）
-        style = doc.styles["Normal"]
-        if chinese_font_ttf:
-            # 设置西文字体（Calibri → 仍用，但通过 rFonts 指定中文回退）
-            style.font.name = "Calibri"
-            # 设置东亚字体为中文
-            rFonts = style._element.get_or_add_rPr().get_or_add_rFonts()
-            rFonts.set(qn("w:eastAsia"), "SimHei")
+        if success:
+            print(f"DOCX 生成成功: {docx_path}")
+            return docx_path
         else:
-            style.font.name = "Arial"
+            print(f"DOCX 生成失败")
+            return None
 
-        # 设置 Heading 样式
-        for i in range(1, 4):
-            h_style = doc.styles[f"Heading {i}"]
-            if chinese_font_ttf:
-                h_style.font.name = "SimHei"
-                rFonts = h_style._element.get_or_add_rPr().get_or_add_rFonts()
-                rFonts.set(qn("w:eastAsia"), "SimHei")
-                h_style.font.bold = True
-            else:
-                h_style.font.name = "Arial"
-
-        # 移除 Markdown 标记（简单处理）
-        clean_text = re.sub(r"\\newpage", "", md_text)
-        # 按换行分割
-        for line in clean_text.splitlines():
-            if line.startswith("# "):
-                p = doc.add_heading(line[2:], level=1)
-            elif line.startswith("## "):
-                p = doc.add_heading(line[3:], level=2)
-            elif line.startswith("### "):
-                p = doc.add_heading(line[4:], level=3)
-            else:
-                p = doc.add_paragraph(line)
-
-            # 确保段落中的每个 run 都使用中文字体
-            if chinese_font_ttf:
-                for run in p.runs:
-                    run.font.name = "SimHei"
-                    run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), "SimHei")
-
-        doc.save(docx_path)
-        print(f"DOCX generated with Chinese font support: {docx_path}")
-        return docx_path
     except Exception as e:
-        print(f"Error saving DOCX: {e}")
+        error_msg = f"DOCX 生成失败: {e}"
+        print(error_msg)
         traceback.print_exc()
         return None
 
 def _save_pdf_with_reportlab(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
-    """使用 reportlab + simhei.ttf 生成中文 PDF（降级方案）"""
+    """
+    使用 reportlab + simhei.ttf 生成中文 PDF（降级方案）
+
+    优化要点：
+    1. 使用模块化的字体注册函数 register_chinese_fonts()
+    2. 使用 get_chinese_style() 获取预定义样式
+    3. 使用 extract_markdown_sections() 提取结构化内容
+    4. 使用 clean_md_text() 清理 Markdown 标记
+    5. 完善的错误处理和日志记录
+    """
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     pdf_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pdf")
+
     try:
-        # 字体路径优先级：assets/simhei.ttf（纯 TTF，非 TTC）
-        font_path, font_name = _find_chinese_font()
-        font_registered = False
-        if font_path and font_name != "Helvetica":
-            try:
-                pdfmetrics.registerFont(TTFont(font_name, font_path))
-                # 注册粗体（复用同一文件，reportlab 会自动处理粗体变体）
-                pdfmetrics.registerFont(TTFont(font_name + "-Bold", font_path))
-                font_registered = True
-                print(f"ReportLab registered Chinese font: {font_path} as {font_name}")
-            except Exception as e:
-                print(f"ReportLab font register error: {e}")
+        print(f"开始生成 PDF (ReportLab): {pdf_path}")
 
-        if not font_registered:
-            font_name = "Helvetica"
-
-        doc = SimpleDocTemplate(str(pdf_path))
-        styles = getSampleStyleSheet()
-        if font_registered:
-            styles["Normal"].fontName = font_name
-            styles["Heading1"].fontName = font_name + "-Bold"
-            styles["Heading2"].fontName = font_name + "-Bold"
-            styles["Heading3"].fontName = font_name + "-Bold"
-            styles["Normal"].fontSize = 11
-            styles["Heading1"].fontSize = 22
-            styles["Heading1"].leading = 26
-            styles["Heading2"].fontSize = 16
-            styles["Heading2"].leading = 20
-            styles["Heading3"].fontSize = 13
-            styles["Heading3"].leading = 16
+        # 1. 注册中文字体（使用模块化函数，只注册一次）
+        registered = register_chinese_fonts(force=False)
+        if not registered:
+            print("警告：没有成功注册中文字体，PDF 可能无法正常显示中文")
         else:
-            styles["Normal"].fontSize = 11
-            styles["Heading1"].fontSize = 22
-            styles["Heading1"].leading = 26
+            print(f"已注册字体: {list(registered.keys())}")
 
+        # 2. 提取 Markdown 内容块
+        clean_text = clean_md_text(md_text)
+        blocks = extract_markdown_sections(clean_text)
+        print(f"提取到 {len(blocks)} 个内容块")
+
+        # 3. 初始化 PDF 文档
+        doc = SimpleDocTemplate(
+            str(pdf_path),
+            pagesize=A4,
+            rightMargin=50,
+            leftMargin=50,
+            topMargin=50,
+            bottomMargin=50,
+        )
+
+        # 4. 准备故事（PDF 内容）
         story = []
-        clean_text = re.sub(r"\\newpage", "", md_text)
-        for line in clean_text.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                story.append(Spacer(1, 8))
-                continue
-            if stripped.startswith("# "):
-                story.append(Paragraph(stripped[2:], styles["Heading1"]))
-                story.append(Spacer(1, 6))
-            elif stripped.startswith("## "):
-                story.append(Paragraph(stripped[3:], styles["Heading2"]))
-                story.append(Spacer(1, 4))
-            elif stripped.startswith("### "):
-                story.append(Paragraph(stripped[4:], styles["Heading3"]))
-                story.append(Spacer(1, 4))
-            else:
-                # 处理列表项
-                if stripped.startswith("- "):
-                    stripped = "\u2022 " + stripped[2:]
-                story.append(Paragraph(stripped, styles["Normal"]))
-                story.append(Spacer(1, 4))
 
+        # 5. 处理每个内容块
+        for block in blocks:
+            block_type = block["type"]
+            content = block["content"]
+
+            if block_type == "heading1":
+                style = get_chinese_style("heading1")
+                story.append(Paragraph(content, style))
+                story.append(Spacer(1, 12))
+
+            elif block_type == "heading2":
+                style = get_chinese_style("heading2")
+                story.append(Paragraph(content, style))
+                story.append(Spacer(1, 8))
+
+            elif block_type == "heading3":
+                style = get_chinese_style("heading3")
+                story.append(Paragraph(content, style))
+                story.append(Spacer(1, 6))
+
+            elif block_type == "paragraph":
+                style = get_chinese_style("normal")
+                story.append(Paragraph(content, style))
+                story.append(Spacer(1, 8))
+
+            elif block_type == "list":
+                style = get_chinese_style("list")
+                for item in content:
+                    para_text = f"• {item}"
+                    story.append(Paragraph(para_text, style))
+                    story.append(Spacer(1, 4))
+                story.append(Spacer(1, 8))
+
+        # 6. 构建 PDF
         doc.build(story)
-        print(f"PDF generated with ReportLab: {pdf_path}")
-        return pdf_path
+
+        # 7. 验证生成结果
+        if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+            file_size = os.path.getsize(pdf_path) / 1024
+            print(f"PDF 生成成功: {pdf_path.name} ({file_size:.1f} KB)")
+            return pdf_path
+        else:
+            print(f"PDF 生成失败: 文件不存在或为空")
+            return None
+
     except Exception as e:
-        print(f"Error saving PDF with ReportLab: {e}")
+        error_msg = f"PDF 生成失败: {e}"
+        print(error_msg)
         traceback.print_exc()
         return None
 
@@ -2057,6 +2341,7 @@ async def delete_project(project_id: int = Query(...), username: str = Query(...
         print(f"Delete project error: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 if __name__ == "__main__":
