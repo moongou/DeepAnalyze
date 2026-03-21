@@ -442,9 +442,15 @@ export function ThreePanelInterface() {
   const [yutuRecords, setYutuRecords] = useState<any[]>([]);
   const [searchKeyword, setSearchKeyword] = useState("");
   const [editRecord, setEditRecord] = useState<any>(null);
-  const [viewMode, setViewMode] = useState<"list" | "html">("list");
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [yutuViewAsRegular, setYutuViewAsRegular] = useState(false); // 超级用户查看模式：false=管理界面, true=只读HTML
+
+  // 雨途斩疑功能状态
+  const [hasAnalysisCompleted, setHasAnalysisCompleted] = useState(false); // 分析任务是否完成
+  const [knowledgeBaseEnabled, setKnowledgeBaseEnabled] = useState(true); // 知识库是否启用
+  const [isRecordingKnowledge, setIsRecordingKnowledge] = useState(false); // 是否正在记录知识
+  const [showKnowledgeSettings, setShowKnowledgeSettings] = useState(false); // 知识库设置弹窗
 
   // 预览弹窗状态
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -609,8 +615,12 @@ export function ThreePanelInterface() {
   };
 
   const handleSaveYutuRecord = async (record: any) => {
+    if (currentUser !== "rainforgrain") {
+      toast({ description: "只有超级用户可以添加记录", variant: "destructive" });
+      return false;
+    }
     try {
-      const res = await fetch(API_URLS.YUTU_ADD, {
+      const res = await fetch(`${API_URLS.YUTU_ADD}?username=${encodeURIComponent(currentUser || "")}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -625,7 +635,11 @@ export function ThreePanelInterface() {
       if (res.ok) {
         toast({ description: "记录保存成功" });
         loadYutuHtml();
+        loadYutuRecords();
         return true;
+      } else {
+        const data = await res.json();
+        toast({ description: data.detail || "保存失败", variant: "destructive" });
       }
     } catch (e) {
       toast({ description: "保存失败: " + (e as Error).message, variant: "destructive" });
@@ -634,8 +648,12 @@ export function ThreePanelInterface() {
   };
 
   const handleUpdateYutuRecord = async (record: any) => {
+    if (currentUser !== "rainforgrain") {
+      toast({ description: "只有超级用户可以更新记录", variant: "destructive" });
+      return false;
+    }
     try {
-      const res = await fetch(API_URLS.YUTU_UPDATE, {
+      const res = await fetch(`${API_URLS.YUTU_UPDATE}?username=${encodeURIComponent(currentUser || "")}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -648,7 +666,11 @@ export function ThreePanelInterface() {
       if (res.ok) {
         toast({ description: "记录更新成功" });
         loadYutuHtml();
+        loadYutuRecords();
         return true;
+      } else {
+        const data = await res.json();
+        toast({ description: data.detail || "更新失败", variant: "destructive" });
       }
     } catch (e) {
       toast({ description: "更新失败: " + (e as Error).message, variant: "destructive" });
@@ -657,8 +679,12 @@ export function ThreePanelInterface() {
   };
 
   const handleDeleteYutuRecord = async (errorHash: string) => {
+    if (currentUser !== "rainforgrain") {
+      toast({ description: "只有超级用户可以删除记录", variant: "destructive" });
+      return false;
+    }
     try {
-      const res = await fetch(API_URLS.YUTU_DELETE, {
+      const res = await fetch(`${API_URLS.YUTU_DELETE}?username=${encodeURIComponent(currentUser || "")}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ error_hash: errorHash })
@@ -668,6 +694,9 @@ export function ThreePanelInterface() {
         loadYutuHtml();
         loadYutuRecords();
         return true;
+      } else {
+        const data = await res.json();
+        toast({ description: data.detail || "删除失败", variant: "destructive" });
       }
     } catch (e) {
       toast({ description: "删除失败: " + (e as Error).message, variant: "destructive" });
@@ -676,8 +705,16 @@ export function ThreePanelInterface() {
   };
 
   const initYutu = async () => {
+    if (currentUser !== "rainforgrain") {
+      toast({ description: "只有超级用户可以初始化", variant: "destructive" });
+      return false;
+    }
+    // 确认初始化操作
+    if (!window.confirm("确定要初始化雨途斩疑录吗？此操作将重置所有记录！")) {
+      return false;
+    }
     try {
-      const res = await fetch(API_URLS.YUTU_INIT, {
+      const res = await fetch(`${API_URLS.YUTU_INIT}?username=${encodeURIComponent(currentUser || "")}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" }
       });
@@ -686,12 +723,186 @@ export function ThreePanelInterface() {
         loadYutuHtml();
         loadYutuRecords();
         return true;
+      } else {
+        const data = await res.json();
+        toast({ description: data.detail || "初始化失败", variant: "destructive" });
       }
     } catch (e) {
       toast({ description: "初始化失败: " + (e as Error).message, variant: "destructive" });
     }
     return false;
   };
+
+  // 整理雨途斩疑笔记 - AI重新组织所有记录
+  const organizeYutuNotes = async () => {
+    if (currentUser !== "rainforgrain") {
+      toast({ description: "只有超级用户可以整理笔记", variant: "destructive" });
+      return;
+    }
+    if (yutuRecords.length === 0) {
+      toast({ description: "暂无记录可整理", variant: "destructive" });
+      return;
+    }
+
+    toast({ description: "正在使用AI整理笔记，请稍候..." });
+
+    try {
+      const res = await fetch(`/api/yutu/organize?username=${encodeURIComponent(currentUser || "")}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ records: yutuRecords })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        toast({ description: `笔记整理完成，已更新 ${data.updated_count || yutuRecords.length} 条记录` });
+        loadYutuRecords();
+        loadYutuHtml();
+      } else {
+        const data = await res.json();
+        toast({ description: data.detail || "整理失败", variant: "destructive" });
+      }
+    } catch (e) {
+      toast({ description: "整理失败: " + (e as Error).message, variant: "destructive" });
+    }
+  };
+
+  // 记录知识到雨途斩疑录
+  const recordKnowledgeFromAnalysis = async () => {
+    if (isRecordingKnowledge || !knowledgeBaseEnabled) return;
+
+    setIsRecordingKnowledge(true);
+    toast({ description: "正在分析并记录知识..." });
+
+    try {
+      // 获取当前的聊天消息
+      const analysisContent = messages
+        .filter(m => m.sender === "ai")
+        .map(m => m.content)
+        .join("\n\n---\n\n");
+
+      if (!analysisContent) {
+        toast({ description: "暂无分析内容可记录", variant: "destructive" });
+        setIsRecordingKnowledge(false);
+        return;
+      }
+
+      // 构造提示让AI分析并提取知识
+      const prompt = `你是雨途斩疑录的知识提取助手。请分析以下智能体分析过程，提取其中出现的错误和解决方案。
+
+分析过程：
+${analysisContent}
+
+请按以下JSON格式输出发现的错误和解决方案（每条记录包含error_type, error_message, solution, solution_code四个字段）：
+[
+  {
+    "error_type": "错误类型",
+    "error_message": "错误消息",
+    "solution": "解决方案描述",
+    "solution_code": "解决方案代码（如果没有则为空字符串）"
+  }
+]
+
+如果没有发现任何错误，请返回空数组：[]`;
+
+      const response = await fetch(API_URLS.CHAT_COMPLETIONS, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [
+            { role: "user", content: prompt }
+          ],
+          session_id: sessionId,
+          username: currentUser || "default"
+        })
+      });
+
+      if (response.ok) {
+        // 解析返回的知识记录
+        const reader = response.body?.getReader();
+        if (reader) {
+          let result = "";
+          const decoder = new TextDecoder();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            result += decoder.decode(value);
+          }
+
+          // 提取JSON数组
+          const jsonMatch = result.match(/\[[\s\S]*\]/);
+          if (jsonMatch) {
+            try {
+              const knowledgeRecords = JSON.parse(jsonMatch[0]);
+
+              if (!Array.isArray(knowledgeRecords) || knowledgeRecords.length === 0) {
+                toast({ description: "未发现需要记录的知识" });
+                setIsRecordingKnowledge(false);
+                return;
+              }
+
+              // 检查重复并记录
+              let recordedCount = 0;
+              for (const record of knowledgeRecords) {
+                if (record.error_type && record.error_message) {
+                  // 检查是否已存在相似记录
+                  const searchResult = await fetch(`${API_URLS.YUTU_SEARCH}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      keywords: [record.error_type, record.error_message.substring(0, 30)],
+                      page: 1,
+                      page_size: 5
+                    })
+                  });
+
+                  if (searchResult.ok) {
+                    const data = await searchResult.json();
+                    const existingRecords = data.data?.items || [];
+                    const isDuplicate = existingRecords.some((existing: any) =>
+                      existing.error_type === record.error_type &&
+                      (existing.error_message.includes(record.error_message.substring(0, 50)) ||
+                       record.error_message.includes(existing.error_message.substring(0, 50)))
+                    );
+
+                    if (!isDuplicate) {
+                      await handleSaveYutuRecord({
+                        error_type: record.error_type,
+                        error_message: record.error_message,
+                        error_context: "通过分析过程自动提取",
+                        solution: record.solution || "",
+                        solution_code: record.solution_code || "",
+                        confidence: 0.8
+                      });
+                      recordedCount++;
+                    }
+                  }
+                }
+              }
+
+              toast({ description: `已记录 ${recordedCount} 条知识到雨途斩疑录` });
+              loadYutuRecords();
+            } catch (e) {
+              console.error("解析知识记录失败:", e);
+              toast({ description: "知识记录解析失败", variant: "destructive" });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error("记录知识失败:", e);
+      toast({ description: "记录知识失败: " + (e as Error).message, variant: "destructive" });
+    } finally {
+      setIsRecordingKnowledge(false);
+    }
+  };
+
+  // 更新分析完成状态（当有Answer区块时）
+  useEffect(() => {
+    const hasAnswer = messages.some(m =>
+      m.sender === "ai" && m.content && m.content.includes("<Answer>")
+    );
+    setHasAnalysisCompleted(hasAnswer);
+  }, [messages]);
 
   // --- 用户认证与项目管理函数 ---
   const handleAuth = async () => {
@@ -736,6 +947,20 @@ export function ThreePanelInterface() {
   };
 
   const performLogout = async () => {
+    // 先清空工作区文件（使用旧sessionId）
+    const oldSessionId = sessionId;
+    const oldUsername = currentUser || "default";
+    suppressWorkspaceRefreshCount.current += 1;
+    try {
+      await fetch(`${API_URLS.WORKSPACE_CLEAR}?session_id=${oldSessionId}&username=${oldUsername}`, {
+        method: "DELETE",
+      });
+    } catch (e) {
+      console.warn("Failed to clear workspace on logout", e);
+    } finally {
+      suppressWorkspaceRefreshCount.current -= 1;
+    }
+
     setCurrentUser(null);
     setIsLoggedIn(false);
     setAuthUsername("");
@@ -770,13 +995,13 @@ export function ThreePanelInterface() {
       console.warn("Failed to reload registered users after logout", e);
     }
 
-    // 生成新的 sessionId 以清空缓存文件
+    // 生成全新的 sessionId，完全替换旧的
     const newSid = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     localStorage.setItem("sessionId", newSid);
     setSessionId(newSid);
 
     setShowAuthModal(true); // 重新显示登录界面
-    toast({ description: "已退出登录，所有数据已清空" });
+    toast({ description: "已退出登录，工作区已清空" });
   };
 
   const saveProject = async (confirmed = false) => {
@@ -1307,6 +1532,13 @@ export function ThreePanelInterface() {
       }
     };
     loadRegisteredUsers();
+
+    // 加载知识库设置
+    const savedKnowledgeEnabled = localStorage.getItem("knowledgeBaseEnabled");
+    if (savedKnowledgeEnabled !== null) {
+      setKnowledgeBaseEnabled(savedKnowledgeEnabled === "true");
+    }
+
     // 未登录时弹出登录对话框（仅在首次加载时）
     if (!isLoggedIn) {
       setShowAuthModal(true);
@@ -3333,12 +3565,7 @@ export function ThreePanelInterface() {
           <DialogContent className="sm:max-w-[450px]">
             <DialogHeader>
               <div className="flex flex-col items-center mb-4">
-                <img
-                  src="/logo.png"
-                  alt="DeepAnalyze"
-                  className="w-32 h-auto object-contain mb-2"
-                />
-                <DialogTitle>{isLoginMode ? "用户登录" : "用户注册"}</DialogTitle>
+                <DialogTitle className="text-xl font-bold">雨途欢迎您一起前行</DialogTitle>
               </div>
             </DialogHeader>
             <div className="space-y-4 py-4">
@@ -3491,7 +3718,7 @@ export function ThreePanelInterface() {
 
               <div
                 ref={treeContainerRef}
-                className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pl-3 pr-1 py-2"
+                className="flex-1 min-h-0 overflow-y-auto overflow-x-visible pl-3 pr-1 py-2"
               >
                 <div
                   className={`mb-2 rounded border border-dashed flex items-center justify-center h-20 text-xs select-none ${dropActive
@@ -3530,6 +3757,49 @@ export function ThreePanelInterface() {
                     {uploadMsg}
                   </div>
                 )}
+
+                {/* 雨途斩疑按钮 - 仅在分析完成后可用 */}
+                <div className="px-2 py-2 border-b border-gray-200 dark:border-gray-700">
+                  <Button
+                    size="sm"
+                    variant={hasAnalysisCompleted ? "default" : "outline"}
+                    className={`w-full text-xs ${hasAnalysisCompleted
+                        ? "bg-blue-600 hover:bg-blue-700 text-white"
+                        : "opacity-50 cursor-not-allowed"
+                      }`}
+                    disabled={!hasAnalysisCompleted || isRecordingKnowledge}
+                    onClick={() => {
+                      if (currentUser === "rainforgrain") {
+                        recordKnowledgeFromAnalysis();
+                      } else {
+                        toast({ description: "只有管理员可以执行此操作", variant: "destructive" });
+                      }
+                    }}
+                  >
+                    {isRecordingKnowledge ? (
+                      <>
+                        <span className="animate-spin mr-1">⏳</span>
+                        正在记录...
+                      </>
+                    ) : (
+                      <>
+                        <BookOpen className="h-3 w-3 mr-1" />
+                        风雨同途
+                      </>
+                    )}
+                  </Button>
+                  {hasAnalysisCompleted && currentUser === "rainforgrain" && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="w-full mt-1 text-[10px] text-gray-500 hover:text-gray-700"
+                      onClick={() => setShowKnowledgeSettings(true)}
+                    >
+                      知识库设置
+                    </Button>
+                  )}
+                </div>
+
                 {workspaceTree ? (
                   <Tree
                     data={toArbor(workspaceTree).children || []}
@@ -3971,16 +4241,6 @@ export function ThreePanelInterface() {
 
                   {!showCodeEditor ? (
                     <div className="flex-1 flex flex-col items-center justify-center text-gray-400 relative">
-                      {/* LOGO Display - 占 CODE 下空间的四分之一，居中显示 */}
-                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                        <div className="flex items-center justify-center">
-                          <img
-                            src="/logo.png"
-                            alt="DeepAnalyze"
-                            className="max-w-[200px] max-h-[200px] w-auto h-auto object-contain opacity-80"
-                          />
-                        </div>
-                      </div>
                       <div className="text-center select-none relative z-10">
                         <p className="text-sm">Click a code block to edit</p>
                       </div>
@@ -4099,7 +4359,7 @@ export function ThreePanelInterface() {
                 <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
                   <div className="py-2 px-4 flex flex-col gap-2 border-b border-gray-100 dark:border-gray-900 bg-gray-50/50 dark:bg-gray-900/30">
                     <div className="flex justify-center items-center">
-                      <span className="text-blue-600 dark:text-blue-400 font-bold text-sm">请风控专家指示分析目标</span>
+                      <span className="text-blue-600 dark:text-blue-400 font-bold text-base">请风控专家指示分析目标</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <div className="flex items-center gap-2">
@@ -4656,42 +4916,51 @@ export function ThreePanelInterface() {
               <BookOpen className="h-5 w-5" />
               雨途斩疑录
               <span className="text-xs font-normal text-gray-500 dark:text-gray-400 ml-2">
-                - 智能体错误修正记录 -
+                - 智能体错误修正记录知识库 -
               </span>
             </DialogTitle>
           </DialogHeader>
           <div className="flex-1 overflow-hidden flex flex-col">
-            {/* 管理模式切换 - 仅超级用户可见 */}
+            {/* 管理工具栏 - 仅超级用户可见 */}
             {currentUser === "rainforgrain" && (
-              <div className="flex items-center gap-2 mb-2 px-1">
-                <span className="text-xs text-gray-500">管理模式:</span>
-                <Button
-                  size="sm"
-                  variant={viewMode === "list" ? "default" : "outline"}
-                  onClick={() => setViewMode("list")}
-                >
-                  记录列表
-                </Button>
-                <Button
-                  size="sm"
-                  variant={viewMode === "html" ? "default" : "outline"}
-                  onClick={() => setViewMode("html")}
-                >
-                  HTML预览
-                </Button>
-                <div className="flex-1"></div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={initYutu}
-                >
-                  初始化
-                </Button>
+              <div className="flex items-center justify-between gap-2 mb-2 px-1">
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant={yutuViewAsRegular ? "outline" : "default"}
+                    onClick={() => setYutuViewAsRegular(!yutuViewAsRegular)}
+                    className={yutuViewAsRegular ? "" : "bg-blue-600"}
+                  >
+                    {yutuViewAsRegular ? "管理模式" : "查看HTML"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={initYutu}
+                    className="text-orange-600 border-orange-200 hover:bg-orange-50"
+                  >
+                    初始化知识库
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-green-600 border-green-200 hover:bg-green-50"
+                    onClick={() => {
+                      if (window.confirm("确定要整理所有笔记吗？这将使用AI重新组织所有记录。")) {
+                        // 调用AI整理功能
+                        organizeYutuNotes();
+                      }
+                    }}
+                  >
+                    整理笔记
+                  </Button>
+                </div>
+                <span className="text-xs text-gray-500">共 {yutuRecords.length} 条记录</span>
               </div>
             )}
 
             {/* 搜索栏 - 仅超级用户可见 */}
-            {currentUser === "rainforgrain" && viewMode === "list" && (
+            {currentUser === "rainforgrain" && (
               <div className="flex items-center gap-2 mb-3 p-2 border rounded-md bg-gray-50 dark:bg-gray-900">
                 <Input
                   placeholder="搜索错误消息..."
@@ -4701,79 +4970,97 @@ export function ThreePanelInterface() {
                 />
                 <Button
                   size="sm"
-                  onClick={() => loadYutuRecords(searchKeyword ? [searchKeyword] : [])}
+                  onClick={() => loadYutuRecords(searchKeyword ? [searchKeyword] : [], "")}
                 >
                   搜索
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setSearchKeyword("");
+                    loadYutuRecords([], "");
+                  }}
+                >
+                  重置
                 </Button>
               </div>
             )}
 
-            {/* 记录列表 - 管理模式 */}
-            {currentUser === "rainforgrain" && viewMode === "list" && (
-              <div className="flex-1 overflow-auto border rounded-md bg-white dark:bg-gray-950">
-                <table className="w-full text-sm text-left">
-                  <thead className="text-xs text-gray-700 uppercase bg-gray-50 dark:bg-gray-800 dark:text-gray-400 sticky top-0">
-                    <tr>
-                      <th className="px-3 py-2">错误类型</th>
-                      <th className="px-3 py-2">错误消息</th>
-                      <th className="px-3 py-2">解决方案</th>
-                      <th className="px-3 py-2">置信度</th>
-                      <th className="px-3 py-2">使用次数</th>
-                      <th className="px-3 py-2">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                    {yutuRecords.length > 0 ? (
-                      yutuRecords.map((record: any) => (
+            {/* 内容显示区域 - 超级用户看列表(可切换)，其他人看HTML */}
+            {currentUser === "rainforgrain" && !yutuViewAsRegular ? (
+              /* 超级用户：表格列表视图，支持编辑删除 */
+              <div className="flex-1 min-h-0 overflow-auto rounded-md border bg-white dark:bg-gray-950">
+                {yutuRecords.length > 0 ? (
+                  <table className="w-full text-sm">
+                    <thead className="bg-gray-50 dark:bg-gray-900 sticky top-0">
+                      <tr>
+                        <th className="px-3 py-2 text-left">错误类型</th>
+                        <th className="px-3 py-2 text-left">错误消息</th>
+                        <th className="px-3 py-2 text-left">解决方案</th>
+                        <th className="px-3 py-2 text-center">置信度</th>
+                        <th className="px-3 py-2 text-center">使用次数</th>
+                        <th className="px-3 py-2 text-center">操作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                      {yutuRecords.map((record: any) => (
                         <tr key={record.error_hash} className="bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-800">
-                          <td className="px-3 py-2">{record.error_type || "Unknown"}</td>
-                          <td className="px-3 py-2 max-w-[200px] truncate" title={record.error_message || ""}>
-                            {record.error_message || ""} {record.error_hash}
-                          </td>
-                          <td className="px-3 py-2 max-w-[200px] truncate" title={record.solution || ""}>
-                            {record.solution?.substring(0, 50) || ""}{record.solution && record.solution.length > 50 ? "..." : ""}
-                          </td>
-                          <td className="px-3 py-2">{(record.confidence * 100).toFixed(0)}%</td>
-                          <td className="px-3 py-2">{record.usage_count || 0}</td>
                           <td className="px-3 py-2">
-                            <div className="flex gap-1">
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-6 w-6 p-0"
-                                onClick={() => {
-                                  setEditRecord(record);
-                                  setShowEditDialog(true);
-                                }}
-                              >
-                                <Edit className="h-3 w-3" />
-                              </Button>
+                            <span className={`px-2 py-0.5 text-xs rounded ${
+                              record.error_type === 'ImportError' ? 'bg-blue-100 text-blue-700' :
+                              record.error_type === 'ValueError' ? 'bg-red-100 text-red-700' :
+                              record.error_type === 'TypeError' ? 'bg-orange-100 text-orange-700' :
+                              'bg-gray-100 text-gray-700'
+                            }`}>
+                              {record.error_type || "Unknown"}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 max-w-[200px] truncate" title={record.error_message || ""}>
+                            {record.error_message ? record.error_message.substring(0, 50) + (record.error_message.length > 50 ? "..." : "") : ""}
+                          </td>
+                          <td className="px-3 py-2 max-w-[250px] truncate" title={record.solution || ""}>
+                            {record.solution ? record.solution.substring(0, 80) + (record.solution.length > 80 ? "..." : "") : ""}
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            <span className={`px-2 py-0.5 text-xs rounded ${
+                              (record.confidence || 0) >= 0.8 ? 'bg-green-100 text-green-700' :
+                              (record.confidence || 0) >= 0.5 ? 'bg-yellow-100 text-yellow-700' :
+                              'bg-red-100 text-red-700'
+                            }`}>
+                              {Math.round((record.confidence || 0) * 100)}%
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-center text-gray-500">
+                            {record.usage_count || 0}
+                          </td>
+                          <td className="px-3 py-2">
+                            <div className="flex items-center justify-center gap-1">
                               <Button
                                 size="sm"
                                 variant="ghost"
                                 className="h-6 w-6 p-0 text-red-500 hover:text-red-600"
                                 onClick={() => handleDeleteYutuRecord(record.error_hash)}
+                                title="删除"
                               >
                                 <Trash2 className="h-3 w-3" />
                               </Button>
                             </div>
                           </td>
                         </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={6} className="px-3 py-8 text-center text-gray-500">
-                          暂无记录
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center text-gray-500 p-8">
+                    <BookOpen className="h-12 w-12 mb-4 opacity-30" />
+                    <p>暂无错误记录</p>
+                    <p className="text-xs mt-2">当智能体遇到错误并成功解决后，记录将自动添加到这里</p>
+                  </div>
+                )}
               </div>
-            )}
-
-            {/* HTML内容显示区域 - 查看模式 */}
-            {(currentUser !== "rainforgrain" || viewMode === "html") && (
+            ) : (
+              /* 普通用户：HTML视图 */
               <div
                 ref={yutuPanelRef}
                 className="flex-1 min-h-0 overflow-auto rounded-md border bg-white dark:bg-gray-950"
@@ -4797,6 +5084,52 @@ export function ThreePanelInterface() {
               size="sm"
               onClick={() => setShowYutuPanel(false)}
             >
+              关闭
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 知识库设置弹窗 - 仅超级用户可见 */}
+      <Dialog open={showKnowledgeSettings} onOpenChange={setShowKnowledgeSettings}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <BookOpen className="h-5 w-5" />
+              知识库设置
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="flex items-center justify-between p-3 border rounded-lg">
+              <div>
+                <div className="text-sm font-medium">启用知识库</div>
+                <div className="text-xs text-gray-500">启用后智能体启动时会阅读知识库</div>
+              </div>
+              <Switch
+                checked={knowledgeBaseEnabled}
+                onCheckedChange={(checked) => {
+                  setKnowledgeBaseEnabled(checked);
+                  // 保存设置到 localStorage
+                  localStorage.setItem("knowledgeBaseEnabled", checked ? "true" : "false");
+                  toast({ description: checked ? "知识库已启用" : "知识库已停用" });
+                }}
+              />
+            </div>
+
+            <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+              <div className="text-sm font-medium text-blue-700 dark:text-blue-300 mb-2">
+                使用说明
+              </div>
+              <ul className="text-xs text-blue-600 dark:text-blue-400 space-y-1">
+                <li>• 启用后，智能体在每次分析开始时会查询雨途斩疑录</li>
+                <li>• "雨途斩疑"按钮在分析完成后变为可用</li>
+                <li>• 点击可自动提取分析过程中的问题和解决方案</li>
+                <li>• 重复的记录会自动过滤，不会重复添加</li>
+              </ul>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" size="sm" onClick={() => setShowKnowledgeSettings(false)}>
               关闭
             </Button>
           </div>

@@ -83,6 +83,216 @@ from yutu_zhanyilu import (
     update_yutu_html,
 )
 
+
+# ========== 自动错误记录功能 ==========
+def detect_and_record_error(exe_output: str, code_str: str, workspace_dir: str) -> dict:
+    """
+    检测代码执行输出中的错误，并自动记录到雨途斩疑录
+
+    Returns:
+        dict: {
+            "has_error": bool,           # 是否检测到错误
+            "error_type": str,           # 错误类型
+            "error_message": str,        # 错误消息
+            "recorded": bool,            # 是否已记录到知识库
+            "similar_found": bool        # 是否发现相似错误
+        }
+    """
+    import re
+
+    result = {
+        "has_error": False,
+        "error_type": "Unknown",
+        "error_message": "",
+        "recorded": False,
+        "similar_found": False
+    }
+
+    # 如果没有输出或输出为空，认为没有错误
+    if not exe_output or not exe_output.strip():
+        return result
+
+    # 检测常见的Python错误模式
+    error_patterns = [
+        # ImportError
+        (r"ModuleNotFoundError|ImportError:\s*(.+?)(?:\n|$)", "ImportError"),
+        # ValueError
+        (r"ValueError:\s*(.+?)(?:\n|$)", "ValueError"),
+        # TypeError
+        (r"TypeError:\s*(.+?)(?:\n|$)", "TypeError"),
+        # RuntimeError
+        (r"RuntimeError:\s*(.+?)(?:\n|$)", "RuntimeError"),
+        # KeyError
+        (r"KeyError:\s*['\"](.+?)['\"]", "KeyError"),
+        # FileNotFoundError
+        (r"FileNotFoundError:\s*(.+?)(?:\n|$)", "FileNotFoundError"),
+        # TimeoutError
+        (r"TimeoutError:\s*(.+?)(?:\n|$)", "TimeoutError"),
+        # SyntaxError
+        (r"SyntaxError:\s*(.+?)(?:\n|$)", "SyntaxError"),
+        # AttributeError
+        (r"AttributeError:\s*(.+?)(?:\n|$)", "AttributeError"),
+        # IndexError
+        (r"IndexError:\s*(.+?)(?:\n|$)", "IndexError"),
+        # MemoryError
+        (r"MemoryError:\s*(.+?)(?:\n|$)", "MemoryError"),
+        # ZeroDivisionError
+        (r"ZeroDivisionError:\s*(.+?)(?:\n|$)", "ZeroDivisionError"),
+        # FPDF/报告库相关错误
+        (r"FPDF.*?DeprecationWarning|DeprecationWarning.*?FPDF", "FPDFDeprecationWarning"),
+        # matplotlib 字体相关错误
+        (r"Font.*?not found|FontProperties.*?not found", "FontNotFoundError"),
+        # Unicode错误
+        (r"UnicodeDecodeError|UnicodeEncodeError|UnicodeError", "UnicodeError"),
+        # 一般错误
+        (r"(?:Error|Exception|Error:)\s*(.+?)(?:\n|$)", "RuntimeError"),
+        # 通用错误检测
+        (r"Traceback \(most recent call last\):(.+?)(?:\n\n|\Z)", "PythonError"),
+    ]
+
+    error_type = "Unknown"
+    error_message = ""
+
+    # 遍历错误模式进行匹配
+    for pattern, err_type in error_patterns:
+        match = re.search(pattern, exe_output, re.IGNORECASE | re.DOTALL)
+        if match:
+            error_type = err_type
+            # 提取错误消息，清理格式
+            error_msg = match.group(1) if match.lastindex else match.group(0)
+            # 限制错误消息长度，避免过长
+            error_msg = error_msg.strip()[:500] if error_msg else exe_output[:500]
+            error_message = error_msg
+            break
+
+    # 检查是否确实有错误（排除 "Success" 等正常输出）
+    has_error = (
+        error_type != "Unknown" or
+        ("Error" in exe_output and "Success" not in exe_output) or
+        ("error" in exe_output.lower() and "0 error" not in exe_output.lower())
+    ) and not (
+        # 排除成功的输出
+        exe_output.strip().endswith("OK") or
+        "Successfully" in exe_output or
+        "successfully" in exe_output
+    )
+
+    # 进一步检测：如果输出中包含 "Error" 但不是真正的错误，也需要过滤
+    if "Error" in exe_output and "[Error]:" in exe_output:
+        has_error = True
+    elif error_type == "Unknown" and "error" in exe_output.lower():
+        # 可能是未知的错误格式，尝试提取整段
+        error_type = "RuntimeError"
+        error_message = exe_output[:500]
+
+    if not has_error:
+        return result
+
+    result["has_error"] = True
+    result["error_type"] = error_type
+    result["error_message"] = error_message
+
+    # 检查是否已有相似的错误记录（避免重复记录）
+    try:
+        similar_errors = search_errors(keywords=[error_type], page_size=1)
+        if similar_errors and similar_errors.get("items"):
+            for item in similar_errors["items"]:
+                # 检查错误消息是否相似
+                if item.get("error_message") and error_message:
+                    # 简单的相似性检查：是否包含相同的关键词
+                    msg_keywords = set(error_message.lower().split())
+                    existing_keywords = set(item["error_message"].lower().split())
+                    common = msg_keywords.intersection(existing_keywords)
+                    if len(common) >= 3:  # 有3个以上共同关键词
+                        result["similar_found"] = True
+                        break
+    except Exception as e:
+        print(f"检查相似错误失败: {e}")
+
+    # 自动记录错误到雨途斩疑录（如果没有相似记录）
+    if not result["similar_found"]:
+        try:
+            # 生成解决方案建议
+            solution = generate_solution_suggestion(error_type, error_message, code_str)
+            solution_code = generate_fix_code(error_type, error_message, code_str)
+
+            # 记录错误
+            add_error_solution(
+                error_type=error_type,
+                error_message=error_message,
+                error_context=f"工作区: {workspace_dir}\n代码长度: {len(code_str)} 字符",
+                solution=solution,
+                solution_code=solution_code,
+                confidence=0.7,  # 自动记录的置信度稍低
+                created_by="system_auto"
+            )
+            result["recorded"] = True
+            print(f"[雨途斩疑录] 自动记录错误: {error_type} - {error_message[:50]}...")
+        except Exception as e:
+            print(f"[雨途斩疑录] 自动记录失败: {e}")
+
+    return result
+
+
+def generate_solution_suggestion(error_type: str, error_message: str, code_str: str) -> str:
+    """根据错误类型和消息生成解决方案建议"""
+    suggestions = {
+        "ImportError": "检查是否已安装所需的Python包，可能需要使用 pip install 安装缺失的模块。",
+        "ValueError": "检查输入数据的类型和格式，确保参数值在有效范围内。",
+        "TypeError": "检查变量类型，确保操作符两边的数据类型兼容。",
+        "FileNotFoundError": "检查文件路径是否正确，确保文件存在于指定位置。",
+        "UnicodeError": "检查文件编码，可能需要指定正确的编码格式（如 encoding='utf-8'）。",
+        "SyntaxError": "检查代码语法，确保Python语法正确。",
+        "KeyError": "检查字典键是否存在，使用 .get() 方法或先检查键是否存在。",
+        "IndexError": "检查列表/数组索引是否越界，确保索引值在有效范围内。",
+        "AttributeError": "检查对象是否有该属性，确保使用正确的属性名。",
+        "FontNotFoundError": "检查字体文件路径是否正确，确保字体文件存在。",
+        "FPDFDeprecationWarning": "使用 fpdf2 替代 fpdf，或更新 FPDF 库到最新版本。",
+    }
+    return suggestions.get(error_type, f"遇到 {error_type} 错误，请检查代码逻辑并参考错误消息进行修复。")
+
+
+def generate_fix_code(error_type: str, error_message: str, code_str: str) -> str:
+    """生成修复代码的示例"""
+    fix_examples = {
+        "ImportError": '''# 解决方案：确保所有依赖已安装
+import subprocess
+import sys
+
+def install_package(package_name):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+
+# 示例：安装缺失的包
+# install_package("package_name")
+''',
+        "FileNotFoundError": '''# 解决方案：检查文件是否存在，或使用绝对路径
+import os
+
+file_path = "your_file.csv"
+if os.path.exists(file_path):
+    # 读取文件
+    pass
+else:
+    print(f"文件不存在: {file_path}")
+    # 列出工作区文件帮助调试
+    print("工作区文件:", os.listdir("."))
+''',
+        "UnicodeError": '''# 解决方案：指定正确的编码格式
+import chardet
+
+# 检测文件编码
+with open("file.csv", "rb") as f:
+    raw_data = f.read()
+    result = chardet.detect(raw_data)
+    encoding = result["encoding"]
+
+# 使用检测到的编码读取文件
+with open("file.csv", "r", encoding=encoding) as f:
+    content = f.read()
+''',
+    }
+    return fix_examples.get(error_type, "")
+
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import getSampleStyleSheet
@@ -1444,10 +1654,26 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 第七部分：雨途斩疑录 - 错误修正知识库（极重要）
 ============================================
 
-雨途斩疑录是智能体的错误修正知识库，记录了所有已解决的错误及其解决方案。每次工作前，请务必参考这本笔记。
+雨途斩疑录是智能体的错误修正知识库，记录了所有已解决的错误及其解决方案。**你必须在每次开始新分析任务时，首先查询这本笔记，避免重复曾经犯过的错误！**
+
+**启动时必须执行的查询命令**：
+在开始任何分析之前，你**必须**先用以下代码查询雨途斩疑录中的已知错误和解决方案：
+```python
+import requests
+# 获取雨途斩疑录中最近的错误记录
+response = requests.get("http://localhost:8200/api/yutu/search", json={"keywords": [], "page": 1, "page_size": 10})
+data = response.json()
+if data.get("success") and data.get("data", {}).get("items"):
+    print("=== 雨途斩疑录 - 历史错误记录 ===")
+    for item in data["data"]["items"]:
+        print(f"错误类型: {item['error_type']}")
+        print(f"错误消息: {item['error_message']}")
+        print(f"解决方案: {item.get('solution', 'N/A')}")
+        print("---")
+```
 
 **雨途斩疑录功能说明**：
-1. **自动记录**：当代码执行出现错误时，智能体应自动记录错误类型、错误消息、错误上下文，并提供解决方案
+1. **自动记录**：【重要变化】系统现在已经**自动**记录你执行代码时遇到的错误。当你遇到错误并成功解决后，系统会自动把错误和解决方案记录到知识库中，你无需手动记录（但如果是你自己发现的额外解决方案，也可以手动记录）。
 2. **快速查找**：遇到相似错误时，优先查询雨途斩疑录获取已知解决方案
 3. **持续优化**：每次成功解决问题后，更新雨途斩疑录以提升未来工作效率
 
@@ -1465,10 +1691,11 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 - `POST /api/yutu/init` - 初始化雨途斩疑录
 
 **使用雨途斩疑录的场景**：
-1. 当代码执行出现 ImportError、ValueError、TypeError 等常见错误时
-2. 当遇到环境配置问题（如字体缺失、库版本冲突）时
-3. 当找到有效的解决方案后，应记录到雨途斩疑录
-4. 在尝试新方案前，先查询雨途斩疑录是否有类似问题的解决方案
+1. **【必须】每次开始新任务时**：查询雨途斩疑录，避免使用曾经失败的代码方式
+2. **【必须】代码执行出现错误后**：系统会自动记录错误，但你也可以补充解决方案
+3. 当遇到环境配置问题（如字体缺失、库版本冲突）时
+4. 当找到有效的解决方案后，应记录到雨途斩疑录
+5. 在尝试新方案前，先查询雨途斩疑录是否有类似问题的解决方案
 
 **记录格式**：
 - error_type: 错误类型（如 ImportError, ValueError）
@@ -1477,6 +1704,22 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 - solution: 解决方案描述
 - solution_code: 解决方案代码（如有）
 - confidence: 解决方案置信度（0.0-1.0）
+
+**【重要】任务开始模板**：
+在开始分析时，请按以下格式输出你的查询结果：
+```
+<Analyze>
+# 工作前查询
+
+根据雨途斩疑录，以下是需要避免的错误模式：
+1. 错误类型: XXX - 解决方案: XXX
+2. 错误类型: YYY - 解决方案: YYY
+
+本次分析将采用以下策略避免这些错误：
+- [具体策略1]
+- [具体策略2]
+</Analyze>
+```
 """ + selected_strategy_prompt + """
 
 **并行试错与死循环检测（极重要）**：
@@ -1590,6 +1833,20 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
                     before_state = {}
                 # 在子进程中以固定工作区执行
                 exe_output = execute_code_safe(code_str, WORKSPACE_DIR)
+
+                # ========== 自动检测并记录错误到雨途斩疑录 ==========
+                try:
+                    error_info = detect_and_record_error(exe_output, code_str, WORKSPACE_DIR)
+                    if error_info.get("has_error"):
+                        print(f"[雨途斩疑录] 检测到错误: {error_info.get('error_type')}")
+                        if error_info.get("recorded"):
+                            print(f"[雨途斩疑录] 已自动记录到知识库")
+                        elif error_info.get("similar_found"):
+                            print(f"[雨途斩疑录] 发现相似错误记录，跳过重复记录")
+                except Exception as e:
+                    print(f"[雨途斩疑录] 错误检测失败: {e}")
+                # ========== 错误检测结束 ==========
+
                 # 执行后快照
                 try:
                     after_state = {
@@ -2600,6 +2857,26 @@ async def init_yutu_api():
         return {"success": True, "message": "Yutu initialized successfully"}
     except Exception as e:
         print(f"Init yutu error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/yutu/organize")
+async def organize_yutu_api(records: List[dict], username: str = ""):
+    """整理雨途斩疑录 - AI重新组织所有记录（超级用户专用）"""
+    # 验证超级用户
+    if username != "rainforgrain":
+        raise HTTPException(status_code=403, detail="只有超级用户可以整理笔记")
+
+    if not records or len(records) == 0:
+        return {"success": False, "detail": "没有记录可整理", "updated_count": 0}
+
+    try:
+        # 调用Yutu模块进行整理
+        from yutu_zhanyilu import reorganize_all_records
+        updated_count = reorganize_all_records(records)
+        return {"success": True, "updated_count": updated_count}
+    except Exception as e:
+        print(f"Organize yutu error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

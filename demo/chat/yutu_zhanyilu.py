@@ -397,6 +397,70 @@ def delete_error(error_hash: str) -> bool:
         return False
 
 
+def reorganize_all_records(records: List[dict]) -> int:
+    """重新整理所有雨途斩疑记录 - 改进记录的组织和内容"""
+    if not records:
+        return 0
+
+    updated_count = 0
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    try:
+        for record in records:
+            error_hash = record.get("error_hash")
+            if not error_hash:
+                continue
+
+            # 改进解决方案描述，添加更清晰的场景描述
+            solution = record.get("solution", "")
+            error_message = record.get("error_message", "")
+            error_type = record.get("error_type", "")
+
+            # 生成更清晰的场景描述和改进的解决方案
+            improved_solution = solution
+            if solution:
+                # 添加场景标签和改进的结构
+                improved_solution = f"【场景分析】遇到 {error_type} 错误时：{error_message[:100]}...\n\n【解决方案】{solution}\n\n【关键要点】该错误通常由{_extract_key_cause(error_type)}引起，建议直接采用上述解决方案。"
+
+            # 更新数据库
+            cursor.execute(
+                "UPDATE yutu_errors SET solution = ? WHERE error_hash = ?",
+                (improved_solution, error_hash)
+            )
+            updated_count += 1
+
+        conn.commit()
+        logger.info(f"已整理 {updated_count} 条记录")
+
+    except Exception as e:
+        logger.error(f"整理记录失败: {e}")
+    finally:
+        conn.close()
+
+    # 生成新的HTML
+    update_yutu_html()
+
+    return updated_count
+
+
+def _extract_key_cause(error_type: str) -> str:
+    """提取错误类型的常见原因关键词"""
+    causes = {
+        "ImportError": "模块路径问题或缺少依赖",
+        "ValueError": "数据类型不匹配或值超出范围",
+        "TypeError": "操作类型不匹配",
+        "AttributeError": "对象缺少属性或属性名错误",
+        "KeyError": "字典键不存在",
+        "IndexError": "索引超出列表范围",
+        "FileNotFoundError": "文件路径错误或文件不存在",
+        "PermissionError": "权限不足",
+        "SyntaxError": "代码语法错误",
+        "NameError": "变量名未定义"
+    }
+    return causes.get(error_type, "多种原因")
+
+
 def generate_yutu_html() -> str:
     """生成雨途斩疑录HTML内容"""
     try:
