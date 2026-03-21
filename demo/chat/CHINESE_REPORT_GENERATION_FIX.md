@@ -1,13 +1,50 @@
-# 中文 DOCX/PDF 生成问题修复说明
+# DeepAnalyze 项目修复说明
 
-## 问题描述
+## 版本 forthrain (2026-03-21)
 
-智能体在生成 DOCX 和 PDF 文件时出现中文乱码，主要原因是：
-1. 字体设置不正确
-2. 编码处理不当
-3. 缺少模块化的中文处理逻辑
+### 1. DOCX 乱码问题修复
 
-## 解决方案
+**问题原因**：
+- `STFangSong.ttf` 字体文件实际注册的字体名称是 `STFangsong`（小写 g）
+- 代码中使用的是 `STFangSong`（大写 G）
+- DOCX 格式区分大小写，导致字体匹配失败
+
+**修复文件**：
+- `demo/chat/docx_utils.py:85` - 将字体名称改为 `STFangsong`
+
+### 2. 用户体验优化
+
+**问题1：退出后登录对话框没有列举用户名**
+- 修复位置：`frontend/components/three-panel-interface.tsx:738`
+- 修复内容：在 `performLogout` 中重新加载已注册用户列表
+
+**问题2：退出时没有清空缓存文件**
+- 修复位置：`frontend/components/three-panel-interface.tsx:738`
+- 修复内容：生成新的 sessionId，确保重新登录时使用新的工作区
+
+**问题3：打开项目后文件未加载到左侧**
+- 修复位置：`frontend/components/three-panel-interface.tsx:1275`
+- 修复内容：等待文件恢复完成后再加载工作区文件
+
+**问题4：LOGO 显示优化**
+- 修复位置：`frontend/components/three-panel-interface.tsx:3965, 3333`
+- 修复内容：
+  - 右侧 panel 的 CODE 下方显示 LOGO（showCodeEditor=false 时）
+  - 登录对话框顶部显示 LOGO
+
+**问题5：项目保存完整性**
+- 修复位置：`backend.py`
+- 修复内容：
+  - 添加 `PROJECTS_BASE_DIR` 目录
+  - 修改 `save_project` 将文件复制到项目目录
+  - 添加 `/api/projects/file/{project_id}/{file_path}` 端点
+
+### 3. Chat V2 移除
+
+- 将 `demo/chat_v2` 目录重命名为 `demo/chat_v2_backup`
+- 原因：简化项目结构，保留 V2 版本以备参考
+
+## 原 DOCX/PDF 修复说明（旧版）
 
 ### 1. 创建了 docx_utils.py 模块
 
