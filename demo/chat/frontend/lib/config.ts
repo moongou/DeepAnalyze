@@ -58,6 +58,9 @@ export const API_CONFIG = {
     YUTU_DELETE: "/api/yutu/delete",
     YUTU_SEARCH: "/api/yutu/search",
     YUTU_INIT: "/api/yutu/init",
+    YUTU_ORGANIZE: "/api/yutu/organize",
+    YUTU_ORGANIZE_CONFIRM: "/api/yutu/organize/confirm",
+    YUTU_ORGANIZE_CANCEL: "/api/yutu/organize/cancel",
   },
 };
 
@@ -91,6 +94,9 @@ export const API_URLS = {
   YUTU_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_DELETE),
   YUTU_SEARCH: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_SEARCH),
   YUTU_INIT: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_INIT),
+  YUTU_ORGANIZE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ORGANIZE),
+  YUTU_ORGANIZE_CONFIRM: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ORGANIZE_CONFIRM),
+  YUTU_ORGANIZE_CANCEL: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ORGANIZE_CANCEL),
 
   // 认证
   AUTH_REGISTER: buildApiUrl(API_CONFIG.ENDPOINTS.AUTH_REGISTER),

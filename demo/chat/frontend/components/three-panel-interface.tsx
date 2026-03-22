@@ -56,6 +56,7 @@ import {
   Code2,
   Terminal,
   BookOpen,
+  Bot,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Tree, NodeApi } from "react-arborist";
@@ -454,6 +455,9 @@ export function ThreePanelInterface() {
   const [isRecordingKnowledge, setIsRecordingKnowledge] = useState(false); // 是否正在记录知识
   const [showKnowledgeSettings, setShowKnowledgeSettings] = useState(false); // 知识库设置弹窗
 
+  // 智能体介绍面板状态
+  const [showAgentIntro, setShowAgentIntro] = useState(false);
+
   // 预览弹窗状态
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [previewTitle, setPreviewTitle] = useState<string>("");
@@ -749,12 +753,23 @@ export function ThreePanelInterface() {
     toast({ description: "正在使用AI整理笔记，请稍候..." });
 
     try {
-      const res = await fetch(`/api/yutu/organize?username=${encodeURIComponent(currentUser || "")}`, {
+      // 使用完整的API URL
+      const organizeUrl = `${API_URLS.YUTU_ORGANIZE}?username=${encodeURIComponent(currentUser || "")}`;
+      console.log("整理笔记URL:", organizeUrl);
+      const res = await fetch(organizeUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ records: yutuRecords })
       });
-      if (res.ok) {
+
+      const contentType = res.headers.get("content-type");
+      if (!res.ok) {
+        const errorText = await res.text();
+        toast({ description: `整理失败: ${res.status} - ${errorText.substring(0, 100)}`, variant: "destructive" });
+        return;
+      }
+
+      if (contentType && contentType.includes("application/json")) {
         const data = await res.json();
         if (data.records && data.records.length > 0) {
           // 显示预览
@@ -762,21 +777,24 @@ export function ThreePanelInterface() {
           setShowOrganizePreview(true);
           toast({ description: `整理完成，请预览并确认` });
         } else {
-          toast({ description: "整理失败：无可用记录", variant: "destructive" });
+          toast({ description: data.detail || "整理失败：无可用记录", variant: "destructive" });
         }
       } else {
-        const data = await res.json();
-        toast({ description: data.detail || "整理失败", variant: "destructive" });
+        // 非JSON响应（可能是HTML错误页面）
+        const errorText = await res.text();
+        toast({ description: `整理失败: 服务器返回非JSON响应`, variant: "destructive" });
+        console.error("Non-JSON response:", errorText);
       }
     } catch (e) {
       toast({ description: "整理失败: " + (e as Error).message, variant: "destructive" });
     }
   };
 
-  // 确认整理结果
+  // 确认整理结果 - 使用完整URL
   const confirmOrganize = async () => {
     try {
-      const res = await fetch(`/api/yutu/organize/confirm?username=${encodeURIComponent(currentUser || "")}`, {
+      const confirmUrl = `${API_URLS.YUTU_ORGANIZE_CONFIRM}?username=${encodeURIComponent(currentUser || "")}`;
+      const res = await fetch(confirmUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ records: organizedRecords })
@@ -1231,7 +1249,11 @@ ${analysisContent}
                 const uploadForm = new FormData();
                 uploadForm.append("files", file);
 
-                await fetch(`${API_URLS.WORKSPACE_UPLOAD}?session_id=${newSessionId}&username=${currentUser || "default"}`, {
+                // 获取文件的目录路径（如果有）
+                const dirPath = fileInfo.path ? fileInfo.path.substring(0, fileInfo.path.lastIndexOf('/')) : "";
+                const uploadUrl = `${API_URLS.WORKSPACE_UPLOAD_TO}?dir=${encodeURIComponent(dirPath)}&session_id=${newSessionId}&username=${currentUser || "default"}`;
+
+                await fetch(uploadUrl, {
                   method: "POST",
                   body: uploadForm,
                 });
@@ -3734,9 +3756,20 @@ ${analysisContent}
           <ResizablePanel defaultSize={25} minSize={10}>
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12">
-                <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
-                  Files
-                </h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                    Files
+                  </h2>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-5 w-5 p-0 text-gray-400 hover:text-blue-600 dark:text-gray-500 dark:hover:text-blue-400"
+                    title="关于智能体"
+                    onClick={() => setShowAgentIntro(true)}
+                  >
+                    <Bot className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
                 <div
                   className="flex items-center gap-1"
                   onDragOver={(e) => e.preventDefault()}
@@ -5334,6 +5367,40 @@ ${analysisContent}
           </AlertDialogContent>
         </AlertDialog>
       )}
+
+      {/* 智能体介绍对话框 */}
+      <Dialog open={showAgentIntro} onOpenChange={setShowAgentIntro}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Bot className="h-5 w-5 text-blue-600" />
+              智能体介绍
+            </DialogTitle>
+          </DialogHeader>
+          <div className="py-4 space-y-4 text-sm leading-relaxed">
+            <div className="space-y-3">
+              <div>
+                <h3 className="font-semibold text-blue-600 dark:text-blue-400 mb-1">角色定位</h3>
+                <p className="text-gray-600 dark:text-gray-300">
+                  我是DeepAnalyze智能分析助手，专注于帮助开发者进行代码分析、问题诊断和知识管理。通过深度理解代码逻辑、系统架构以及技术规范，我为用户提供精确的问题诊断和优化建议，并将解决过程转化为可复用的知识资产。我的使命是降低开发复杂度，提升代码质量，加速项目交付。
+                </p>
+              </div>
+              <div>
+                <h3 className="font-semibold text-blue-600 dark:text-blue-400 mb-1">特点特长</h3>
+                <p className="text-gray-600 dark:text-gray-300">
+                  具备多语言、多框架的代码解析能力，能够快速识别潜在的安全隐患、性能瓶颈和架构缺陷。擅长从错误堆栈和日志中提取关键信息，定位问题根源。支持知识库沉淀，将解决方案分类存储，便于后续查询复用。可分析上传的代码文件、文档资料，提供全面的诊断报告和改进建议。
+                </p>
+              </div>
+              <div>
+                <h3 className="font-semibold text-blue-600 dark:text-blue-400 mb-1">处理问题原则</h3>
+                <p className="text-gray-600 dark:text-gray-300">
+                  始终以用户需求为核心，坚持问题驱动、结果导向的分析方法。不满足于表面修复，深入挖掘问题本质和潜在影响。提倡系统化思考，确保方案的长期稳定性和可扩展性。在处理过程中保持逻辑严谨、客观公正，提供具体可执行的建议。
+                </p>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
