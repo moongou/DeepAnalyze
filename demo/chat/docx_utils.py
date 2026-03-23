@@ -27,13 +27,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==================== 字体配置 ====================
-# 使用绝对路径指定字体目录（确保路径正确）
-FONTS_DIR = Path("/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts")
+# 使用中央配置模块
+try:
+    from config import get_fonts_dir
+    FONTS_DIR = get_fonts_dir()
+except ImportError:
+    # 回退到相对路径解析
+    _CURRENT_DIR = Path(__file__).parent.resolve()
+    _PROJECT_ROOT = _CURRENT_DIR.parent
+    FONTS_DIR = _PROJECT_ROOT / "assets" / "fonts"
 
 # 验证字体目录是否存在
 if not FONTS_DIR.exists():
     logger.error(f"字体目录不存在: {FONTS_DIR}")
-    logger.error("请检查字体文件是否存在于 assets/fonts/ 目录")
+    # 尝试备用路径
+    _ALTERNATIVE_FONTS = [
+        Path(__file__).parent.parent / "assets" / "fonts",
+        Path.home() / "DeepAnalyze" / "assets" / "fonts",
+    ]
+    for alt_path in _ALTERNATIVE_FONTS:
+        if alt_path.exists():
+            FONTS_DIR = alt_path
+            logger.info(f"使用备用字体目录: {FONTS_DIR}")
+            break
+    if not FONTS_DIR.exists():
+        logger.error("请检查字体文件是否存在于 assets/fonts/ 目录")
 
 
 def get_font_dir() -> Path:

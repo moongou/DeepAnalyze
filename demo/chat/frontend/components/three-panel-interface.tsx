@@ -448,6 +448,8 @@ export function ThreePanelInterface() {
   const [yutuViewAsRegular, setYutuViewAsRegular] = useState(false); // 超级用户查看模式：false=管理界面, true=只读HTML
   const [showOrganizePreview, setShowOrganizePreview] = useState(false); // 整理预览弹窗
   const [organizedRecords, setOrganizedRecords] = useState<any[]>([]); // 整理后的记录
+  const [isOrganizing, setIsOrganizing] = useState(false); // 是否正在整理
+  const [organizingProgress, setOrganizingProgress] = useState<string>(""); // 整理进度描述
 
   // 雨途斩棘录功能状态
   const [hasAnalysisCompleted, setHasAnalysisCompleted] = useState(false); // 分析任务是否完成
@@ -750,21 +752,27 @@ export function ThreePanelInterface() {
       return;
     }
 
-    toast({ description: "正在使用AI整理笔记，请稍候..." });
+    setIsOrganizing(true);
+    setOrganizingProgress("开始整理...");
 
     try {
       // 使用完整的API URL
       const organizeUrl = `${API_URLS.YUTU_ORGANIZE}?username=${encodeURIComponent(currentUser || "")}`;
       console.log("整理笔记URL:", organizeUrl);
+
+      setOrganizingProgress("正在分析记录...");
       const res = await fetch(organizeUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ records: yutuRecords })
       });
 
+      setOrganizingProgress("正在组织结果...");
+
       const contentType = res.headers.get("content-type");
       if (!res.ok) {
         const errorText = await res.text();
+        setIsOrganizing(false);
         toast({ description: `整理失败: ${res.status} - ${errorText.substring(0, 100)}`, variant: "destructive" });
         return;
       }
@@ -775,17 +783,22 @@ export function ThreePanelInterface() {
           // 显示预览
           setOrganizedRecords(data.records);
           setShowOrganizePreview(true);
+          setOrganizingProgress("整理完毕");
+          setTimeout(() => setIsOrganizing(false), 500);
           toast({ description: `整理完成，请预览并确认` });
         } else {
+          setIsOrganizing(false);
           toast({ description: data.detail || "整理失败：无可用记录", variant: "destructive" });
         }
       } else {
         // 非JSON响应（可能是HTML错误页面）
         const errorText = await res.text();
+        setIsOrganizing(false);
         toast({ description: `整理失败: 服务器返回非JSON响应`, variant: "destructive" });
         console.error("Non-JSON response:", errorText);
       }
     } catch (e) {
+      setIsOrganizing(false);
       toast({ description: "整理失败: " + (e as Error).message, variant: "destructive" });
     }
   };
@@ -3769,6 +3782,36 @@ ${analysisContent}
                   >
                     <Bot className="h-3.5 w-3.5" />
                   </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                    title="风雨同途 - 雨途斩棘录"
+                    onClick={() => {
+                      if (hasAnalysisCompleted) {
+                        if (currentUser === "rainforgrain") {
+                          summarizeSuccessPoints();
+                        } else {
+                          toast({ description: "只有管理员可以执行此操作", variant: "destructive" });
+                        }
+                      } else {
+                        toast({ description: "请先完成分析任务", variant: "destructive" });
+                      }
+                    }}
+                    disabled={!hasAnalysisCompleted || isRecordingKnowledge}
+                  >
+                    {isRecordingKnowledge ? (
+                      <>
+                        <span className="animate-spin mr-1">⏳</span>
+                        正在记录...
+                      </>
+                    ) : (
+                      <>
+                        <BookOpen className="h-3 w-3 mr-1" />
+                        风雨同途
+                      </>
+                    )}
+                  </Button>
                 </div>
                 <div
                   className="flex items-center gap-1"
@@ -3883,48 +3926,6 @@ ${analysisContent}
                     {uploadMsg}
                   </div>
                 )}
-
-                {/* 雨途斩棘录按钮 - 仅在分析完成后可用 */}
-                <div className="px-2 py-2 border-b border-gray-200 dark:border-gray-700">
-                  <Button
-                    size="sm"
-                    variant={hasAnalysisCompleted ? "default" : "outline"}
-                    className={`w-full text-xs ${hasAnalysisCompleted
-                        ? "bg-blue-600 hover:bg-blue-700 text-white"
-                        : "opacity-50 cursor-not-allowed"
-                      }`}
-                    disabled={!hasAnalysisCompleted || isRecordingKnowledge}
-                    onClick={() => {
-                      if (currentUser === "rainforgrain") {
-                        summarizeSuccessPoints();
-                      } else {
-                        toast({ description: "只有管理员可以执行此操作", variant: "destructive" });
-                      }
-                    }}
-                  >
-                    {isRecordingKnowledge ? (
-                      <>
-                        <span className="animate-spin mr-1">⏳</span>
-                        正在记录...
-                      </>
-                    ) : (
-                      <>
-                        <BookOpen className="h-3 w-3 mr-1" />
-                        风雨同途
-                      </>
-                    )}
-                  </Button>
-                  {hasAnalysisCompleted && currentUser === "rainforgrain" && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="w-full mt-1 text-[10px] text-gray-500 hover:text-gray-700"
-                      onClick={() => setShowKnowledgeSettings(true)}
-                    >
-                      知识库设置
-                    </Button>
-                  )}
-                </div>
 
                 {workspaceTree ? (
                   <Tree
@@ -5077,8 +5078,16 @@ ${analysisContent}
                         organizeYutuNotes();
                       }
                     }}
+                    disabled={isOrganizing}
                   >
-                    整理笔记
+                    {isOrganizing ? (
+                      <>
+                        <span className="animate-spin mr-1">⏳</span>
+                        {organizingProgress}
+                      </>
+                    ) : (
+                      "整理笔记"
+                    )}
                   </Button>
                 </div>
                 <span className="text-xs text-gray-500">共 {yutuRecords.length} 条记录</span>

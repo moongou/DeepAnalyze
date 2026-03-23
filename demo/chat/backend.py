@@ -42,13 +42,24 @@ from matplotlib import font_manager
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
+# 引入中央配置模块
+try:
+    from config import get_config, get_fonts_dir
+    _CONFIG = get_config()
+    _FONT_DIR = str(get_fonts_dir())
+    # 确保目录存在
+    if not os.path.exists(_FONT_DIR):
+        print(f"警告: 字体目录不存在: {_FONT_DIR}")
+except ImportError:
+    print("警告: 无法导入 config 模块，使用回退路径解析")
+    _FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/fonts")
+
 # 注册中文字体到 matplotlib
-FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/fonts")
-if os.path.exists(FONT_DIR):
-    for font_file in os.listdir(FONT_DIR):
+if os.path.exists(_FONT_DIR):
+    for font_file in os.listdir(_FONT_DIR):
         if font_file.lower().endswith(('.ttf', '.ttc', '.otf')):
             try:
-                font_manager.fontManager.addfont(os.path.join(FONT_DIR, font_file))
+                font_manager.fontManager.addfont(os.path.join(_FONT_DIR, font_file))
             except Exception as e:
                 print(f"Error registering font {font_file}: {e}")
 
@@ -300,15 +311,27 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.pagesizes import A4
 
 
-Chinese_matplot_str = """
+# 动态生成 matplotlib 中文支持代码（使用运行时解析的字体路径）
+def get_chinese_matplotlib_setup() -> str:
+    """
+    生成 matplotlib 中文支持代码
+    使用动态路径避免硬编码
+    """
+    # 使用已解析的字体目录
+    font_dir = _FONT_DIR if '_FONT_DIR' in globals() else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "../../assets/fonts"
+    )
+
+    return f"""
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import os
 
-# 使用绝对路径注册所有字体（避免 __file__ 在 temp subprocess 中失效）
-_ASSETS_FONTS = "/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts"
+# 使用动态解析的字体目录
+_ASSETS_FONTS = "{font_dir}"
 _FONT_DIRS = [
     _ASSETS_FONTS,
     "/System/Library/Fonts",
@@ -345,6 +368,9 @@ plt.rcParams['axes.unicode_minus'] = False
 # 额外：确保数据标签、图例、标题全部使用 sans-serif 字体族
 plt.rcParams['font.family'] = 'sans-serif'
 """
+
+# 初始化时生成一次（如果 _FONT_DIR 已可用）
+Chinese_matplot_str = get_chinese_matplotlib_setup() if '_FONT_DIR' in globals() else get_chinese_matplotlib_setup()
 
 
 def execute_code_safe(
@@ -1309,26 +1335,19 @@ def fix_tags_and_codeblock(s: str) -> str:
     return s
 
 
-def bot_stream(messages, workspace, session_id="default", username="default", strategy="聚焦诉求", temperature=0.4):
-    # Strategy-specific prompts and default temperature
-    strategy_temperatures = {
-        "聚焦诉求": 0.2,
-        "适度扩展": 0.4,
-        "广泛延展": 0.6,
-    }
-    # Use provided temperature, or fall back to strategy default
-    effective_temperature = temperature if temperature is not None else strategy_temperatures.get(strategy, 0.4)
+def get_system_prompt_with_fonts() -> str:
+    """
+    生成包含动态字体路径的 system prompt
+    直接返回原始 system_prompt，使用字符串替换
+    """
+    # 获取字体目录
+    try:
+        fonts_dir = str(get_fonts_dir())
+    except (NameError, ImportError):
+        fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/fonts")
 
-    strategy_prompts = {
-        "聚焦诉求": "\n**分析策略：聚焦诉求**。请严格遵守用户指令，仅针对用户直接提出的问题进行分析和回答，不要进行任何不必要的发散或多余的关联分析。保持回答简洁、高效、直击要点。",
-        "适度扩展": "\n**分析策略：适度扩展**。在满足用户核心需求的基础上，请基于数据表现进行适量的关联性分析。你可以简要探讨与核心指标相关的其他因素，提供一些背景信息或浅层的风险提示，但请注意分寸，不要过度发散。",
-        "广泛延展": "\n**分析策略：广泛延展**。请进行深度发散分析，充分挖掘数据间的潜在联系。你可以大胆发挥想象力，结合海关业务逻辑进行全方位的风险预判、趋势分析和关联挖掘。鼓励你提供多维度的洞察和前瞻性的建议。"
-    }
-
-    selected_strategy_prompt = strategy_prompts.get(strategy, strategy_prompts["聚焦诉求"])
-
-    # Inject System Prompt to enhance self-awareness and customs risk analysis capabilities
-    system_prompt = """你是 DeepAnalyze，一位精通 Python 和 R 语言的顶尖数据科学家，同时也是专门从事中国海关风险管理和风险防控的数据分析专家。
+    # 原始 system prompt 模板（完整内容）
+    system_prompt_template = """你是 DeepAnalyze，一位精通 Python 和 R 语言的顶尖数据科学家，同时也是专门从事中国海关风险管理和风险防控的数据分析专家。
 
 **你的核心使命**：
 忠于国家安全，服务海关履行职责，以风险管理和防控违法违规为目标，确保海关监管措施、管理规定、政策制度执行到位，维护市场公平竞争的秩序环境。
@@ -1351,11 +1370,13 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
      ```python
      from fpdf import FPDF
      pdf = FPDF()
-     # 添加中文字体（必须使用绝对路径）
-     pdf.add_font('SimHei', '', '/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf')
-     pdf.add_font('SimHei', 'B', '/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf')
-     pdf.add_font('SimHei', 'I', '/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf')
-     pdf.add_font('STFangSong', '', '/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf')
+     # 添加中文字体（动态解析字体路径，推荐方式）
+     fonts_dir = "{FONTS_DIR_PLACEHOLDER}"
+
+     pdf.add_font('SimHei', '', os.path.join(fonts_dir, 'simhei.ttf'))
+     pdf.add_font('SimHei', 'B', os.path.join(fonts_dir, 'simhei.ttf'))
+     pdf.add_font('SimKai', '', os.path.join(fonts_dir, 'simkai.ttf'))
+     pdf.add_font('STFangSong', '', os.path.join(fonts_dir, 'STFangSong.ttf'))
 
      pdf.add_page()
      # 设置字体，大小
@@ -1445,142 +1466,69 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 ============================================
 生成 PDF/DOCX 报告时，请严格遵守以下排版规范：
 
-1. **标题层级与字体**：
-   - 一级标题（如"# 标题"）：黑体（SimHei），字号 18-20pt，加粗
-   - 二级标题（如"## 标题"）：黑体（SimHei），字号 14-16pt，加粗
-   - 三级标题（如"### 标题"）：楷体（SimKai），字号 12-13pt，加粗
-   - 正文：仿宋（STFangSong），字号 10.5-11pt
-   - 图片说明：楷体（SimKai），字号 9-10pt，斜体
+**字体使用规范**：
+- **标题**：使用 SimHei（黑体），字号 16-22pt
+- **副标题**：使用 SimHei（黑体），字号 14-16pt
+- **正文**：使用 STFangSong（仿宋），字号 10-12pt
+- **强调/引用**：使用 SimKai（楷体），字号 11-12pt
+- **图表标题**：使用 SimHei（黑体），字号 10-12pt
 
-2. **行间距**：
-   - 正文：1.2-1.5 倍行距（推荐 1.3）
-   - 段后间距：6-8pt
-   - 标题与正文的间距：段前 12pt，段后 6pt
+**间距规范**：
+- 段落间距：1.2-1.5 倍行距
+- 标题与正文间距：12pt 以上
+- 图表上下间距：10pt 以上
 
-3. **页面布局**：
-   - 页边距：上下 2cm，左右 2.1cm
-   - 页眉页脚：简洁风格，包含页码
+**页面布局**：
+- 页边距：上下左右各 50pt
+- 页码：居中，使用阿拉伯数字
+- 章节分页：重要章节前应分页
 
-4. **图表**：
-   - 图表标题置于图表下方，引用编号置于标题前（如"图1："）
-   - 表格标题置于表格上方
+**图表规范**：
+- 图表编号置于标题前，如"图1："
+- 图表标题置于图表下方
+- 表格标题置于表格上方，编号如"表1："
+- 确保中文显示正常，使用支持中文的字体
 
 **============================================
-第五部分：分析工作流规范（极重要）
+第五部分：任务执行与输出规范（极重要）
 ============================================
-**禁止行为（容易导致错误和工作重复）**：
-- ❌ 在所有素材准备好之前就急于生成 PDF。
-- ❌ 多次生成相同或相似的图表/数据。
-- ❌ 使用自己定义的但未确认存在的文件名读取数据。
-- ❌ 在代码块中硬编码文件名而不先验证文件是否存在。
-- ❌ 重复编写相同的加载数据代码，每次分析都从头开始。
-- ❌ 不判断分析是否已满足用户需求，持续进行不必要的分析。
 
-**文件编码与映射规范（极重要）**：
-系统已在文件上传时自动完成编码检测和转换，但你仍需遵循以下规范：
+**执行流程**：
+1. 【数据理解】→ 2. 【分析思路】→ 3. 【代码执行】→ 4. 【结果解读】→ 5. 【报告输出】
 
-1. **编码状态告知**：上传完成后，系统会告知你每个文件的编码状态。
-   - 如果所有文件均为 UTF-8 编码，系统会提示"所有文件已是 UTF-8 编码，可直接使用"
-   - 如果存在非 UTF-8 文件，系统会提示"已转换 X 个文件为 UTF-8 编码"
+**每个 <Analyze> 标签内应包含**：
+```
+# 分析思路
+[你的分析思路和计划]
 
-2. **文件映射机制**：系统会自动维护一个文件映射表，在你开始分析时提供：
-   ```
-   文件映射表：
-   - 原始文件名 → converted/文件名（UTF-8版本）
-   - 文件编码记录：[文件名: 编码类型]
-   ```
-   **你必须记住这个映射表，分析时直接使用 mapped 文件路径，无需重新检测编码。**
+# 数据理解
+[数据概览、关键发现]
 
-3. **分析时的文件访问规则**：
-   - **直接使用 converted/ 目录下的 UTF-8 文件进行读取**
-   - **禁止在分析时重新检测编码或重新转换文件**
-   - 使用 pandas 读取 CSV 文件时，直接指定正确路径即可
-   - 示例正确写法：`df = pd.read_csv('workspace/session_xxx/converted/数据文件.csv')`
+# 分析过程
+[具体的分析步骤、代码执行结果]
 
-**任务拆解与分层执行规范（极重要）**：
+# 结果解读
+[对结果的解释和洞察]
+```
 
-你必须严格遵循以下三阶段工作流程，**绝对禁止在任务清单完成前进入报告汇总阶段**。
+**每个 <Answer> 标签内应包含**：
+```
+# 分析结论
+[核心结论和发现]
 
----
+# 风险提示
+[潜在风险和警告]
 
-### 阶段一：构建任务拆解清单（必须首先完成）
+# 建议
+[基于分析的具体建议]
+```
 
-收到用户分析目标后，**立即、全面地拆解任务**，构建结构化的任务清单：
+**代码执行规范**：
+- 每个 <Code> 标签应完成一个完整的任务
+- 执行后应输出关键信息（如图表路径、数据统计）
+- 遇到错误应记录原因并尝试解决
 
-1. **拆解原则**：
-   - 将用户的分析目标分解为若干有逻辑层次的具体子任务
-   - 明确各子任务之间的依赖关系和执行顺序
-   - 按"先数据理解 → 再多维分析 → 后综合汇总"的顺序排列
-
-2. **任务清单格式**（在聊天窗口中明确列出）：
-   ```
-   【任务拆解清单】
-   1. [子任务名称] → 依赖：无 → 预期成果：xxx
-   2. [子任务名称] → 依赖：任务1 → 预期成果：xxx
-   3. [子任务名称] → 依赖：任务1,2 → 预期成果：xxx
-   ...
-   ```
-
-3. **拆解示例**：
-   - 用户目标："分析进出口企业风险"
-   - 拆解清单：
-     1. 数据概览与质量评估 → 依赖：无 → 成果：数据概况报告
-     2. 时间维度分析 → 依赖：1 → 成果：时间趋势图表
-     3. 企业类型分布分析 → 依赖：1 → 成果：企业分布图表
-     4. 高风险企业识别 → 依赖：1,2,3 → 成果：风险企业清单
-     5. 关联关系挖掘 → 依赖：1,3 → 成果：关联分析报告
-     6. 综合报告生成 → 依赖：2,3,4,5 → 成果：最终PDF/DOCX报告
-
----
-
-### 阶段二：逐个执行任务清单（按顺序执行，禁止跳过）
-
-**核心原则**：按清单顺序逐个完成任务，每个任务完成后才进入下一个。
-
-1. **单任务执行规范**：
-   - 每执行一个子任务前，先确认其依赖任务已全部完成
-   - 在代码中生成该任务的成果（图表/数据/观点），存入工作区
-   - **立即向用户汇报**：当前完成的任务、生成的文件、关键发现
-   - 完成后在任务清单中打勾标记：`[x] 任务1：已完成 → 成果路径`
-
-2. **素材存放规范**：
-   - 每个任务的成果必须存入工作区（workspace/session_xxx/）
-   - 文件命名规范：`{序号}_{任务名}_{内容描述}.{扩展名}`
-   - 示例：`02_time_trend_chart.png`、`03_enterprise_distribution.csv`
-   - 已生成的素材**不得重复生成**，直接引用已有文件
-
-3. **死循环检测与跳出机制（极重要）**：
-   - **循环判定标准**：当发现以下情况时，说明已陷入死循环：
-     - 连续3次以上执行相同的数据处理逻辑且产生相似/相同结果
-     - 相同代码被执行两次以上且没有产生新的数据洞察
-     - 反复尝试相同路径的分析方法
-   - **跳出操作**：检测到死循环后，**立即停止当前循环**，记录问题原因，然后：
-     1. 跳出当前分析路径，转向任务清单中的下一项任务
-     2. 在运行记录中标注：`[死循环跳过] 任务X：原因描述`
-     3. 继续执行后续任务，不得卡在原地
-   - **禁止行为**：禁止在死循环中持续尝试同一方法超过2次
-
-4. **进度追踪**：
-   - 每完成一个任务，更新任务清单状态并向用户展示
-   - 汇总已完成：`[x] 任务1 [x] 任务2 [ ] 任务3...`
-
----
-
-### 阶段三：汇总生成报告（仅在所有任务完成后执行）
-
-**触发条件**：任务清单中的所有子任务（除综合报告生成外）均已标记为已完成。
-
-1. **报告生成时机**：
-   - ✅ 所有分析子任务完成 → 生成最终报告
-   - ❌ 用户刚提出目标 → 不得立即生成报告
-   - ❌ 仅完成1-2个子任务 → 不得生成最终报告
-
-2. **报告内容组织**：
-   - 按结构组织：分析思路 → 各子任务成果（图表+数据+观点）→ 分析小结
-   - 引用各任务在工作区生成的具体素材文件
-
-3. **分析小结（必须包含运行问题记录）**：
-   分析完成后，必须输出"工作小结"章节，内容包括：
+**工作小结格式**：
    ```
    【工作小结】
    - 数据处理：描述数据处理过程和关键数据操作
@@ -1622,11 +1570,29 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
   - **注意**：当前环境为 macOS，禁止使用 `comtypes` 或 `docx2pdf` 库。
 - **字体与路径支持（极重要）**：请务必清楚当前环境中有以下字体可用，**不要随意猜测或尝试不存在的字体路径**：
   - **中文字体（assets/fonts/ 目录，纯 TTF，reportlab/matplotlib 全支持，已验证可用）**：
-    - `SimHei` → `/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf`（黑体，主标题/重点内容，✅已验证）
-    - `SimKai` → `/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf`（楷体，引用/强调/副标题，✅已验证）
-    - `STFangSong` → `/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf`（仿宋，正文/报告，✅已验证）
-    - `STHeiti` → `/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STHeiti.ttf`（黑体备选，✅已验证）
-    - `LiSongPro` → `/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/LiSongPro.ttf`（隶书，可选）
+    - **动态解析字体路径（推荐）**：
+      ```python
+      import os
+      from pathlib import Path
+
+      # 方法1: 从项目根目录查找
+      project_root = Path.cwd()
+      while project_root != project_root.parent and not (project_root / "assets" / "fonts").exists():
+          project_root = project_root.parent
+      fonts_dir = str(project_root / "assets" / "fonts")
+
+      # 方法2: 相对路径（当工作区已知时）
+      fonts_dir = os.path.join(os.path.dirname(__file__), "..", "..", "assets", "fonts")
+
+      # 使用字体
+      font_path = os.path.join(fonts_dir, "simhei.ttf")
+      ```
+    - **可用字体文件**：
+      - `SimHei` → `simhei.ttf`（黑体，主标题/重点内容，✅已验证）
+      - `SimKai` → `simkai.ttf`（楷体，引用/强调/副标题，✅已验证）
+      - `STFangSong` → `STFangSong.ttf`（仿宋，正文/报告，✅已验证）
+      - `STHeiti` → `STHeiti.ttf`（黑体备选，✅已验证）
+      - `LiSongPro` → `LiSongPro.ttf`（隶书，可选）
   - **macOS 系统 CJK 字体（TTC 格式，用于 R showtext / matplotlib）**：
     - `STHeiti Light` → `/System/Library/Fonts/STHeiti Light.ttc`（黑体）
     - `STHeiti Medium` → `/System/Library/Fonts/STHeiti Medium.ttc`（中黑）
@@ -1691,36 +1657,13 @@ if data.get("success") and data.get("data", {}).get("items"):
 - `POST /api/yutu/init` - 初始化雨途斩棘录
 
 **使用雨途斩棘录的场景**：
-1. **【必须】每次开始新任务时**：查询雨途斩棘录，避免使用曾经失败的代码方式
-2. **【必须】代码执行出现错误后**：系统会自动记录错误，但你也可以补充解决方案
-3. 当遇到环境配置问题（如字体缺失、库版本冲突）时
-4. 当找到有效的解决方案后，应记录到雨途斩棘录
-5. 在尝试新方案前，先查询雨途斩棘录是否有类似问题的解决方案
+1. 代码执行报错时，先查询雨途斩棘录
+2. 遇到相似错误时，快速获取已知解决方案
+3. 记录新发现的问题和解决方案
 
-**记录格式**：
-- error_type: 错误类型（如 ImportError, ValueError）
-- error_message: 错误消息全文
-- error_context: 错误发生的上下文
-- solution: 解决方案描述
-- solution_code: 解决方案代码（如有）
-- confidence: 解决方案置信度（0.0-1.0）
-
-**【重要】任务开始模板**：
-在开始分析时，请按以下格式输出你的查询结果：
-```
-<Analyze>
-# 工作前查询
-
-根据雨途斩棘录，以下是需要避免的错误模式：
-1. 错误类型: XXX - 解决方案: XXX
-2. 错误类型: YYY - 解决方案: YYY
-
-本次分析将采用以下策略避免这些错误：
-- [具体策略1]
-- [具体策略2]
-</Analyze>
-```
-""" + selected_strategy_prompt + """
+**============================================
+第八部分：并行试错与死循环检测（极重要）
+============================================
 
 **并行试错与死循环检测（极重要）**：
 
@@ -1748,6 +1691,31 @@ if data.get("success") and data.get("data", {}).get("items"):
 4. **禁止循环**：禁止在没有新进展的情况下重复生成相同的代码。如果上一次执行已成功或已确定某路径不可行，必须进入下一阶段或输出 `<Answer>`，不得重复相同代码。
 5. **一次完成**：每个 `<Code>` 块应尽量完成一个完整的阶段性任务，避免拆分成多个小块依次执行。
 6. 请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
+
+    # 替换字体目录占位符
+    return system_prompt_template.replace("{FONTS_DIR_PLACEHOLDER}", fonts_dir)
+
+
+def bot_stream(messages, workspace, session_id="default", username="default", strategy="聚焦诉求", temperature=0.4):
+    # Strategy-specific prompts and default temperature
+    strategy_temperatures = {
+        "聚焦诉求": 0.2,
+        "适度扩展": 0.4,
+        "广泛延展": 0.6,
+    }
+    # Use provided temperature, or fall back to strategy default
+    effective_temperature = temperature if temperature is not None else strategy_temperatures.get(strategy, 0.4)
+
+    strategy_prompts = {
+        "聚焦诉求": "\n**分析策略：聚焦诉求**。请严格遵守用户指令，仅针对用户直接提出的问题进行分析和回答，不要进行任何不必要的发散或多余的关联分析。保持回答简洁、高效、直击要点。",
+        "适度扩展": "\n**分析策略：适度扩展**。在满足用户核心需求的基础上，请基于数据表现进行适量的关联性分析。你可以简要探讨与核心指标相关的其他因素，提供一些背景信息或浅层的风险提示，但请注意分寸，不要过度发散。",
+        "广泛延展": "\n**分析策略：广泛延展**。请进行深度发散分析，充分挖掘数据间的潜在联系。你可以大胆发挥想象力，结合海关业务逻辑进行全方位的风险预判、趋势分析和关联挖掘。鼓励你提供多维度的洞察和前瞻性的建议。"
+    }
+
+    selected_strategy_prompt = strategy_prompts.get(strategy, strategy_prompts["聚焦诉求"])
+
+    # 使用动态生成的 system prompt（已包含完整内容）
+    system_prompt = get_system_prompt_with_fonts()
 
     # Check if system prompt is already there, if not, insert it
     if not messages or messages[0]["role"] != "system":
@@ -2861,12 +2829,14 @@ async def init_yutu_api():
 
 
 @app.post("/api/yutu/organize")
-async def organize_yutu_api(records: List[dict], username: str = ""):
+async def organize_yutu_api(body: dict, username: str = ""):
     """整理雨途斩棘录 - 使用VLLM AI重新组织所有记录（超级用户专用）"""
+    print(f"[DEBUG] organize_yutu_api called with username={username}, body keys={list(body.keys()) if body else 'None'}")
     # 验证超级用户
     if username != "rainforgrain":
         raise HTTPException(status_code=403, detail="只有超级用户可以整理笔记")
 
+    records = body.get("records", [])
     if not records or len(records) == 0:
         return {"success": False, "detail": "没有记录可整理", "updated_count": 0, "records": []}
 
@@ -2902,14 +2872,46 @@ async def organize_yutu_api(records: List[dict], username: str = ""):
                 max_tokens=4000
             )
             improved_content = response.choices[0].message.content
+            print(f"VLLM返回内容长度: {len(improved_content)}")
 
-            # 解析改进内容
+            # 解析改进内容 - 尝试多种方式
             import re
-            json_match = re.search(r'\[.*\]', improved_content, re.DOTALL)
+            improved_records = None
+
+            # 方式1: 尝试提取markdown代码块中的JSON
+            json_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', improved_content, re.DOTALL)
             if json_match:
-                improved_records = json.loads(json_match.group())
-            else:
+                try:
+                    improved_records = json.loads(json_match.group(1))
+                    print(f"方式1成功: 从markdown解析")
+                except:
+                    pass
+
+            # 方式2: 直接查找JSON数组
+            if not improved_records:
+                json_match = re.search(r'\[.*\]', improved_content, re.DOTALL)
+                if json_match:
+                    try:
+                        improved_records = json.loads(json_match.group())
+                        print(f"方式2成功: 直接解析")
+                    except:
+                        pass
+
+            # 方式3: 简单清理后解析
+            if not improved_records:
+                try:
+                    cleaned = improved_content.strip()
+                    if cleaned.startswith("```"):
+                        cleaned = re.sub(r'^```json?', '', cleaned)
+                        cleaned = re.sub(r'```$', '', cleaned)
+                    improved_records = json.loads(cleaned.strip())
+                    print(f"方式3成功: 清理后解析")
+                except Exception as e:
+                    print(f"方式3失败: {e}")
+
+            if not improved_records or not isinstance(improved_records, list):
                 # 如果无法解析，返回原始记录
+                print("无法解析VLLM返回的JSON，返回原始记录")
                 improved_records = records
 
             # 保存整理后的预览版本到临时文件

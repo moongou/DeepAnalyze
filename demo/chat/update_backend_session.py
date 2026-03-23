@@ -1,9 +1,40 @@
 #!/usr/bin/env python3
 """批量更新后端接口以支持 session 隔离"""
 import re
+import os
+from pathlib import Path
+
+
+def get_backend_path() -> str:
+    """
+    获取 backend.py 的路径
+    支持从任意位置运行脚本
+    """
+    # 从当前脚本位置推断
+    script_dir = Path(__file__).parent.resolve()
+    backend_path = script_dir / "backend.py"
+
+    # 如果不存在，尝试其他路径
+    if not backend_path.exists():
+        # 尝试从项目根目录查找
+        current = Path.cwd()
+        for i in range(5):
+            candidate = current / "demo" / "chat" / "backend.py"
+            if candidate.exists():
+                backend_path = candidate
+                break
+            current = current.parent
+
+    return str(backend_path)
+
 
 def update_backend():
-    with open('/Users/a1234/Desktop/jobs/backend.py', 'r', encoding='utf-8') as f:
+    backend_file = get_backend_path()
+    if not os.path.exists(backend_file):
+        print(f"错误: 找不到 backend.py，尝试路径: {backend_file}")
+        return False
+
+    with open(backend_file, 'r', encoding='utf-8') as f:
         content = f.read()
     
     # 1. 更新 execute_code_safe 中的 WORKSPACE_DIR
@@ -96,7 +127,7 @@ async def clear_workspace(session_id: str = Query("default")):
         content
     )
     
-    with open('/Users/a1234/Desktop/jobs/backend.py', 'w', encoding='utf-8') as f:
+    with open(backend_file, 'w', encoding='utf-8') as f:
         f.write(content)
     
     print("✅ Backend session isolation update complete!")

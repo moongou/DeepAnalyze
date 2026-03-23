@@ -35,3 +35,13 @@ models/
 *.env.development
 *.env.production
 *.env.test
+
+# Assets - large font files (Chinese fonts)
+assets/fonts/*.ttf
+
+# Demo chat - runtime files
+demo/chat/deepanalyze.db
+demo/chat/__pycache__/
+demo/chat/frontend/.next/
+demo/chat/frontend/node_modules/
+demo/chat/frontend/.turbo/
