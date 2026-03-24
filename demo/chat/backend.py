@@ -579,6 +579,25 @@ def start_http_server():
 # Start HTTP server in a separate thread
 threading.Thread(target=start_http_server, daemon=True).start()
 
+# ---------- Side Guidance Storage ----------
+# session_id -> guidance_text
+SESSION_GUIDANCE = {}
+
+@app.post("/api/chat/guidance")
+async def set_guidance(session_id: str = Query(...), guidance: dict = Body(...)):
+    """
+    接收用户提供的过程指导（Side Task），并在智能体下一步执行时注入。
+    """
+    text = guidance.get("guidance", "").strip()
+    if text:
+        # 如果该 session 已经有待处理的指导，则追加
+        if session_id in SESSION_GUIDANCE:
+            SESSION_GUIDANCE[session_id] += f"\n{text}"
+        else:
+            SESSION_GUIDANCE[session_id] = text
+        print(f"[Side Guidance] Session {session_id} received: {text}")
+    return {"status": "ok", "message": "Guidance received"}
+
 
 def _build_filename_mapping(workspace_dir: str) -> dict:
     """
@@ -1800,6 +1819,16 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
     finished = False
     exe_output = None
     while not finished:
+        # 在每次 LLM 生成前，检查是否有用户提交的“过程指导/Side Task”
+        guidance = SESSION_GUIDANCE.pop(session_id, None)
+        if guidance:
+            guidance_msg = {
+                "role": "user",
+                "content": f"【风调雨顺 - 过程指导/Side Task】: {guidance}\n\n请将此需求、方法或条件与你当前正在进行的任务结合起来考虑，并在下一步分析方案中予以体现。请确保不中断整体分析项目的连贯性。"
+            }
+            messages.append(guidance_msg)
+            print(f"[Side Guidance] Injecting guidance into session {session_id}")
+
         response = client.chat.completions.create(
             model=MODEL_PATH,
             messages=messages,

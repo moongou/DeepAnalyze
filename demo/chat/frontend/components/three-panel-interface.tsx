@@ -23,6 +23,8 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogFooter,
+  DialogDescription,
 } from "@/components/ui/dialog";
 import {
   ResizablePanelGroup,
@@ -485,6 +487,12 @@ export function ThreePanelInterface() {
 
   // 智能体介绍面板状态
   const [showAgentIntro, setShowAgentIntro] = useState(false);
+
+  // 过程指导（Side Guidance / Side Task）状态
+  const [sideGuidanceOpen, setSideGuidanceOpen] = useState(false);
+  const [sideGuidanceText, setSideGuidanceText] = useState("");
+  const [isSubmittingGuidance, setIsSubmittingGuidance] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false); // 是否正在分析中
 
   // 预览弹窗状态
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -3524,8 +3532,36 @@ ${analysisContent}
     [autoCollapseEnabled, manualLocks]
   );
 
+  const handleSendGuidance = async () => {
+    if (!sideGuidanceText.trim()) return;
+    setIsSubmittingGuidance(true);
+    try {
+      const response = await fetch(
+        `${API_URLS.CHAT_GUIDANCE}?session_id=${encodeURIComponent(sessionId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ guidance: sideGuidanceText }),
+        }
+      );
+      if (response.ok) {
+        toast({ description: "过程指导已提交，将在下一步分析中生效" });
+        setSideGuidanceOpen(false);
+        setSideGuidanceText("");
+      } else {
+        toast({ description: "提交失败，请重试", variant: "destructive" });
+      }
+    } catch (error) {
+      console.error("Error sending guidance:", error);
+      toast({ description: "提交失败，请重试", variant: "destructive" });
+    } finally {
+      setIsSubmittingGuidance(false);
+    }
+  };
+
   const handleSendMessage = async () => {
     if (!inputValue.trim() && attachments.length === 0) return;
+    setIsAnalyzing(true);
     const baseMessageIndex = messages.length;
     const aiMessageIndex = baseMessageIndex + 1;
 
@@ -3749,11 +3785,13 @@ ${analysisContent}
       await loadWorkspaceFiles();
       await loadWorkspaceTree();
       setIsTyping(false); // 结束加载状态
+      setIsAnalyzing(false);
       setStreamingMessageId(null);
 
     } catch (error) {
       console.error("Error sending message:", error);
       setIsTyping(false);
+      setIsAnalyzing(false);
       setStreamingMessageId(null);
     }
   };
@@ -3878,40 +3916,21 @@ ${analysisContent}
                     variant="ghost"
                     size="sm"
                     className="h-5 w-5 p-0 text-gray-400 hover:text-blue-600 dark:text-gray-500 dark:hover:text-blue-400"
-                    title="关于智能体"
+                    title="了解观雨"
                     onClick={() => setShowAgentIntro(true)}
                   >
-                    <Bot className="h-3.5 w-3.5" />
+                    <Sparkles className="h-3.5 w-3.5 text-blue-500" />
                   </Button>
                   <Button
                     variant="ghost"
                     size="sm"
                     className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                    title="风雨同途 - 雨途斩棘录"
-                    onClick={() => {
-                      if (hasAnalysisCompleted) {
-                        if (currentUser === "rainforgrain") {
-                          summarizeSuccessPoints();
-                        } else {
-                          toast({ description: "只有管理员可以执行此操作", variant: "destructive" });
-                        }
-                      } else {
-                        toast({ description: "请先完成分析任务", variant: "destructive" });
-                      }
-                    }}
-                    disabled={!hasAnalysisCompleted || isRecordingKnowledge}
+                    title="风调雨顺 - 过程指导"
+                    onClick={() => setSideGuidanceOpen(true)}
+                    disabled={messages.length <= 1}
                   >
-                    {isRecordingKnowledge ? (
-                      <>
-                        <span className="animate-spin mr-1">⏳</span>
-                        正在记录...
-                      </>
-                    ) : (
-                      <>
-                        <BookOpen className="h-3 w-3 mr-1" />
-                        风雨同途
-                      </>
-                    )}
+                    <BookOpen className="h-3 w-3 mr-1" />
+                    风调雨顺
                   </Button>
                 </div>
                 <div
@@ -5618,6 +5637,55 @@ ${analysisContent}
               </div>
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 风调雨顺 - 过程指导对话框 */}
+      <Dialog open={sideGuidanceOpen} onOpenChange={setSideGuidanceOpen}>
+        <DialogContent className="sm:max-w-[500px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-blue-600" />
+              风调雨顺 - 过程指导
+            </DialogTitle>
+          </DialogHeader>
+          <div className="py-2 text-sm text-gray-500 dark:text-gray-400 leading-relaxed">
+            在智能体分析过程中，您可以随时提交新的需求、方法或条件。
+            这些信息将与当前任务结合，指导智能体的下一步动作。
+          </div>
+          <div className="py-4">
+            <Textarea
+              value={sideGuidanceText}
+              onChange={(e) => setSideGuidanceText(e.target.value)}
+              placeholder="请输入您的过程指导要求或 Side Task..."
+              className="min-h-[150px] resize-none focus-visible:ring-blue-500"
+            />
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setSideGuidanceOpen(false);
+                setSideGuidanceText("");
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={handleSendGuidance}
+              disabled={isSubmittingGuidance || !sideGuidanceText.trim()}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+            >
+              {isSubmittingGuidance ? (
+                <>
+                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                  提交中...
+                </>
+              ) : (
+                "确认提交"
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </>

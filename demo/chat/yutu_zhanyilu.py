@@ -24,6 +24,153 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepanalyze.
 YUTU_HTML_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yutu_zhanyilu.html")
 
 
+# 雨途斩棘录备份文件目录
+BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yutu_backups")
+os.makedirs(BACKUP_DIR, exist_ok=True)
+
+
+def backup_to_json(custom_name: Optional[str] = None) -> str:
+    """备份所有雨途斩棘录记录到 JSON 文件"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM yutu_errors")
+        rows = cursor.fetchall()
+
+        # 获取列名
+        columns = [description[0] for description in cursor.description]
+        records = []
+        for row in rows:
+            records.append(dict(zip(columns, row)))
+
+        # 获取索引关键字
+        cursor.execute("SELECT * FROM yutu_error_keywords")
+        kw_rows = cursor.fetchall()
+        kw_columns = [description[0] for description in cursor.description]
+        keywords = []
+        for row in kw_rows:
+            keywords.append(dict(zip(kw_columns, row)))
+
+        conn.close()
+
+        backup_data = {
+            "version": "1.0",
+            "timestamp": datetime.now().isoformat(),
+            "records": records,
+            "keywords": keywords
+        }
+
+        if custom_name:
+            # 清理文件名，确保安全
+            safe_name = "".join([c for c in custom_name if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
+            if not safe_name:
+                safe_name = "backup"
+            # 确保有 .json 后缀
+            if not safe_name.lower().endswith(".json"):
+                safe_name += ".json"
+            backup_file = os.path.join(BACKUP_DIR, safe_name)
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_file = os.path.join(BACKUP_DIR, f"yutu_backup_{timestamp}.json")
+
+        with open(backup_file, "w", encoding="utf-8") as f:
+            json.dump(backup_data, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"雨途斩棘录已备份到: {backup_file}")
+        return backup_file
+    except Exception as e:
+        logger.error(f"备份失败: {e}")
+        return ""
+
+
+def delete_backup(filename: str) -> bool:
+    """删除指定的备份文件"""
+    try:
+        # 基础安全检查：防止目录遍历
+        if ".." in filename or os.path.isabs(filename):
+            logger.error(f"非法的备份文件名: {filename}")
+            return False
+
+        backup_file = os.path.join(BACKUP_DIR, filename)
+        if os.path.exists(backup_file):
+            os.remove(backup_file)
+            logger.info(f"已删除备份文件: {backup_file}")
+            return True
+        else:
+            logger.error(f"备份文件不存在: {backup_file}")
+            return False
+    except Exception as e:
+        logger.error(f"删除备份失败: {e}")
+        return False
+
+
+def restore_from_json(backup_file: str, mode: str = "append") -> bool:
+    """
+    从 JSON 文件恢复雨途斩棘录记录
+    mode: "append" (追加) 或 "overwrite" (覆盖)
+    """
+    try:
+        if not os.path.exists(backup_file):
+            logger.error(f"备份文件不存在: {backup_file}")
+            return False
+
+        with open(backup_file, "r", encoding="utf-8") as f:
+            backup_data = json.load(f)
+
+        records = backup_data.get("records", [])
+        keywords = backup_data.get("keywords", [])
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        if mode == "overwrite":
+            cursor.execute("DELETE FROM yutu_error_keywords")
+            cursor.execute("DELETE FROM yutu_errors")
+            logger.info("已清空现有记录以进行覆盖恢复")
+
+        # 恢复记录
+        for r in records:
+            # 过滤掉 id，让数据库自动生成
+            r_data = {k: v for k, v in r.items() if k != 'id'}
+            placeholders = ", ".join(["?"] * len(r_data))
+            columns = ", ".join(r_data.keys())
+
+            if mode == "append":
+                # 追加模式下，如果 hash 已存在则更新
+                cursor.execute(f"SELECT id FROM yutu_errors WHERE error_hash = ?", (r_data['error_hash'],))
+                if cursor.fetchone():
+                    update_cols = ", ".join([f"{k} = ?" for k in r_data.keys()])
+                    cursor.execute(f"UPDATE yutu_errors SET {update_cols} WHERE error_hash = ?",
+                                 list(r_data.values()) + [r_data['error_hash']])
+                    continue
+
+            cursor.execute(f"INSERT INTO yutu_errors ({columns}) VALUES ({placeholders})", list(r_data.values()))
+
+        # 恢复关键字索引
+        for kw in keywords:
+            kw_data = {k: v for k, v in kw.items() if k != 'id'}
+            placeholders = ", ".join(["?"] * len(kw_data))
+            columns = ", ".join(kw_data.keys())
+
+            if mode == "append":
+                cursor.execute(f"SELECT id FROM yutu_error_keywords WHERE error_hash = ? AND keyword = ?",
+                             (kw_data['error_hash'], kw_data['keyword']))
+                if cursor.fetchone():
+                    continue
+
+            cursor.execute(f"INSERT INTO yutu_error_keywords ({columns}) VALUES ({placeholders})", list(kw_data.values()))
+
+        conn.commit()
+        conn.close()
+
+        update_yutu_html()
+        logger.info(f"已从备份文件恢复记录: {backup_file} (模式: {mode})")
+        return True
+    except Exception as e:
+        logger.error(f"恢复失败: {e}")
+        return False
+
+
 def init_yutu_db():
     """初始化雨途斩棘录数据库"""
     conn = sqlite3.connect(DB_PATH)
@@ -697,7 +844,8 @@ def generate_yutu_html() -> str:
         else:
             for row in rows:
                 error_type = row[2] if row[2] else "Unknown"
-                confidence = row[9] if row[9] else 0.0
+                # 置信度在 yutu_errors 表中是第 8 列 (索引 7)
+                confidence = row[7] if row[7] is not None else 0.0
 
                 confidence_class = "confidence-low" if confidence < 0.5 else "confidence-high"
 
