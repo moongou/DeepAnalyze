@@ -435,6 +435,14 @@ def execute_code_safe(
                 r_lib = os.path.join(r_home, "lib")
                 child_env["DYLD_LIBRARY_PATH"] = f"{r_lib}:/opt/homebrew/lib"
                 child_env["LD_LIBRARY_PATH"] = child_env["DYLD_LIBRARY_PATH"]
+
+        # 设置 PYTHONPATH 包含 backend.py 所在目录，使 agent_utils 可用
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        if "PYTHONPATH" in child_env:
+            child_env["PYTHONPATH"] = f"{backend_dir}:{child_env['PYTHONPATH']}"
+        else:
+            child_env["PYTHONPATH"] = backend_dir
+
         child_env.pop("DISPLAY", None)
 
         completed = subprocess.run(
@@ -1359,8 +1367,65 @@ def get_system_prompt_with_fonts() -> str:
 3. 通过伪报、瞒报、虚报等方式逃避监管证件管理的行为；
 4. 通过低报价格、伪报原产地、伪报HS编码归类逃避税税的行为。你的分析结果应明确指出可疑行为，并详细阐述推理原因。
 
+**报告生成规范**：
+- **阶段性分析**：在分析过程中，请通过聊天回复或代码执行结果展示阶段性发现和图表。
+- **最终报告**：只有在**所有**分析维度（如：主体身份、价格风险、通关时效等）全部完成后，在任务的**最后阶段**，才调用 `generate_report_pdf` 或 `generate_report_docx` 将所有核心观点和可视化图形组织成一份完整的终期报告。
+- **避免重复**：禁止在分析过程中反复生成阶段性报告，确保用户在文件列表中只看到最终的、高质量的分析成果。
+
 **============================================
-第一部分：PDF库弃用警告与正确用法（极重要）
+第一部分：可视化与美学规范（极重要）
+============================================
+你应以生动活泼且专业的方式展示分析结果。
+1. **可视化风格**：
+   - **Python**: 务必使用 `seaborn` 库提升图表美感。
+     ```python
+     import seaborn as sns
+     import matplotlib.pyplot as plt
+     sns.set_theme(style="whitegrid", palette="muted")
+     # 使用专业颜色和清晰的标签
+     ```
+   - **R**: 务必使用 `ggplot2` 并配合 `theme_minimal()` 或 `theme_light()`。
+   - **要求**：图表应清晰展示**趋势、关系、分布、规律**。禁止使用极其简陋的默认绘图样式。
+
+2. **图表内容**：
+   - 每个图表必须有清晰的中文标题、坐标轴标签和图例。
+   - 对于趋势分析，使用折线图；对于分布分析，使用直方图或小提琴图；对于关系分析，使用散点图或热力图。
+
+**============================================
+第二部分：工具库与增强组件（极重要）
+============================================
+为确保分析的高效与稳定，系统为你封装了专用工具库 `agent_utils`。在编写代码时，**务必优先导入并使用**以下功能：
+
+1. **PDF/DOCX 报告生成（一键式，支持中文）**：
+   ```python
+   from agent_utils import generate_report_pdf, generate_report_docx
+
+   # 直接从 Markdown 文本生成 PDF 和 DOCX
+   generate_report_pdf(report_md, "output.pdf", title="分析报告")
+   generate_report_docx(report_md, "output.docx", title="分析报告")
+   ```
+
+2. **FPDF 2.x 中文支持（解决 Undefined font 错误）**：
+   如果你需要更细粒度的 FPDF 控制，请使用 `init_fpdf_chinese()`，它会自动注册所有必要的字体（SimHei, STFangSong 等）。
+   ```python
+   from agent_utils import init_fpdf_chinese
+   pdf = init_fpdf_chinese() # 返回已预注册中文字体的 FPDF 实例
+   pdf.add_page()
+   pdf.set_font("SimHei", "B", 16)
+   pdf.cell(0, 10, "中文标题", ln=True)
+   ```
+
+3. **时间处理（解决 Pandas 2.0+ Timestamp 减法错误）**：
+   禁止直接使用 `pd.Timestamp - 30`。请使用 `pandas_date_sub` 或 `pd.Timedelta`。
+   ```python
+   from agent_utils import pandas_date_sub, pandas_date_add
+
+   # 正确示例
+   start_date = pandas_date_sub(end_date, 30) # 减去30天
+   ```
+
+**============================================
+第三部分：PDF库弃用警告与正确用法（极重要）
 ============================================
 使用 FPDF/fpdf2 库时，**必须**遵守以下规则以避免已知的弃用警告和错误：
 
@@ -1419,50 +1484,34 @@ def get_system_prompt_with_fonts() -> str:
 - 例如：`2023年1月`、`2024年3月` 而非笼统的 `1月`、`3月`。
 
 **============================================
-第三部分：报告结构规范（极重要）
+第四部分：报告结构规范（极重要）
 ============================================
-每次分析完成后，生成的报告**必须**遵循以下结构，**报告内所有内容必须使用简体中文**：
+每次分析完成后，生成的报告**必须**遵循以下结构，内容必须具有层次感，富含推理和推导过程。**报告内所有内容必须使用简体中文**：
 
 **报告整体结构（PDF/DOCX/聊天输出均适用）**：
 1. **第一部分：分析思路**（必须放在报告开头）
-   ```
-   # 分析思路
-   本文档针对 [用户核心诉求] 进行分析，采用以下分析路径：
-   1. [第一步：数据理解与预处理]
-   2. [第二步：多维度分析（如：时间维度、主体维度、商品维度等）]
-   3. [第三步：可视化与关键发现]
-   4. [第四步：风险点识别与结论]
-   ...
-   ```
+   - 阐述分析的背景和原因。
+   - 描述推理逻辑和将要采取的步骤。
 
 2. **第二部分：分析主体内容**（放在分析思路之后、分析小结之前）
-   - 按分析角度分章节，每个角度的分析完成后给出：
-     - 文字分析（观点、推理、结论）
-     - 数据表格
-     - 可视化图表（图表标题置于图表下方，引用编号置于标题前，如"图1："）
-   - **章节标题**：使用黑体（SimHei）加粗，层级清晰
-   - **正文**：使用仿宋（STFangSong），保持1.2-1.5倍行距
-   - **图表**：保持原始清晰度，确保中文显示正常
+   - **基于陈述原因和推理而得出结论**，而非直接给出结论。
+   - 每一章节应包含：
+     - **现状描述**（观察到的数据事实）
+     - **推理推导**（为什么会出现这种情况，基于数据的逻辑推理）
+     - **阶段性结论**（基于前两点得出的初步发现）
+     - **可视化图表**（图表标题置于图表下方，引用编号如"图1："）
 
 3. **第三部分：分析小结**（必须放在报告结尾）
-   ```
-   # 分析小结
-   本次分析采用了以下方法：
-   - 数据源：[文件名/数据量]
-   - 时间范围：[YYYY-MM-DD ~ YYYY-MM-DD]
-   - 主要分析方法：[描述]
-   - 关键发现：[1-3条核心结论]
-   - 局限性与后续建议：[如有]
-   ```
+   - 总结核心发现。
+   - 给出基于风险的针对性建议。
 
 **重要提醒**：
-- 分析思路和分析小结**必须**出现在聊天输出**和**生成的PDF/DOCX报告中
-- 报告顺序：**分析思路** → **主体分析内容（图表+数据+观点）** → **分析小结**
-- 禁止将分析小结放在开头，或省略分析思路
-- PDF/DOCX排版要求：保持标题层级、使用正确的中文字体（见排版规范）
+- 严禁"直接得结论"，必须体现"数据 -> 推理 -> 结论"的层次感。
+- 报告顺序：**分析思路** → **主体分析内容（推理+数据+图表）** → **分析小结**
+- PDF/DOCX排版要求：保持标题层级、使用正确的中文字体。
 
 **============================================
-第四部分：排版与美学规范
+第五部分：排版与美学规范
 ============================================
 生成 PDF/DOCX 报告时，请严格遵守以下排版规范：
 
@@ -1490,37 +1539,44 @@ def get_system_prompt_with_fonts() -> str:
 - 确保中文显示正常，使用支持中文的字体
 
 **============================================
-第五部分：任务执行与输出规范（极重要）
+第六部分：任务执行与输出规范（极重要）
 ============================================
 
 **执行流程**：
-1. 【数据理解】→ 2. 【分析思路】→ 3. 【代码执行】→ 4. 【结果解读】→ 5. 【报告输出】
+1. 【数据理解】→ 2. 【预测推理与短代码测试】→ 3. 【正式分析思路】→ 4. 【完整分析代码执行】→ 5. 【结果解读与报告生成】
+
+**预测推理与短代码测试（ mandatory ）**：
+- 在生成完整的复杂分析代码前，**必须**先进行预测推理和短代码测试。
+- 预测推理：思考接下来的代码执行可能会在哪些环节出错（如：路径、编码、数据类型、字段名等）。
+- 短代码测试：编写极简代码（2-5行）来验证关键假设，如：
+  - 文件路径/目录是否存在且正确。
+  - 文件编码是否能被正确读取（尝试 UTF-8 或其他）。
+  - 关键字段名是否如预期般存在于 DataFrame 中。
+  - 函数调用是否能正确作用于对象。
+- 根据测试结果修正后，再编写完整的分析代码。
 
 **每个 <Analyze> 标签内应包含**：
 ```
-# 分析思路
-[你的分析思路和计划]
+# 预测推理
+[对潜在执行错误的预判]
 
-# 数据理解
-[数据概览、关键发现]
+# 短代码测试与结果
+[执行测试代码并说明结果]
 
-# 分析过程
-[具体的分析步骤、代码执行结果]
-
-# 结果解读
-[对结果的解释和洞察]
+# 正式分析思路
+[基于测试结果修正后的正式分析路径]
 ```
 
 **每个 <Answer> 标签内应包含**：
 ```
 # 分析结论
-[核心结论和发现]
+[基于详尽推导过程得出的结论，体现层次感]
 
 # 风险提示
-[潜在风险和警告]
+[潜在风险点识别]
 
 # 建议
-[基于分析的具体建议]
+[针对性的改进策略]
 ```
 
 **代码执行规范**：
@@ -1564,9 +1620,10 @@ def get_system_prompt_with_fonts() -> str:
 - **可视化支持**：在 Python 绘图时，务必配置 `plt.rcParams['font.sans-serif']` 使用 `SimHei`, `PingFang SC` 或其他系统中文字体，防止出现乱码或方框。在 R 中使用 `showtext` 处理中文。
 - **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF 和 DOCX 格式**，这是你的标准交付物。
   - **PDF 生成推荐方案（按优先级）**：
-    1. **reportlab + 中文字体（首选）**：使用 reportlab 库，注册 assets/fonts/ 下的纯 TTF 字体生成 PDF
-    2. **matplotlib PdfPages（图表为主）**：使用 matplotlib 的 PdfPages 生成包含图表的 PDF
-    3. **python-docx（DOCX）**：使用 python-docx 生成 Word 文档
+    1. **agent_utils 一键生成（首选）**：使用 `from agent_utils import generate_report_pdf, generate_report_docx`
+    2. **reportlab + 中文字体**：使用 reportlab 库，注册 assets/fonts/ 下的纯 TTF 字体生成 PDF
+    3. **fpdf2 + init_fpdf_chinese()**：使用 `from agent_utils import init_fpdf_chinese`
+    4. **matplotlib PdfPages（图表为主）**：使用 matplotlib 的 PdfPages 生成包含图表的 PDF
   - **注意**：当前环境为 macOS，禁止使用 `comtypes` 或 `docx2pdf` 库。
 - **字体与路径支持（极重要）**：请务必清楚当前环境中有以下字体可用，**不要随意猜测或尝试不存在的字体路径**：
   - **中文字体（assets/fonts/ 目录，纯 TTF，reportlab/matplotlib 全支持，已验证可用）**：
@@ -1620,46 +1677,19 @@ def get_system_prompt_with_fonts() -> str:
 第七部分：雨途斩棘录 - 错误修正知识库（极重要）
 ============================================
 
-雨途斩棘录是智能体的错误修正知识库，记录了所有已解决的错误及其解决方案。**你必须在每次开始新分析任务时，首先查询这本笔记，避免重复曾经犯过的错误！**
+雨途斩棘录是智能体的错误修正知识库。**系统已在会话开始时自动将历史已知错误及其解决方案注入到你的 context 中。**
 
-**启动时必须执行的查询命令**：
-在开始任何分析之前，你**必须**先用以下代码查询雨途斩棘录中的已知错误和解决方案：
-```python
-import requests
-# 获取雨途斩棘录中最近的错误记录
-response = requests.get("http://localhost:8200/api/yutu/search", json={"keywords": [], "page": 1, "page_size": 10})
-data = response.json()
-if data.get("success") and data.get("data", {}).get("items"):
-    print("=== 雨途斩棘录 - 历史错误记录 ===")
-    for item in data["data"]["items"]:
-        print(f"错误类型: {item['error_type']}")
-        print(f"错误消息: {item['error_message']}")
-        print(f"解决方案: {item.get('solution', 'N/A')}")
-        print("---")
-```
+**你必须在每次开始新任务前阅读这些历史记录，避免重蹈复辙！**
 
-**雨途斩棘录功能说明**：
-1. **自动记录**：【重要变化】系统现在已经**自动**记录你执行代码时遇到的错误。当你遇到错误并成功解决后，系统会自动把错误和解决方案记录到知识库中，你无需手动记录（但如果是你自己发现的额外解决方案，也可以手动记录）。
-2. **快速查找**：遇到相似错误时，优先查询雨途斩棘录获取已知解决方案
-3. **持续优化**：每次成功解决问题后，更新雨途斩棘录以提升未来工作效率
+**雨途斩棘录使用原则**：
+1. **启动必读**：无需再手动调用 API 查询，请直接查阅 context 中的历史记录。
+2. **预测推理**：结合历史错误，预见当前任务可能出错的环节。
+3. **自动记录**：系统会自动捕获并记录新错误的解决方案。
 
 **超级用户管理功能**：
-- 超级用户 `rainforgrain` 可以通过前端界面管理雨途斩棘录
-- 功能包括：查看、搜索、编辑、删除错误记录
-- 其他用户只能查看，不能管理
-
-**雨途斩棘录API端点**：
-- `GET /api/yutu/html` - 获取HTML格式的雨途斩棘录
-- `POST /api/yutu/add` - 添加新记录（仅超级用户）
-- `POST /api/yutu/update` - 更新记录（仅超级用户）
-- `POST /api/yutu/delete` - 删除记录（仅超级用户）
-- `POST /api/yutu/search` - 搜索记录
-- `POST /api/yutu/init` - 初始化雨途斩棘录
-
-**使用雨途斩棘录的场景**：
-1. 代码执行报错时，先查询雨途斩棘录
-2. 遇到相似错误时，快速获取已知解决方案
-3. 记录新发现的问题和解决方案
+- 超级用户 `rainforgrain` 可以进行备份与恢复。
+- 备份：将所有知识点导出为 JSON 文件。
+- 恢复：可选择"追加"或"覆盖"方式。
 
 **============================================
 第八部分：并行试错与死循环检测（极重要）
@@ -1716,6 +1746,23 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 
     # 使用动态生成的 system prompt（已包含完整内容）
     system_prompt = get_system_prompt_with_fonts()
+
+    # 获取雨途斩棘录最近的错误记录并注入
+    try:
+        from .yutu_zhanyilu import search_errors
+        yutu_data = search_errors(page_size=20)
+        if yutu_data.get("items"):
+            yutu_context = "\n\n**雨途斩棘录 - 历史错误及解决方案知识库（启动必读）**：\n"
+            for item in yutu_data["items"]:
+                yutu_context += f"- 错误类型: {item['error_type']}\n"
+                yutu_context += f"  错误消息: {item['error_message']}\n"
+                yutu_context += f"  解决方案: {item['solution']}\n"
+                if item.get('solution_code'):
+                    yutu_context += f"  参考代码: {item['solution_code']}\n"
+                yutu_context += "---\n"
+            system_prompt += yutu_context
+    except Exception as e:
+        print(f"[雨途斩棘录] 启动注入失败: {e}")
 
     # Check if system prompt is already there, if not, insert it
     if not messages or messages[0]["role"] != "system":
@@ -1968,31 +2015,40 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
 
     tag_pattern = r"<(Analyze|Understand|Code|Execute|File|Answer)>([\s\S]*?)</\1>"
 
+    # 尝试提取报告结构化的层次感
+    all_content = ""
     for idx, m in enumerate(messages, start=1):
         role = (m or {}).get("role")
         if role != "assistant":
             continue
-        content = str((m or {}).get("content") or "")
+        all_content += str((m or {}).get("content") or "") + "\n"
 
-        step = 1
-        # 按照在文本中的出现顺序依次提取
-        for match in _re.finditer(tag_pattern, content, _re.DOTALL):
+    # 提取所有 Analyze 和 Answer，并尝试保持逻辑顺序
+    sections = []
+    for match in _re.finditer(tag_pattern, all_content, _re.DOTALL):
+        tag, seg = match.groups()
+        seg = seg.strip()
+        if tag in ["Analyze", "Answer"]:
+            # 去掉 Analyze 中的标签头（如果存在）
+            clean_seg = _re.sub(r"#( 预测推理| 短代码测试与结果| 正式分析思路)\n.*?\n", "", seg, flags=_re.DOTALL).strip()
+            sections.append(clean_seg)
+        appendix.append(f"\n### Step {len(appendix)+1}: {tag}\n\n{seg}\n")
+
+    final_text = "\n\n".join(sections).strip()
+    if not final_text: # Fallback
+        parts = []
+        for match in _re.finditer(tag_pattern, all_content, _re.DOTALL):
             tag, seg = match.groups()
-            seg = seg.strip()
             if tag == "Answer":
-                parts.append(f"{seg}\n")
+                parts.append(seg.strip())
+        final_text = "\n\n".join(parts).strip()
 
-            appendix.append(f"\n### Step {step}: {tag}\n\n{seg}\n")
-            step += 1
-
-    final_text = "".join(parts).strip()
     if appendix:
         final_text += (
             "\n\n\\newpage\n\n# Appendix: Detailed Process\n"
             + "".join(appendix).strip()
         )
 
-    # print(final_text)
     return final_text
 
 
@@ -2623,6 +2679,42 @@ async def get_project_file(project_id: int, file_path: str):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/projects/restore-to-workspace")
+async def restore_to_workspace(project_id: int = Query(...), session_id: str = Query(...), username: str = Query(...)):
+    """将项目文件实质性恢复到指定的 workspace 目录中"""
+    try:
+        project_dir = os.path.join(PROJECTS_BASE_DIR, str(project_id))
+        if not os.path.exists(project_dir):
+            raise HTTPException(status_code=404, detail="Project directory not found")
+
+        workspace_dir = get_session_workspace(session_id, username)
+        os.makedirs(workspace_dir, exist_ok=True)
+
+        # 复制项目目录下的所有文件到工作区
+        for root, dirs, files in os.walk(project_dir):
+            for fname in files:
+                if fname.startswith("."):
+                    continue
+                fpath = os.path.join(root, fname)
+                rel_path = os.path.relpath(fpath, project_dir)
+                target_path = os.path.join(workspace_dir, rel_path)
+
+                # 确保目标父目录存在
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+                try:
+                    shutil.copy2(fpath, target_path)
+                except Exception as copy_err:
+                    print(f"Warning: Failed to restore file {rel_path} to workspace: {copy_err}")
+
+        return {"message": "Project files restored successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Restore to workspace error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/projects/load")
 async def load_project(project_id: int = Query(...)):
     try:
@@ -2946,6 +3038,76 @@ async def organize_yutu_api(body: dict, username: str = ""):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/yutu/backup/list")
+async def list_yutu_backups(username: str = Query("default")):
+    """列出所有备份文件"""
+    if username != "rainforgrain":
+        raise HTTPException(status_code=403, detail="只有超级用户可以查看备份列表")
+
+    try:
+        from yutu_zhanyilu import BACKUP_DIR
+        # 支持列出所有 .json 备份文件
+        files = [f for f in os.listdir(BACKUP_DIR) if f.endswith(".json")]
+        files.sort(reverse=True) # 默认排序
+        return {"success": True, "backups": files}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/yutu/backup/create")
+async def create_yutu_backup(data: dict = Body(...), username: str = Query("default")):
+    """手动创建雨途斩棘录备份"""
+    if username != "rainforgrain":
+        raise HTTPException(status_code=403, detail="只有超级用户可以创建备份")
+
+    custom_name = data.get("filename")
+    try:
+        from yutu_zhanyilu import backup_to_json
+        backup_file = backup_to_json(custom_name)
+        if backup_file:
+            return {"success": True, "file": os.path.basename(backup_file), "path": backup_file}
+        return {"success": False, "detail": "备份失败"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/yutu/backup/delete")
+async def delete_yutu_backup(filename: str = Query(...), username: str = Query("default")):
+    """删除备份文件"""
+    if username != "rainforgrain":
+        raise HTTPException(status_code=403, detail="只有超级用户可以删除备份")
+
+    try:
+        from yutu_zhanyilu import delete_backup
+        if delete_backup(filename):
+            return {"success": True, "message": f"备份文件 {filename} 已删除"}
+        return {"success": False, "detail": "删除失败，文件可能不存在"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/yutu/backup/restore")
+async def restore_yutu_backup(data: dict, username: str = Query("default")):
+    """从备份恢复"""
+    if username != "rainforgrain":
+        raise HTTPException(status_code=403, detail="只有超级用户可以恢复备份")
+
+    filename = data.get("filename")
+    mode = data.get("mode", "append") # append or overwrite
+
+    if not filename:
+        raise HTTPException(status_code=400, detail="未指定备份文件名")
+
+    try:
+        from yutu_zhanyilu import restore_from_json, BACKUP_DIR
+        file_path = os.path.join(BACKUP_DIR, filename)
+        if restore_from_json(file_path, mode):
+            return {"success": True, "message": f"成功以 {mode} 模式恢复备份"}
+        return {"success": False, "detail": "恢复失败"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/yutu/organize/confirm")
 async def confirm_organize(data: dict, username: str = ""):
     """确认整理结果：应用改进后的方案"""
@@ -2957,10 +3119,12 @@ async def confirm_organize(data: dict, username: str = ""):
         return {"success": False, "detail": "没有记录可更新"}
 
     try:
-        from yutu_zhanyilu import update_solution
+        from .yutu_zhanyilu import update_error_solution
         updated_count = 0
         for record in improved_records:
-            if update_solution(record.get("error_hash"), record.get("improved_solution", "")):
+            # 兼容 improved_solution 字段（VLLM返回）或 solution 字段
+            sol = record.get("improved_solution") or record.get("solution") or ""
+            if update_error_solution(record.get("error_hash"), sol):
                 updated_count += 1
 
         return {"success": True, "updated_count": updated_count}

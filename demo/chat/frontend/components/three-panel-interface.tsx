@@ -412,6 +412,31 @@ export function ThreePanelInterface() {
     w: 0,
     h: 0,
   });
+  // 监听容器大小变化，更新 Tree 尺寸
+  useEffect(() => {
+    if (!treeContainerRef.current) return;
+
+    const container = treeContainerRef.current;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        setTreeSize({ w: width, h: height });
+        console.log("[WorkspaceTree] Resized:", width, height);
+      }
+    });
+
+    observer.observe(container);
+    // 初始设置一次
+    setTreeSize({
+      w: container.clientWidth,
+      h: container.clientHeight,
+    });
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [mounted]);
+
   const [selectedCodeSection, setSelectedCodeSection] = useState<string>("");
   const [codeEditorContent, setCodeEditorContent] = useState("");
   const [showCodeEditor, setShowCodeEditor] = useState(false);
@@ -450,6 +475,7 @@ export function ThreePanelInterface() {
   const [organizedRecords, setOrganizedRecords] = useState<any[]>([]); // 整理后的记录
   const [isOrganizing, setIsOrganizing] = useState(false); // 是否正在整理
   const [organizingProgress, setOrganizingProgress] = useState<string>(""); // 整理进度描述
+  const [organizeProgressPercent, setOrganizeProgressPercent] = useState<number>(0); // 整理进度百分比
 
   // 雨途斩棘录功能状态
   const [hasAnalysisCompleted, setHasAnalysisCompleted] = useState(false); // 分析任务是否完成
@@ -588,6 +614,88 @@ export function ThreePanelInterface() {
   }, [activeSection]);
 
   // --- 雨途斩棘录函数 ---
+  const [showBackupRestore, setShowBackupRestore] = useState(false);
+  const [backups, setBackups] = useState<string[]>([]);
+  const [selectedBackup, setSelectedBackup] = useState<string>("");
+  const [restoreMode, setRestoreMode] = useState<"append" | "overwrite">("append");
+  const [backupName, setBackupName] = useState<string>("");
+  const [isCreatingBackup, setIsCreatingBackup] = useState(false);
+
+  const createBackup = async () => {
+    try {
+      setIsCreatingBackup(true);
+      const res = await fetch(`${API_URLS.YUTU_BACKUP_CREATE}?username=${encodeURIComponent(currentUser || "")}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: backupName })
+      });
+      if (res.ok) {
+        toast({ description: "备份创建成功" });
+        setBackupName("");
+        loadBackups();
+      }
+    } catch (e) {
+      toast({ description: "备份失败", variant: "destructive" });
+    } finally {
+      setIsCreatingBackup(false);
+    }
+  };
+
+  const deleteBackupFile = async (filename: string) => {
+    if (!window.confirm(`确定要删除备份文件 ${filename} 吗？此操作不可撤销。`)) return;
+    try {
+      const res = await fetch(`${API_URLS.YUTU_BACKUP_DELETE}?filename=${encodeURIComponent(filename)}&username=${encodeURIComponent(currentUser || "")}`, {
+        method: "DELETE"
+      });
+      if (res.ok) {
+        toast({ description: "备份已删除" });
+        if (selectedBackup === filename) setSelectedBackup("");
+        loadBackups();
+      }
+    } catch (e) {
+      toast({ description: "删除失败", variant: "destructive" });
+    }
+  };
+
+  const loadBackups = async () => {
+    try {
+      const res = await fetch(`${API_URLS.YUTU_BACKUP_LIST}?username=${encodeURIComponent(currentUser || "")}`);
+      if (res.ok) {
+        const data = await res.json();
+        setBackups(data.backups || []);
+      }
+    } catch (e) {
+      console.error("加载备份列表失败:", e);
+    }
+  };
+
+  const restoreBackup = async () => {
+    if (!selectedBackup) {
+      toast({ description: "请选择备份文件", variant: "destructive" });
+      return;
+    }
+    const confirmMsg = restoreMode === "overwrite"
+      ? "警告：覆盖模式将清空当前所有记录！确定要继续吗？"
+      : "确定要从备份追加记录吗？";
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      const res = await fetch(`${API_URLS.YUTU_BACKUP_RESTORE}?username=${encodeURIComponent(currentUser || "")}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: selectedBackup, mode: restoreMode })
+      });
+      if (res.ok) {
+        toast({ description: "恢复成功" });
+        setShowBackupRestore(false);
+        loadYutuHtml();
+        loadYutuRecords();
+      }
+    } catch (e) {
+      toast({ description: "恢复失败", variant: "destructive" });
+    }
+  };
+
   const loadYutuHtml = async () => {
     try {
       const res = await fetch(API_URLS.YUTU_HTML);
@@ -744,7 +852,10 @@ export function ThreePanelInterface() {
   // 整理雨途斩棘录笔记 - AI重新组织所有记录（预览模式）
   const organizeYutuNotes = async () => {
     if (currentUser !== "rainforgrain") {
-      toast({ description: "只有超级用户可以整理笔记", variant: "destructive" });
+      toast({
+        description: "只有超级用户可以整理笔记",
+        variant: "destructive",
+      });
       return;
     }
     if (yutuRecords.length === 0) {
@@ -754,52 +865,91 @@ export function ThreePanelInterface() {
 
     setIsOrganizing(true);
     setOrganizingProgress("开始整理...");
+    setOrganizeProgressPercent(2);
+
+    // 进度条模拟：在请求过程中慢慢增加，直到 95%
+    const progressInterval = setInterval(() => {
+      setOrganizeProgressPercent((prev) => {
+        if (prev >= 95) return prev;
+        // 随机步进，模拟真实感
+        const increment = Math.random() * 3 + 1;
+        const next = prev + increment;
+        return next > 95 ? 95 : Math.floor(next);
+      });
+    }, 600);
 
     try {
       // 使用完整的API URL
-      const organizeUrl = `${API_URLS.YUTU_ORGANIZE}?username=${encodeURIComponent(currentUser || "")}`;
+      const organizeUrl = `${
+        API_URLS.YUTU_ORGANIZE
+      }?username=${encodeURIComponent(currentUser || "")}`;
       console.log("整理笔记URL:", organizeUrl);
 
       setOrganizingProgress("正在分析记录...");
       const res = await fetch(organizeUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ records: yutuRecords })
+        body: JSON.stringify({ records: yutuRecords }),
       });
 
       setOrganizingProgress("正在组织结果...");
 
       const contentType = res.headers.get("content-type");
       if (!res.ok) {
+        clearInterval(progressInterval);
         const errorText = await res.text();
         setIsOrganizing(false);
-        toast({ description: `整理失败: ${res.status} - ${errorText.substring(0, 100)}`, variant: "destructive" });
+        setOrganizeProgressPercent(0);
+        toast({
+          description: `整理失败: ${res.status} - ${errorText.substring(0, 100)}`,
+          variant: "destructive",
+        });
         return;
       }
 
       if (contentType && contentType.includes("application/json")) {
         const data = await res.json();
+        clearInterval(progressInterval);
+        setOrganizeProgressPercent(100);
+
         if (data.records && data.records.length > 0) {
           // 显示预览
           setOrganizedRecords(data.records);
           setShowOrganizePreview(true);
           setOrganizingProgress("整理完毕");
-          setTimeout(() => setIsOrganizing(false), 500);
+          setTimeout(() => {
+            setIsOrganizing(false);
+            // 这里不重置进度，让用户在弹窗出现前看到100%
+          }, 500);
           toast({ description: `整理完成，请预览并确认` });
         } else {
           setIsOrganizing(false);
-          toast({ description: data.detail || "整理失败：无可用记录", variant: "destructive" });
+          setOrganizeProgressPercent(0);
+          toast({
+            description: data.detail || "整理失败：无可用记录",
+            variant: "destructive",
+          });
         }
       } else {
         // 非JSON响应（可能是HTML错误页面）
+        clearInterval(progressInterval);
         const errorText = await res.text();
         setIsOrganizing(false);
-        toast({ description: `整理失败: 服务器返回非JSON响应`, variant: "destructive" });
+        setOrganizeProgressPercent(0);
+        toast({
+          description: `整理失败: 服务器返回非JSON响应`,
+          variant: "destructive",
+        });
         console.error("Non-JSON response:", errorText);
       }
     } catch (e) {
+      clearInterval(progressInterval);
       setIsOrganizing(false);
-      toast({ description: "整理失败: " + (e as Error).message, variant: "destructive" });
+      setOrganizeProgressPercent(0);
+      toast({
+        description: "整理失败: " + (e as Error).message,
+        variant: "destructive",
+      });
     }
   };
 
@@ -821,13 +971,6 @@ export function ThreePanelInterface() {
     } catch (e) {
       toast({ description: "确认失败", variant: "destructive" });
     }
-  };
-
-  // 取消整理（回退）
-  const cancelOrganize = async () => {
-    setShowOrganizePreview(false);
-    setOrganizedRecords([]);
-    toast({ description: "已取消，原始记录保持不变" });
   };
 
   // 总结分析任务完成情况和亮点
@@ -1243,55 +1386,27 @@ ${analysisContent}
       // 启用文件恢复专用抑制，防止轮询在上传期间干扰
       suppressDuringFileRestore.current = true;
 
-      const uploadFiles = async () => {
+      const restoreFiles = async () => {
         try {
-          if (filesToRestore.length === 0) {
-            suppressDuringFileRestore.current = false;
-            loadWorkspaceFiles();
-            loadWorkspaceTree();
-            toast({ description: "项目已加载" });
-            return;
-          }
-
-          for (const fileInfo of filesToRestore) {
-            try {
-              const fileRes = await fetch(fileInfo.download_url);
-              if (fileRes.ok) {
-                const blob = await fileRes.blob();
-                const file = new File([blob], fileInfo.name, { type: "application/octet-stream" });
-                const uploadForm = new FormData();
-                uploadForm.append("files", file);
-
-                // 获取文件的目录路径（如果有）
-                const dirPath = fileInfo.path ? fileInfo.path.substring(0, fileInfo.path.lastIndexOf('/')) : "";
-                const uploadUrl = `${API_URLS.WORKSPACE_UPLOAD_TO}?dir=${encodeURIComponent(dirPath)}&session_id=${newSessionId}&username=${currentUser || "default"}`;
-
-                await fetch(uploadUrl, {
-                  method: "POST",
-                  body: uploadForm,
-                });
-              }
-            } catch (e) {
-              console.warn(`Failed to restore file: ${fileInfo.name}`, e);
-            }
-          }
+          const restoreUrl = `${API_URLS.PROJECTS_RESTORE_TO_WORKSPACE}?project_id=${projectId}&session_id=${newSessionId}&username=${currentUser || "default"}`;
+          const res = await fetch(restoreUrl, { method: "POST" });
+          if (!res.ok) throw new Error("Restoration failed");
 
           suppressDuringFileRestore.current = false;
-          // 延迟一点再加载，确保上传完成
           setTimeout(() => {
             loadWorkspaceFiles();
             loadWorkspaceTree();
-            toast({ description: `项目已加载（${filesToRestore.length} 个文件已恢复）` });
+            toast({ description: "项目已加载，文件已全部恢复" });
           }, 500);
         } catch (e) {
           suppressDuringFileRestore.current = false;
           console.error("File restore failed", e);
+          toast({ description: "项目加载失败", variant: "destructive" });
         }
       };
 
-      // 延迟触发文件上传恢复，等待清空完成
       setTimeout(() => {
-        uploadFiles();
+        restoreFiles();
       }, 300);
 
     } catch (e) {
@@ -1674,41 +1789,7 @@ ${analysisContent}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 仅在挂载时执行一次
 
-  useEffect(() => {
-    const id = setInterval(() => {
-      // 智能轮询：仅在页面可见且未上传时轮询
-      const isVisible =
-        typeof document !== "undefined" && document.visibilityState === "visible";
-      if (!isUploading && isVisible) {
-        loadWorkspaceTree();
-        loadWorkspaceFiles();
-      }
-    }, 4000);
-    return () => clearInterval(id);
-  }, [isUploading]);
-
-  useEffect(() => {
-    const el = treeContainerRef.current;
-    if (!el) return;
-    const ro = new (window as any).ResizeObserver((entries: any) => {
-      for (const entry of entries) {
-        const cr = entry.contentRect as DOMRectReadOnly;
-        setTreeSize({
-          w: Math.max(0, Math.floor(cr.width)),
-          h: Math.max(0, Math.floor(cr.height)),
-        });
-      }
-    });
-    ro.observe(el);
-    const rect = el.getBoundingClientRect();
-    setTreeSize({
-      w: Math.max(0, Math.floor(rect.width)),
-      h: Math.max(0, Math.floor(rect.height)),
-    });
-    return () => ro.disconnect();
-  }, []);
-
-  const loadWorkspaceFiles = async () => {
+  const loadWorkspaceFiles = useCallback(async () => {
     if (!sessionId) return;
     if (suppressWorkspaceRefreshCount.current > 0) return;
     if (suppressDuringFileRestore.current) return;
@@ -1723,9 +1804,9 @@ ${analysisContent}
     } catch (error) {
       console.error("Failed to load workspace files:", error);
     }
-  };
+  }, [sessionId, currentUser]);
 
-  const loadWorkspaceTree = async () => {
+  const loadWorkspaceTree = useCallback(async () => {
     if (!sessionId) return;
     if (suppressWorkspaceRefreshCount.current > 0) return;
     if (suppressDuringFileRestore.current) return;
@@ -1752,21 +1833,40 @@ ${analysisContent}
         };
         if (data) {
           markGenerated(data);
+          console.log("[WorkspaceTree] Loaded tree data:", data);
         }
         setWorkspaceTree(data);
-        // 默认展开根与第一层，包括 generated 文件夹
-        const init: Record<string, boolean> = { "": true };
-        if (data?.children) {
-          data.children.forEach((c: WorkspaceNode) => {
-            if (c.is_dir) init[c.path] = true;
-          });
-        }
-        setExpanded(init);
+        // 增量合并展开状态：保留原有的，并默认展开第一层（包括 generated 文件夹）
+        setExpanded((prev) => {
+          const next = { ...prev, "": true };
+          if (data?.children) {
+            data.children.forEach((c: WorkspaceNode) => {
+              if (c.is_dir && prev[c.path] === undefined) {
+                // 仅当之前未定义时才设置默认展开
+                next[c.path] = true;
+              }
+            });
+          }
+          return next;
+        });
       }
     } catch (e) {
       console.error("load tree error", e);
     }
-  };
+  }, [sessionId, currentUser]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      // 智能轮询：仅在页面可见且未上传时轮询
+      const isVisible =
+        typeof document !== "undefined" && document.visibilityState === "visible";
+      if (!isUploading && isVisible) {
+        loadWorkspaceTree();
+        loadWorkspaceFiles();
+      }
+    }, 4000);
+    return () => clearInterval(id);
+  }, [isUploading, sessionId, currentUser, loadWorkspaceTree, loadWorkspaceFiles]);
 
   const toggleExpand = (p: string) =>
     setExpanded((prev) => ({ ...prev, [p]: !prev[p] }));
@@ -1890,7 +1990,7 @@ ${analysisContent}
   };
 
   const toArbor = (node: WorkspaceNode): ArborNode => ({
-    id: node.path || "",
+    id: node.path || (node.is_dir ? "root_workspace" : `file_${node.name}`),
     name: node.name || "workspace",
     isDir: node.is_dir,
     icon: node.icon,
@@ -1926,7 +2026,7 @@ ${analysisContent}
     const ext = getExt(data.name, data.extension);
 
     return (
-      <div style={style} className="w-full overflow-hidden">
+      <div style={style} className="w-full">
         {/* Generated 分组标题 + 删除按钮（不遮挡、不受折叠影响） */}
         {isGeneratedFolder && (
           <div className="mt-2 mb-1 px-2 flex items-center justify-between select-none">
@@ -1949,8 +2049,9 @@ ${analysisContent}
           </div>
         )}
         <div
-          className={`flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2 py-1 w-full overflow-hidden ${isGenerated ? "bg-purple-50 dark:bg-purple-950/20" : ""
+          className={`flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2 py-1 w-full ${isGenerated ? "bg-purple-50 dark:bg-purple-950/20" : ""
             }`}
+          style={{ paddingLeft: `${node.level * 14}px` }}
           onClick={(e) => {
             if (isDir) {
               node.toggle();
@@ -2063,7 +2164,7 @@ ${analysisContent}
               </div>
             )}
             <span
-              className={`truncate ${isGenerated
+              className={`${isGenerated
                 ? "text-purple-700 dark:text-purple-300 font-medium"
                 : ""
                 }`}
@@ -3887,7 +3988,7 @@ ${analysisContent}
 
               <div
                 ref={treeContainerRef}
-                className="flex-1 w-full min-h-0 overflow-y-auto overflow-x-hidden pl-3 pr-1 py-2"
+                className="flex-1 w-full min-h-0 overflow-hidden pl-3 pr-1 py-2"
               >
                 <div
                   className={`mb-2 rounded border border-dashed flex items-center justify-center h-20 text-xs select-none ${dropActive
@@ -3929,8 +4030,10 @@ ${analysisContent}
 
                 {workspaceTree ? (
                   <Tree
+                    width={treeSize.w || "100%"}
+                    height={Math.max(600, treeSize.h - 110)}
                     data={toArbor(workspaceTree).children || []}
-                    openByDefault
+                    initialOpenState={expanded}
                     indent={14}
                     rowHeight={28}
                   >
@@ -5071,7 +5174,7 @@ ${analysisContent}
                   <Button
                     size="sm"
                     variant="outline"
-                    className="text-green-600 border-green-200 hover:bg-green-50"
+                    className="text-green-600 border-green-200 hover:bg-green-50 relative overflow-hidden"
                     onClick={() => {
                       if (window.confirm("确定要整理所有笔记吗？这将使用AI重新组织所有记录。")) {
                         // 调用AI整理功能
@@ -5082,12 +5185,30 @@ ${analysisContent}
                   >
                     {isOrganizing ? (
                       <>
-                        <span className="animate-spin mr-1">⏳</span>
-                        {organizingProgress}
+                        {/* 进度条背景 */}
+                        <div
+                          className="absolute left-0 top-0 bottom-0 bg-green-100 opacity-50 transition-all duration-300 ease-out"
+                          style={{ width: `${organizeProgressPercent}%` }}
+                        />
+                        <span className="relative z-10 flex items-center">
+                          <span className="animate-spin mr-1">⏳</span>
+                          {organizingProgress} ({organizeProgressPercent}%)
+                        </span>
                       </>
                     ) : (
                       "整理笔记"
                     )}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-purple-600 border-purple-200 hover:bg-purple-50"
+                    onClick={() => {
+                      loadBackups();
+                      setShowBackupRestore(true);
+                    }}
+                  >
+                    备份与恢复
                   </Button>
                 </div>
                 <span className="text-xs text-gray-500">共 {yutuRecords.length} 条记录</span>
@@ -5220,6 +5341,95 @@ ${analysisContent}
               onClick={() => setShowYutuPanel(false)}
             >
               关闭
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 备份与恢复对话框 */}
+      <Dialog open={showBackupRestore} onOpenChange={setShowBackupRestore}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>雨途斩棘录 - 备份与恢复</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2 pb-2 border-b">
+              <label className="text-sm font-medium">创建新备份</label>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="备份名称 (可选)"
+                  value={backupName}
+                  onChange={(e) => setBackupName(e.target.value)}
+                  className="flex-1"
+                />
+                <Button size="sm" onClick={createBackup} disabled={isCreatingBackup}>
+                  {isCreatingBackup ? "备份中..." : "立即备份"}
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">现有备份</label>
+              <div className="max-h-[200px] overflow-y-auto border rounded-md divide-y dark:divide-gray-800">
+                {backups.length === 0 ? (
+                  <div className="p-4 text-center text-xs text-gray-500">暂无备份文件</div>
+                ) : (
+                  backups.map(f => (
+                    <div
+                      key={f}
+                      className={`flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-900 cursor-pointer ${selectedBackup === f ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}
+                      onClick={() => setSelectedBackup(f)}
+                    >
+                      <div className="flex-1 text-xs truncate mr-2" title={f}>
+                        {f}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 w-7 p-0 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteBackupFile(f);
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">恢复模式</label>
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="radio"
+                    name="restoreMode"
+                    checked={restoreMode === 'append'}
+                    onChange={() => setRestoreMode('append')}
+                  />
+                  追加模式
+                </label>
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="radio"
+                    name="restoreMode"
+                    checked={restoreMode === 'overwrite'}
+                    onChange={() => setRestoreMode('overwrite')}
+                  />
+                  覆盖模式
+                </label>
+              </div>
+              <p className="text-[10px] text-gray-500">
+                追加：仅导入不重复的记录。覆盖：清空当前库并完全替换。
+              </p>
+            </div>
+            <Button
+              className="w-full bg-blue-600 hover:bg-blue-700 mt-2"
+              onClick={restoreBackup}
+              disabled={!selectedBackup}
+            >
+              执行恢复
             </Button>
           </div>
         </DialogContent>

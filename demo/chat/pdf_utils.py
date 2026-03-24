@@ -18,7 +18,7 @@ from typing import Optional, List, Dict, Any
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image
 from reportlab.lib.pagesizes import A4
 
 # 配置日志
@@ -287,6 +287,20 @@ def extract_markdown_sections(md_text: str) -> List[Dict[str, Any]]:
             i += 1
             continue
 
+        # 图像检测 (Markdown 语法: ![alt](path))
+        img_match = re.match(r'^!\[(.*?)\]\((.*?)\)$', stripped)
+        if img_match:
+            alt_text = img_match.group(1)
+            img_path = img_match.group(2)
+            blocks.append({
+                "type": "image",
+                "content": img_path,
+                "alt": alt_text,
+                "raw": line
+            })
+            i += 1
+            continue
+
         # 一级标题
         if stripped.startswith('# '):
             blocks.append({
@@ -453,6 +467,43 @@ def generate_pdf(
                 style = get_chinese_style("heading3")
                 story.append(Paragraph(content, style))
                 story.append(Spacer(1, 6))
+
+            elif block_type == "image":
+                try:
+                    # 尝试寻找图像文件
+                    img_path = content
+                    if not os.path.isabs(img_path):
+                        # 如果是相对路径，尝试在输出目录寻找
+                        base_dir = os.path.dirname(output_path)
+                        full_img_path = os.path.join(base_dir, img_path)
+                        if not os.path.exists(full_img_path):
+                            # 如果还没找到，尝试当前目录
+                            full_img_path = os.path.abspath(img_path)
+                    else:
+                        full_img_path = img_path
+
+                    if os.path.exists(full_img_path):
+                        img = Image(full_img_path)
+                        # 自动调整图像大小以适应页面宽度
+                        available_width = doc.width
+                        if img.drawWidth > available_width:
+                            ratio = available_width / img.drawWidth
+                            img.drawWidth = available_width
+                            img.drawHeight = img.drawHeight * ratio
+
+                        img.hAlign = 'CENTER'
+                        story.append(img)
+                        # 添加图片说明
+                        if block.get("alt"):
+                            caption_style = get_chinese_style("caption")
+                            story.append(Paragraph(block["alt"], caption_style))
+                        story.append(Spacer(1, 12))
+                    else:
+                        logger.warning(f"图像文件不存在，跳过: {full_img_path}")
+                        style = get_chinese_style("normal")
+                        story.append(Paragraph(f"[图像缺失: {img_path}]", style))
+                except Exception as img_err:
+                    logger.error(f"处理图像失败: {img_err}")
 
             elif block_type == "paragraph":
                 style = get_chinese_style("normal")

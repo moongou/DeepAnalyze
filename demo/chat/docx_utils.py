@@ -180,6 +180,17 @@ def extract_markdown_blocks(md_text: str) -> list[dict]:
             i += 1
             continue
 
+        # 图像检测
+        img_match = re.match(r'^!\[(.*?)\]\((.*?)\)$', stripped)
+        if img_match:
+            blocks.append({
+                "type": "image",
+                "content": img_match.group(2),
+                "alt": img_match.group(1),
+            })
+            i += 1
+            continue
+
         # 一级标题
         if stripped.startswith('# '):
             blocks.append({
@@ -283,6 +294,32 @@ def add_block_to_docx(doc: Document, block: dict, font_name: Optional[str] = Non
             run.font.name = font_name
             run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), font_name)
 
+    elif block_type == "image":
+        try:
+            img_path = content
+            # 同样尝试解析路径
+            if not os.path.isabs(img_path):
+                # 如果是相对路径，尝试在 doc 的保存目录寻找 (如果尚未保存，output_path 会由 generate_docx 传入)
+                # 这种情况下，我们假设 images 和 doc 在同一目录或相对
+                pass # 路径由调用者处理或由 os.path 决定
+
+            if os.path.exists(img_path):
+                from docx.shared import Inches
+                doc.add_picture(img_path, width=Inches(6.0)) # 默认宽度 6 英寸
+                if block.get("alt"):
+                    p = doc.add_paragraph(block["alt"])
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    if font_name:
+                        for run in p.runs:
+                            run.font.name = font_name
+                            run.font.italic = True
+                            run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), font_name)
+            else:
+                logger.warning(f"DOCX 图像缺失: {img_path}")
+                p = doc.add_paragraph(f"[图像缺失: {img_path}]")
+        except Exception as e:
+            logger.error(f"DOCX 添加图像失败: {e}")
+
     elif block_type == "paragraph":
         p = doc.add_paragraph(content)
         if font_name:
@@ -339,6 +376,14 @@ def generate_docx(
 
         # 4. 添加内容到文档
         for block in blocks:
+            if block["type"] == "image":
+                img_path = block["content"]
+                if not os.path.isabs(img_path):
+                    full_img_path = os.path.join(output_dir, img_path)
+                    if not os.path.exists(full_img_path):
+                        # 如果还没找到，尝试当前目录
+                        full_img_path = os.path.abspath(img_path)
+                    block["content"] = full_img_path
             add_block_to_docx(doc, block, font_name)
 
         # 5. 保存文档
