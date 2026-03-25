@@ -18,6 +18,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { API_URLS, API_CONFIG } from "@/lib/config";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -491,6 +492,7 @@ export function ThreePanelInterface() {
   // 过程指导（Side Guidance / Side Task）状态
   const [sideGuidanceOpen, setSideGuidanceOpen] = useState(false);
   const [sideGuidanceText, setSideGuidanceText] = useState("");
+  const [sideGuidanceHistory, setSideGuidanceHistory] = useState<string[]>([]);
   const [isSubmittingGuidance, setIsSubmittingGuidance] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false); // 是否正在分析中
 
@@ -1253,6 +1255,7 @@ ${analysisContent}
     setWorkspaceFiles([]);
     setWorkspaceTree(null);
     setInputValue("");
+    setSideGuidanceHistory([]);
     setRegisteredUsers([]); // 先清空，然后重新加载
     setUserProjects([]);
     setProjectName("");
@@ -1315,6 +1318,7 @@ ${analysisContent}
       formData.append("session_id", sessionId);
       formData.append("name", projectName);
       formData.append("messages", JSON.stringify(messages));
+      formData.append("side_tasks", JSON.stringify(sideGuidanceHistory));
       const res = await fetch(API_URLS.PROJECTS_SAVE, {
         method: "POST",
         body: formData,
@@ -1380,6 +1384,13 @@ ${analysisContent}
       }));
       setMessages(restoredMessages);
       localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(restoredMessages));
+
+      // 恢复过程指导历史
+      if (data.side_tasks && Array.isArray(data.side_tasks)) {
+        setSideGuidanceHistory(data.side_tasks);
+      } else {
+        setSideGuidanceHistory([]);
+      }
 
       // 4. 关闭弹窗
       setShowProjectManager(false);
@@ -1728,6 +1739,7 @@ ${analysisContent}
     setCollapsedSections({});
     setManualLocks({});
     setProjectName("");
+    setSideGuidanceHistory([]);
     // 清空聊天区域、输入框、代码编辑器
     setMessages([
       {
@@ -3545,6 +3557,7 @@ ${analysisContent}
         }
       );
       if (response.ok) {
+        setSideGuidanceHistory(prev => [...prev, sideGuidanceText]);
         toast({ description: "过程指导已提交，将在下一步分析中生效" });
         setSideGuidanceOpen(false);
         setSideGuidanceText("");
@@ -5653,6 +5666,28 @@ ${analysisContent}
             在智能体分析过程中，您可以随时提交新的需求、方法或条件。
             这些信息将与当前任务结合，指导智能体的下一步动作。
           </div>
+
+          {sideGuidanceHistory.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5 pt-2 pb-1 border-t border-gray-100 dark:border-gray-800">
+              <span className="text-xs text-gray-400 mr-1">历史指导:</span>
+              {sideGuidanceHistory.map((h, i) => (
+                <Button
+                  key={i}
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSideGuidanceText(h)}
+                  className={cn(
+                    "h-6 px-2 text-xs border border-gray-200 dark:border-gray-700 hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:text-blue-600 dark:hover:text-blue-400",
+                    sideGuidanceText === h && "bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-800"
+                  )}
+                  title={h.substring(0, 50) + (h.length > 50 ? "..." : "")}
+                >
+                  &lt;{i + 1}&gt;
+                </Button>
+              ))}
+            </div>
+          )}
+
           <div className="py-4">
             <Textarea
               value={sideGuidanceText}

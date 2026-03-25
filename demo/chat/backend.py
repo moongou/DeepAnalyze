@@ -501,15 +501,18 @@ def init_db():
             name TEXT NOT NULL,
             messages TEXT NOT NULL,
             files_data TEXT DEFAULT '{}',
+            side_tasks TEXT DEFAULT '[]',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (username) REFERENCES users(username)
         )
     ''')
-    # 兼容旧数据库：projects 表可能已存在但缺少 files_data 列
+    # 兼容旧数据库：projects 表可能已存在但缺少 files_data 或 side_tasks 列
     cursor.execute("PRAGMA table_info(projects)")
     columns = [row[1] for row in cursor.fetchall()]
     if "files_data" not in columns:
         cursor.execute("ALTER TABLE projects ADD COLUMN files_data TEXT DEFAULT '{}'")
+    if "side_tasks" not in columns:
+        cursor.execute("ALTER TABLE projects ADD COLUMN side_tasks TEXT DEFAULT '[]'")
     conn.commit()
     conn.close()
 
@@ -2532,7 +2535,8 @@ async def save_project(
     session_id: str = Form(...),
     name: str = Form(...),
     messages: str = Form(...),
-    files_data: str = Form("{}")
+    files_data: str = Form("{}"),
+    side_tasks: str = Form("[]")
 ):
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -2574,13 +2578,13 @@ async def save_project(
 
         if existing:
             cursor.execute(
-                "UPDATE projects SET session_id = ?, messages = ?, files_data = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (session_id, messages, files_json, project_id)
+                "UPDATE projects SET session_id = ?, messages = ?, files_data = ?, side_tasks = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (session_id, messages, files_json, side_tasks, project_id)
             )
         else:
             cursor.execute(
-                "INSERT INTO projects (username, session_id, name, messages, files_data) VALUES (?, ?, ?, ?, ?)",
-                (username, session_id, name, messages, files_json)
+                "INSERT INTO projects (username, session_id, name, messages, files_data, side_tasks) VALUES (?, ?, ?, ?, ?, ?)",
+                (username, session_id, name, messages, files_json, side_tasks)
             )
             project_id = cursor.lastrowid
             # Now create project directory with actual ID
@@ -2717,6 +2721,10 @@ async def restore_to_workspace(project_id: int = Query(...), session_id: str = Q
             raise HTTPException(status_code=404, detail="Project directory not found")
 
         workspace_dir = get_session_workspace(session_id, username)
+
+        # 恢复前清空工作区，确保项目独立性
+        if os.path.exists(workspace_dir):
+            shutil.rmtree(workspace_dir)
         os.makedirs(workspace_dir, exist_ok=True)
 
         # 复制项目目录下的所有文件到工作区
@@ -2750,7 +2758,7 @@ async def load_project(project_id: int = Query(...)):
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT session_id, messages, files_data FROM projects WHERE id = ?", (project_id,))
+        cursor.execute("SELECT session_id, messages, files_data, side_tasks FROM projects WHERE id = ?", (project_id,))
         row = cursor.fetchone()
         conn.close()
         if not row:
@@ -2758,7 +2766,8 @@ async def load_project(project_id: int = Query(...)):
         return {
             "session_id": row["session_id"],
             "messages": json.loads(row["messages"]),
-            "files_data": json.loads(row["files_data"]) if row["files_data"] else []
+            "files_data": json.loads(row["files_data"]) if row["files_data"] else [],
+            "side_tasks": json.loads(row["side_tasks"]) if "side_tasks" in row.keys() and row["side_tasks"] else []
         }
     except HTTPException:
         raise
