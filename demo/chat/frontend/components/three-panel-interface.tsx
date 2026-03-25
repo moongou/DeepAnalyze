@@ -475,6 +475,7 @@ export function ThreePanelInterface() {
   const [isTestingDb, setIsTestingDb] = useState(false);
   const [isGeneratingSql, setIsGeneratingSql] = useState(false);
   const [isExecutingDbSql, setIsExecutingDbSql] = useState(false);
+  const [isDbTested, setIsDbTested] = useState(false);
 
   // 用户认证与项目管理状态
   const [currentUser, setCurrentUser] = useState<string | null>(null);
@@ -1321,6 +1322,7 @@ ${analysisContent}
       const data = await response.json();
       if (data.success) {
         toast({ description: "数据库连接测试成功！" });
+        setIsDbTested(true);
       } else {
         toast({
           description: `连接失败: ${data.message}`,
@@ -1367,6 +1369,16 @@ ${analysisContent}
 
   const handleExecuteDbSql = async () => {
     if (!dbGeneratedSql.trim()) return;
+
+    // 检查文件是否存在并提醒覆盖
+    const fileName = `${dbDatasetName}.csv`;
+    const fileExists = workspaceFiles.some(f => f.name === fileName);
+    if (fileExists && dbExecuteMode === "overwrite") {
+      if (!window.confirm(`文件 "${fileName}" 已存在，确定要覆盖它吗？`)) {
+        return;
+      }
+    }
+
     setIsExecutingDbSql(true);
     try {
       const response = await fetch(API_URLS.DB_EXECUTE, {
@@ -1570,6 +1582,11 @@ ${analysisContent}
       toast({ description: "删除失败", variant: "destructive" });
     }
   };
+
+  // 数据库连接配置变化时重置测试状态
+  useEffect(() => {
+    setIsDbTested(false);
+  }, [dbConfig, dbType]);
 
   // 监听登录状态变化以同步项目列表
   useEffect(() => {
@@ -5860,7 +5877,7 @@ ${analysisContent}
 
       {/* 数据库连接对话框 */}
       <Dialog open={showDatabaseDialog} onOpenChange={setShowDatabaseDialog}>
-        <DialogContent className="max-w-[90vw] w-[1200px] h-[85vh] p-0 overflow-hidden flex flex-col">
+        <DialogContent className="max-w-[95vw] w-[1400px] h-[85vh] p-0 overflow-hidden flex flex-col">
           <DialogHeader className="px-6 py-4 border-b">
             <DialogTitle className="flex items-center gap-2">
               <Database className="h-5 w-5 text-blue-600" />
@@ -5960,10 +5977,11 @@ ${analysisContent}
                     </section>
 
                     {/* 2. 自然语言生成 SQL */}
-                    <section className="space-y-3">
+                    <section className={`space-y-3 transition-opacity ${!isDbTested ? 'opacity-50 pointer-events-none' : ''}`}>
                       <h3 className="text-sm font-semibold flex items-center gap-2">
                         <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">2</span>
                         智能生成查询语句
+                        {!isDbTested && <span className="text-xs font-normal text-amber-600 ml-2">(请先完成步骤 1 测试连接)</span>}
                       </h3>
                       <div className="space-y-2">
                         <Textarea
@@ -5982,7 +6000,7 @@ ${analysisContent}
                     </section>
 
                     {/* 3. SQL 编辑与执行 */}
-                    <section className="space-y-3">
+                    <section className={`space-y-3 transition-opacity ${!isDbTested ? 'opacity-50 pointer-events-none' : ''}`}>
                       <h3 className="text-sm font-semibold flex items-center gap-2">
                         <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">3</span>
                         预览并执行 SQL
