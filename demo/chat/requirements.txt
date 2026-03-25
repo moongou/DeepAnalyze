@@ -18,3 +18,7 @@ openpyxl
 pdfplumber
 pdfminer.six
 pypdfium2
+sqlalchemy
+pymysql
+psycopg2-binary
+pymssql

@@ -43,6 +43,7 @@ import {
   ChevronDown,
   ChevronRight,
   Trash2,
+  Database,
   Download,
   Play,
   Save,
@@ -54,6 +55,7 @@ import {
   Copy,
   Check,
   Edit,
+  ChevronLeft,
   Upload,
   Square,
   Code2,
@@ -62,6 +64,8 @@ import {
   Bot,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tree, NodeApi } from "react-arborist";
 import { useToast } from "@/hooks/use-toast";
 import { FileIcon, defaultStyles } from "react-file-icon";
@@ -448,6 +452,30 @@ export function ThreePanelInterface() {
   const [analysisStrategy, setAnalysisStrategy] = useState<string>("聚焦诉求");
   const [temperature, setTemperature] = useState<number | null>(null); // null means auto based on strategy
 
+  // 过程指导 (Side Guidance) 历史
+  const [sideGuidanceHistory, setSideGuidanceHistory] = useState<string[]>([]);
+  const [sideGuidanceIndex, setSideGuidanceIndex] = useState(-1);
+
+  // 数据库连接相关状态
+  const [showDatabaseDialog, setShowDatabaseDialog] = useState(false);
+  const [dbType, setDbType] = useState("mysql");
+  const [dbConfig, setDbConfig] = useState({
+    host: "localhost",
+    port: "3306",
+    user: "root",
+    password: "",
+    database: "",
+  });
+  const [dbPrompt, setDbPrompt] = useState("");
+  const [dbGeneratedSql, setDbGeneratedSql] = useState("");
+  const [dbDatasetName, setDbDatasetName] = useState("query_result");
+  const [dbExecuteMode, setDbExecuteMode] = useState<"overwrite" | "append">(
+    "overwrite"
+  );
+  const [isTestingDb, setIsTestingDb] = useState(false);
+  const [isGeneratingSql, setIsGeneratingSql] = useState(false);
+  const [isExecutingDbSql, setIsExecutingDbSql] = useState(false);
+
   // 用户认证与项目管理状态
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -492,7 +520,6 @@ export function ThreePanelInterface() {
   // 过程指导（Side Guidance / Side Task）状态
   const [sideGuidanceOpen, setSideGuidanceOpen] = useState(false);
   const [sideGuidanceText, setSideGuidanceText] = useState("");
-  const [sideGuidanceHistory, setSideGuidanceHistory] = useState<string[]>([]);
   const [isSubmittingGuidance, setIsSubmittingGuidance] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false); // 是否正在分析中
 
@@ -1280,6 +1307,103 @@ ${analysisContent}
 
     setShowAuthModal(true); // 重新显示登录界面
     toast({ description: "已退出登录，工作区已清空" });
+  };
+
+  // ========== 数据库连接功能函数 ==========
+  const handleTestConnection = async () => {
+    setIsTestingDb(true);
+    try {
+      const response = await fetch(API_URLS.DB_TEST, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ db_type: dbType, config: dbConfig }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        toast({ description: "数据库连接测试成功！" });
+      } else {
+        toast({
+          description: `连接失败: ${data.message}`,
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      console.error("Test connection error:", error);
+      toast({ description: "连接请求失败，请检查网络", variant: "destructive" });
+    } finally {
+      setIsTestingDb(false);
+    }
+  };
+
+  const handleGenerateSql = async () => {
+    if (!dbPrompt.trim()) return;
+    setIsGeneratingSql(true);
+    try {
+      const response = await fetch(API_URLS.DB_GENERATE_SQL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          db_type: dbType,
+          prompt: dbPrompt,
+          schema_info: "", // 可以在此注入已获取的表结构
+        }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        setDbGeneratedSql(data.sql);
+      } else {
+        toast({
+          description: `生成失败: ${data.message}`,
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      console.error("Generate SQL error:", error);
+      toast({ description: "请求失败，请稍后重试", variant: "destructive" });
+    } finally {
+      setIsGeneratingSql(false);
+    }
+  };
+
+  const handleExecuteDbSql = async () => {
+    if (!dbGeneratedSql.trim()) return;
+    setIsExecutingDbSql(true);
+    try {
+      const response = await fetch(API_URLS.DB_EXECUTE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          db_type: dbType,
+          config: dbConfig,
+          sql: dbGeneratedSql,
+          dataset_name: dbDatasetName,
+          mode: dbExecuteMode,
+          format: "csv",
+          session_id: sessionId,
+          username: currentUser || "default",
+        }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        toast({
+          description: `执行成功！结果已保存为 ${data.filename} (${data.row_count} 行)`,
+        });
+        setShowDatabaseDialog(false);
+        // 刷新文件列表
+        await loadWorkspaceTree();
+        await loadWorkspaceFiles();
+      } else {
+        toast({
+          description: `执行失败: ${data.message}`,
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      console.error("Execute DB SQL error:", error);
+      toast({ description: "执行请求失败", variant: "destructive" });
+    } finally {
+      setIsExecutingDbSql(false);
+    }
   };
 
   const saveProject = async (confirmed = false) => {
@@ -3945,6 +4069,16 @@ ${analysisContent}
                     <BookOpen className="h-3 w-3 mr-1" />
                     风调雨顺
                   </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                    title="连接数据库并查询数据"
+                    onClick={() => setShowDatabaseDialog(true)}
+                  >
+                    <Database className="h-3 w-3 mr-1" />
+                    连数据库
+                  </Button>
                 </div>
                 <div
                   className="flex items-center gap-1"
@@ -5721,6 +5855,197 @@ ${analysisContent}
               )}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 数据库连接对话框 */}
+      <Dialog open={showDatabaseDialog} onOpenChange={setShowDatabaseDialog}>
+        <DialogContent className="max-w-[90vw] w-[1200px] h-[85vh] p-0 overflow-hidden flex flex-col">
+          <DialogHeader className="px-6 py-4 border-b">
+            <DialogTitle className="flex items-center gap-2">
+              <Database className="h-5 w-5 text-blue-600" />
+              连接数据库并查询数据
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <ResizablePanelGroup direction="horizontal" className="h-full">
+              {/* 左侧：数据库类型选择 */}
+              <ResizablePanel defaultSize={20} minSize={15} className="bg-gray-50 dark:bg-gray-900/20 border-r">
+                <div className="p-4 space-y-4">
+                  <Label className="text-sm font-semibold">选择数据库类型</Label>
+                  <RadioGroup value={dbType} onValueChange={setDbType} className="space-y-2">
+                    {[
+                      { id: "mysql", label: "MySQL", icon: "🐬" },
+                      { id: "mssql", label: "SQL Server", icon: "🪟" },
+                      { id: "postgresql", label: "PostgreSQL", icon: "🐘" },
+                      { id: "oracle", label: "Oracle", icon: "🏢" },
+                      { id: "sqlite", label: "SQLite", icon: "📂" },
+                    ].map((item) => (
+                      <div key={item.id} className="flex items-center space-x-2 p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+                        <RadioGroupItem value={item.id} id={item.id} />
+                        <Label htmlFor={item.id} className="flex-1 cursor-pointer flex items-center gap-2">
+                          <span>{item.icon}</span>
+                          <span>{item.label}</span>
+                        </Label>
+                      </div>
+                    ))}
+                  </RadioGroup>
+                </div>
+              </ResizablePanel>
+
+              <ResizableHandle withHandle />
+
+              {/* 右侧：配置、NL输入、SQL编辑器 */}
+              <ResizablePanel defaultSize={80} minSize={50}>
+                <div className="h-full flex flex-col overflow-hidden">
+                  <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                    {/* 1. 配置连接 */}
+                    <section className="space-y-3">
+                      <h3 className="text-sm font-semibold flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">1</span>
+                        配置连接信息
+                      </h3>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-1.5">
+                          <Label htmlFor="db-host">主机名 / 地址</Label>
+                          <Input
+                            id="db-host"
+                            placeholder="localhost"
+                            value={dbConfig.host}
+                            onChange={(e) => setDbConfig({ ...dbConfig, host: e.target.value })}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="db-port">端口</Label>
+                          <Input
+                            id="db-port"
+                            placeholder={dbType === "mysql" ? "3306" : dbType === "mssql" ? "1433" : "5432"}
+                            value={dbConfig.port}
+                            onChange={(e) => setDbConfig({ ...dbConfig, port: e.target.value })}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="db-user">用户名</Label>
+                          <Input
+                            id="db-user"
+                            value={dbConfig.user}
+                            onChange={(e) => setDbConfig({ ...dbConfig, user: e.target.value })}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="db-pass">密码</Label>
+                          <Input
+                            id="db-pass"
+                            type="password"
+                            value={dbConfig.password}
+                            onChange={(e) => setDbConfig({ ...dbConfig, password: e.target.value })}
+                          />
+                        </div>
+                        <div className="col-span-2 space-y-1.5">
+                          <Label htmlFor="db-name">{dbType === "sqlite" ? "SQLite 文件绝对路径" : "数据库名称"}</Label>
+                          <Input
+                            id="db-name"
+                            value={dbConfig.database}
+                            onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })}
+                          />
+                        </div>
+                      </div>
+                      <div className="flex gap-2 justify-end">
+                        <Button variant="outline" size="sm" onClick={handleTestConnection} disabled={isTestingDb}>
+                          {isTestingDb ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                          测试连接
+                        </Button>
+                      </div>
+                    </section>
+
+                    {/* 2. 自然语言生成 SQL */}
+                    <section className="space-y-3">
+                      <h3 className="text-sm font-semibold flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">2</span>
+                        智能生成查询语句
+                      </h3>
+                      <div className="space-y-2">
+                        <Textarea
+                          placeholder="描述您的查询需求，例如：'统计过去三个月每个月的进出口额总计，并按月份排序'"
+                          className="min-h-[80px] resize-none"
+                          value={dbPrompt}
+                          onChange={(e) => setDbPrompt(e.target.value)}
+                        />
+                        <div className="flex justify-end">
+                          <Button size="sm" className="bg-blue-600 hover:bg-blue-700" onClick={handleGenerateSql} disabled={isGeneratingSql || !dbPrompt.trim()}>
+                            {isGeneratingSql ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : <Sparkles className="mr-2 h-3 w-3" />}
+                            生成 SQL
+                          </Button>
+                        </div>
+                      </div>
+                    </section>
+
+                    {/* 3. SQL 编辑与执行 */}
+                    <section className="space-y-3">
+                      <h3 className="text-sm font-semibold flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">3</span>
+                        预览并执行 SQL
+                      </h3>
+                      <div className="space-y-2">
+                        <Textarea
+                          className="min-h-[120px] font-mono text-sm"
+                          value={dbGeneratedSql}
+                          onChange={(e) => setDbGeneratedSql(e.target.value)}
+                          spellCheck={false}
+                        />
+                        <div className="grid grid-cols-2 gap-4 items-end bg-gray-50 dark:bg-gray-900/40 p-4 rounded-lg border">
+                          <div className="space-y-1.5">
+                            <Label htmlFor="dataset-name">保存为数据集名称</Label>
+                            <Input
+                              id="dataset-name"
+                              value={dbDatasetName}
+                              onChange={(e) => setDbDatasetName(e.target.value)}
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label>执行模式</Label>
+                            <Select value={dbExecuteMode} onValueChange={(v: any) => setDbExecuteMode(v)}>
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="overwrite">覆盖现有文件</SelectItem>
+                                <SelectItem value="append">追加到现有文件</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                  </div>
+
+                  <div className="px-6 py-4 border-t bg-gray-50 dark:bg-gray-950 flex justify-end gap-3">
+                    <Button variant="ghost" onClick={() => setShowDatabaseDialog(false)}>
+                      关闭
+                    </Button>
+                    <Button
+                      className="bg-green-600 hover:bg-green-700 text-white min-w-[120px]"
+                      onClick={handleExecuteDbSql}
+                      disabled={isExecutingDbSql || !dbGeneratedSql.trim()}
+                    >
+                      {isExecutingDbSql ? (
+                        <>
+                          <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                          正在导入...
+                        </>
+                      ) : (
+                        <>
+                          <Play className="mr-2 h-4 w-4" />
+                          立即执行并导入
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </ResizablePanel>
+            </ResizablePanelGroup>
+          </div>
         </DialogContent>
       </Dialog>
     </>

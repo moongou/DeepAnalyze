@@ -67,6 +67,11 @@ export const API_CONFIG = {
     YUTU_BACKUP_LIST: "/api/yutu/backup/list",
     YUTU_BACKUP_RESTORE: "/api/yutu/backup/restore",
     YUTU_BACKUP_DELETE: "/api/yutu/backup/delete",
+
+    // 数据库连接
+    DB_TEST: "/api/db/test",
+    DB_GENERATE_SQL: "/api/db/generate-sql",
+    DB_EXECUTE: "/api/db/execute",
   },
 };
 
@@ -107,6 +112,11 @@ export const API_URLS = {
   YUTU_BACKUP_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_LIST),
   YUTU_BACKUP_RESTORE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_RESTORE),
   YUTU_BACKUP_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_DELETE),
+
+  // 数据库连接
+  DB_TEST: buildApiUrl(API_CONFIG.ENDPOINTS.DB_TEST),
+  DB_GENERATE_SQL: buildApiUrl(API_CONFIG.ENDPOINTS.DB_GENERATE_SQL),
+  DB_EXECUTE: buildApiUrl(API_CONFIG.ENDPOINTS.DB_EXECUTE),
 
   // 认证
   AUTH_REGISTER: buildApiUrl(API_CONFIG.ENDPOINTS.AUTH_REGISTER),

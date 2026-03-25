@@ -65,6 +65,8 @@ if os.path.exists(_FONT_DIR):
 
 import chardet
 from docx import Document
+from sqlalchemy import create_engine, text
+import pandas as pd
 
 # 使用新的模块化 PDF 工具
 from pdf_utils import (
@@ -3178,6 +3180,144 @@ async def cancel_organize(data: dict, username: str = ""):
 
     # 取消操作不需要实际恢复，因为原始数据未修改
     return {"success": True, "message": "已取消整理，原始记录保持不变"}
+
+
+# ========== 数据库连接与查询 API ==========
+def build_db_url(db_type: str, config: dict) -> str:
+    """构建 SQLAlchemy 连接字符串"""
+    user = config.get("user", "")
+    password = config.get("password", "")
+    host = config.get("host", "localhost")
+    port = config.get("port", "")
+    database = config.get("database", "")
+
+    if db_type == "mysql":
+        return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?charset=utf8mb4"
+    elif db_type == "postgresql":
+        return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}"
+    elif db_type == "mssql":
+        return f"mssql+pymssql://{user}:{password}@{host}:{port}/{database}"
+    elif db_type == "sqlite":
+        return f"sqlite:///{database}"
+    elif db_type == "oracle":
+        # 注意：oracle 可能需要 cx_oracle 或 oracledb
+        return f"oracle+cx_oracle://{user}:{password}@{host}:{port}/{database}"
+    else:
+        raise ValueError(f"Unsupported database type: {db_type}")
+
+
+@app.post("/api/db/test")
+async def test_db_connection(body: dict = Body(...)):
+    """测试数据库连接"""
+    try:
+        db_type = body.get("db_type")
+        config = body.get("config", {})
+        url = build_db_url(db_type, config)
+        # SQLite 不需要超时设置，其他 DB 设置 5 秒超时
+        engine = create_engine(url, connect_args={"connect_timeout": 5} if db_type != "sqlite" else {})
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"success": True, "message": "Connection successful"}
+    except Exception as e:
+        print(f"DB Test Error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/db/generate-sql")
+async def generate_sql(body: dict = Body(...)):
+    """自然语言生成 SQL"""
+    try:
+        db_type = body.get("db_type", "mysql")
+        prompt = body.get("prompt", "")
+        schema_info = body.get("schema_info", "") # 可选：由前端提供或后端自动获取
+
+        if not prompt:
+            return {"success": False, "message": "Prompt is required"}
+
+        system_msg = f"""你是一个精通 SQL 的专家。请根据用户的需求，生成适用于 {db_type} 数据库的 SQL 查询语句。
+如果提供了表结构信息，请严格按照表结构生成。
+只返回 SQL 代码块，不要有任何其他文字解释。
+代码块格式如下：
+```sql
+SELECT ...
+```"""
+        user_msg = f"需求：{prompt}\n表结构信息：{schema_info}"
+
+        response = client.chat.completions.create(
+            model=MODEL_PATH,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+            temperature=0.1
+        )
+
+        sql_content = response.choices[0].message.content
+        # 提取 SQL 代码块
+        import re
+        sql_match = re.search(r"```sql\n(.*?)\n```", sql_content, re.DOTALL)
+        if sql_match:
+            sql = sql_match.group(1).strip()
+        else:
+            sql = sql_content.strip().replace("```sql", "").replace("```", "")
+
+        return {"success": True, "sql": sql}
+    except Exception as e:
+        print(f"Generate SQL Error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/db/execute")
+async def execute_db_sql(body: dict = Body(...)):
+    """执行 SQL 并保存结果到工作区"""
+    try:
+        db_type = body.get("db_type")
+        config = body.get("config", {})
+        sql = body.get("sql")
+        dataset_name = body.get("dataset_name", "query_result")
+        mode = body.get("mode", "overwrite") # overwrite 或 append
+        format = body.get("format", "csv") # csv 或 json
+        session_id = body.get("session_id", "default")
+        username = body.get("username", "default")
+
+        if not sql:
+            return {"success": False, "message": "SQL is required"}
+
+        url = build_db_url(db_type, config)
+        engine = create_engine(url)
+
+        # 使用 pandas 执行查询
+        df = pd.read_sql(sql, engine)
+
+        workspace_dir = get_session_workspace(session_id, username)
+        file_ext = ".csv" if format == "csv" else ".json"
+        filename = f"{dataset_name}{file_ext}"
+        file_path = Path(workspace_dir) / filename
+
+        if mode == "append" and file_path.exists():
+            if format == "csv":
+                old_df = pd.read_csv(file_path)
+                new_df = pd.concat([old_df, df], ignore_index=True)
+                new_df.to_csv(file_path, index=False, encoding="utf-8-sig")
+            else:
+                old_df = pd.read_json(file_path)
+                new_df = pd.concat([old_df, df], ignore_index=True)
+                new_df.to_json(file_path, orient="records", force_ascii=False, indent=2)
+        else:
+            if format == "csv":
+                df.to_csv(file_path, index=False, encoding="utf-8-sig")
+            else:
+                df.to_json(file_path, orient="records", force_ascii=False, indent=2)
+
+        return {
+            "success": True,
+            "message": f"Successfully executed and saved to {filename}",
+            "filename": filename,
+            "row_count": len(df)
+        }
+    except Exception as e:
+        print(f"Execute DB SQL Error: {e}")
+        return {"success": False, "message": str(e)}
 
 
 if __name__ == "__main__":
