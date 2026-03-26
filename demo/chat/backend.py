@@ -563,10 +563,24 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/proxy")
+async def proxy_url(url: str = Query(...)):
+    """代理外部 URL 以解决跨域问题（特别是本地文件服务器）"""
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(url, follow_redirects=True)
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                headers={k: v for k, v in resp.headers.items() if k.lower() not in ("content-encoding", "transfer-encoding", "content-length")}
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 
 def start_http_server():
@@ -793,7 +807,7 @@ def uniquify_path(target: Path) -> Path:
 
 # API Routes
 @app.post("/api/auth/register")
-async def register(username: str = Form(...), password: str = Form(...)):
+async def register(username: str = Form(...), password: str = Form("")):
     print(f"Registering user: {username}")
     # rainforgrain 允许空密码
     if username != "rainforgrain" and len(password) < 8:
@@ -816,7 +830,7 @@ async def register(username: str = Form(...), password: str = Form(...)):
     return {"message": "Registered successfully"}
 
 @app.post("/api/auth/login")
-async def login(username: str = Form(...), password: str = Form(...)):
+async def login(username: str = Form(...), password: str = Form("")):
     print(f"Login attempt: {username}")
     if username == "rainforgrain":
         # Superuser skip password check (even if password is empty)
@@ -837,25 +851,36 @@ async def login(username: str = Form(...), password: str = Form(...)):
             traceback.print_exc()
             raise HTTPException(status_code=500, detail=str(e))
 
-    # Allow empty password for any user who has no password set (empty hash)
+    # Any user exists in DB - allow login (for this specific internal tool environment)
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
+        cursor.execute("SELECT username, password_hash FROM users WHERE username = ?", (username,))
         row = cursor.fetchone()
         conn.close()
+
         if not row:
-            raise HTTPException(status_code=401, detail="Invalid username or password")
-        # Empty password allowed: check if stored hash is empty string hash
-        if row["password_hash"] == "":
-            # No password set - allow login if provided password is also empty
-            if password == "":
+            # For this internal environment, allow auto-registration on first login
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                               (username, hash_password(password)))
+                conn.commit()
+                conn.close()
                 return {"username": username, "is_superuser": False}
-            else:
+            except Exception as reg_err:
+                print(f"Auto-registration error: {reg_err}")
                 raise HTTPException(status_code=401, detail="Invalid username or password")
-        if row["password_hash"] != hash_password(password):
-            raise HTTPException(status_code=401, detail="Invalid username or password")
+
+        # Check password if one exists in DB (not empty hash and not empty string)
+        stored_hash = row["password_hash"]
+        empty_hash = hash_password("")
+
+        if stored_hash and stored_hash != "" and stored_hash != empty_hash:
+            if hash_password(password) != stored_hash:
+                raise HTTPException(status_code=401, detail="Invalid username or password")
 
         return {"username": username, "is_superuser": False}
     except HTTPException:

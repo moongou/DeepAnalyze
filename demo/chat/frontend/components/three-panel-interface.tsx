@@ -1227,8 +1227,23 @@ ${analysisContent}
         body: formData,
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "认证失败");
+      let data;
+      try {
+        data = await res.json();
+      } catch (e) {
+        throw new Error(`服务器响应错误 (${res.status})`);
+      }
+
+      if (!res.ok) {
+        // 如果 data.detail 是列表（FastAPI 422 验证错误）
+        const detail = data.detail;
+        const errorMessage = typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map(d => `${d.loc.join('.')}: ${d.msg}`).join('; ')
+            : "认证失败";
+        throw new Error(errorMessage);
+      }
 
       if (isLoginMode) {
         setCurrentUser(data.username);
@@ -1922,7 +1937,21 @@ ${analysisContent}
     }
   }, [sessionId]);
 
-  // 页面加载时：获取已注册用户列表 & 弹出登录对话框
+  // 页面加载时：弹出登录对话框（仅在首次加载时）
+  useEffect(() => {
+    // 加载知识库设置
+    const savedKnowledgeEnabled = localStorage.getItem("knowledgeBaseEnabled");
+    if (savedKnowledgeEnabled !== null) {
+      setKnowledgeBaseEnabled(savedKnowledgeEnabled === "true");
+    }
+
+    if (!isLoggedIn) {
+      setShowAuthModal(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // 仅在挂载时执行一次
+
+  // 当登录弹窗显示时，刷新用户列表
   useEffect(() => {
     const loadRegisteredUsers = async () => {
       try {
@@ -1935,20 +1964,11 @@ ${analysisContent}
         console.warn("Failed to load registered users", e);
       }
     };
-    loadRegisteredUsers();
 
-    // 加载知识库设置
-    const savedKnowledgeEnabled = localStorage.getItem("knowledgeBaseEnabled");
-    if (savedKnowledgeEnabled !== null) {
-      setKnowledgeBaseEnabled(savedKnowledgeEnabled === "true");
+    if (showAuthModal) {
+      loadRegisteredUsers();
     }
-
-    // 未登录时弹出登录对话框（仅在首次加载时）
-    if (!isLoggedIn) {
-      setShowAuthModal(true);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // 仅在挂载时执行一次
+  }, [showAuthModal]);
 
   const loadWorkspaceFiles = useCallback(async () => {
     if (!sessionId) return;
