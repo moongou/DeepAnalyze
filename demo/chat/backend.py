@@ -1,5 +1,5 @@
 import openai
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import json
 import os
 import shutil
@@ -67,6 +67,7 @@ import chardet
 from docx import Document
 from sqlalchemy import create_engine, text
 import pandas as pd
+from datetime import datetime
 
 # 使用新的模块化 PDF 工具
 from pdf_utils import (
@@ -483,6 +484,41 @@ client = openai.OpenAI(base_url=API_BASE, api_key="dummy")
 WORKSPACE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace")
 PROJECTS_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepanalyze.db")
+KB_MASK = "••••••••"
+KB_DEFAULT_SETTINGS = {
+    "knowledge_base_enabled": True,
+    "providers_enabled": True,
+    "internal_preferences": {
+        "preferred_view": "html",
+        "show_hints": True,
+        "auto_open_yutu_after_analysis": False,
+    },
+    "onyx": {
+        "enabled": False,
+        "base_url": "http://localhost:3000",
+        "api_key": "",
+        "search_path": "/api/chat/search",
+    },
+    "dify": {
+        "enabled": False,
+        "base_url": "http://localhost:5000",
+        "api_key": "",
+        "workflow_id": "",
+    },
+    "test_status": {
+        "onyx": {
+            "status": "never_tested",
+            "message": "尚未测试",
+            "tested_at": None,
+        },
+        "dify": {
+            "status": "never_tested",
+            "message": "尚未测试",
+            "tested_at": None,
+        },
+    },
+}
+
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -508,6 +544,13 @@ def init_db():
             FOREIGN KEY (username) REFERENCES users(username)
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS knowledge_provider_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            settings_json TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     # 兼容旧数据库：projects 表可能已存在但缺少 files_data 或 side_tasks 列
     cursor.execute("PRAGMA table_info(projects)")
     columns = [row[1] for row in cursor.fetchall()]
@@ -515,6 +558,12 @@ def init_db():
         cursor.execute("ALTER TABLE projects ADD COLUMN files_data TEXT DEFAULT '{}'")
     if "side_tasks" not in columns:
         cursor.execute("ALTER TABLE projects ADD COLUMN side_tasks TEXT DEFAULT '[]'")
+    cursor.execute("SELECT id FROM knowledge_provider_settings WHERE id = 1")
+    if cursor.fetchone() is None:
+        cursor.execute(
+            "INSERT INTO knowledge_provider_settings (id, settings_json) VALUES (1, ?)",
+            (json.dumps(KB_DEFAULT_SETTINGS, ensure_ascii=False),),
+        )
     conn.commit()
     conn.close()
 
@@ -527,6 +576,282 @@ def get_db():
         yield conn
     finally:
         conn.close()
+
+
+def deep_merge_dict(base: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in incoming.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def normalize_base_url(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("base_url 不能为空")
+    base_url = value.strip().rstrip("/")
+    if not re.match(r"^https?://", base_url, re.IGNORECASE):
+        raise ValueError("base_url 必须以 http:// 或 https:// 开头")
+    return base_url
+
+
+def normalize_optional_path(value: str, default: str) -> str:
+    path = (value or default).strip()
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return path
+
+
+def mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    return KB_MASK
+
+
+def redact_provider(provider: Dict[str, Any]) -> Dict[str, Any]:
+    masked = deepcopy(provider)
+    api_key = masked.get("api_key", "")
+    masked["has_api_key"] = bool(api_key)
+    masked["api_key"] = mask_secret(api_key)
+    return masked
+
+
+def build_kb_settings_response(settings: Dict[str, Any]) -> Dict[str, Any]:
+    response = deepcopy(settings)
+    response["onyx"] = redact_provider(response.get("onyx", {}))
+    response["dify"] = redact_provider(response.get("dify", {}))
+    return response
+
+
+def load_kb_settings(raw: bool = False) -> Dict[str, Any]:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT settings_json FROM knowledge_provider_settings WHERE id = 1")
+        row = cursor.fetchone()
+    finally:
+        conn.close()
+    if row and row["settings_json"]:
+        try:
+            stored = json.loads(row["settings_json"])
+        except json.JSONDecodeError:
+            stored = {}
+    else:
+        stored = {}
+    merged = deep_merge_dict(KB_DEFAULT_SETTINGS, stored)
+    return merged if raw else build_kb_settings_response(merged)
+
+
+def save_kb_settings(settings: Dict[str, Any]) -> None:
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE knowledge_provider_settings SET settings_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+            (json.dumps(settings, ensure_ascii=False),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def merge_provider_input(existing: Dict[str, Any], incoming: Dict[str, Any]) -> Dict[str, Any]:
+    merged = deepcopy(existing)
+    for key, value in incoming.items():
+        if key == "api_key" and isinstance(value, str) and value == KB_MASK:
+            continue
+        merged[key] = value
+    return merged
+
+
+def normalize_kb_settings_input(payload: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
+    settings = deepcopy(existing)
+    if "knowledge_base_enabled" in payload:
+        settings["knowledge_base_enabled"] = bool(payload.get("knowledge_base_enabled"))
+    if "providers_enabled" in payload:
+        settings["providers_enabled"] = bool(payload.get("providers_enabled"))
+
+    if isinstance(payload.get("internal_preferences"), dict):
+        incoming_preferences = payload["internal_preferences"]
+        prefs = settings.get("internal_preferences", {})
+        if incoming_preferences.get("preferred_view") in {"html", "table"}:
+            prefs["preferred_view"] = incoming_preferences["preferred_view"]
+        if "show_hints" in incoming_preferences:
+            prefs["show_hints"] = bool(incoming_preferences.get("show_hints"))
+        if "auto_open_yutu_after_analysis" in incoming_preferences:
+            prefs["auto_open_yutu_after_analysis"] = bool(incoming_preferences.get("auto_open_yutu_after_analysis"))
+        settings["internal_preferences"] = prefs
+
+    if isinstance(payload.get("onyx"), dict):
+        onyx = merge_provider_input(settings.get("onyx", {}), payload["onyx"])
+        onyx["enabled"] = bool(onyx.get("enabled"))
+        onyx["base_url"] = normalize_base_url(onyx.get("base_url", ""))
+        onyx["search_path"] = normalize_optional_path(onyx.get("search_path", ""), "/api/chat/search")
+        onyx["api_key"] = (onyx.get("api_key") or "").strip()
+        settings["onyx"] = onyx
+
+    if isinstance(payload.get("dify"), dict):
+        dify = merge_provider_input(settings.get("dify", {}), payload["dify"])
+        dify["enabled"] = bool(dify.get("enabled"))
+        dify["base_url"] = normalize_base_url(dify.get("base_url", ""))
+        dify["api_key"] = (dify.get("api_key") or "").strip()
+        dify["workflow_id"] = (dify.get("workflow_id") or "").strip()
+        settings["dify"] = dify
+
+    return settings
+
+
+def normalize_http_error(error: Exception) -> str:
+    if isinstance(error, httpx.ConnectTimeout) or isinstance(error, httpx.ReadTimeout):
+        return "连接超时，请检查服务是否启动或地址是否可达"
+    if isinstance(error, httpx.ConnectError):
+        return "连接被拒绝，请确认本地 Docker 服务已启动且端口映射正确"
+    if isinstance(error, httpx.HTTPStatusError):
+        status_code = error.response.status_code
+        if status_code in {401, 403}:
+            return f"鉴权失败（HTTP {status_code}），请检查 API Key"
+        if status_code == 404:
+            return "接口路径不存在，请检查 base_url、检索路径或 workflow_id"
+        return f"服务返回异常状态（HTTP {status_code}）"
+    return str(error)
+
+
+def test_onyx_provider(config: Dict[str, Any]) -> Tuple[bool, str]:
+    base_url = normalize_base_url(config.get("base_url", ""))
+    configured_search_path = normalize_optional_path(config.get("search_path", ""), "/api/chat/search")
+    candidate_search_paths = []
+    for path in [configured_search_path, "/api/chat/search", "/api/search", "/search"]:
+        normalized = normalize_optional_path(path, configured_search_path)
+        if normalized not in candidate_search_paths:
+            candidate_search_paths.append(normalized)
+    api_key = (config.get("api_key") or "").strip()
+    base_headers = {"Accept": "application/json"}
+    auth_header_variants = [base_headers]
+    if api_key:
+        auth_header_variants = [
+            {**base_headers, "Authorization": f"Bearer {api_key}"},
+            {**base_headers, "X-API-Key": api_key},
+            {**base_headers, "Api-Key": api_key},
+        ]
+    health_candidates = ["/api/health", "/health", "/api/chat/health", "/"]
+    last_error: Optional[Exception] = None
+
+    with httpx.Client(timeout=8.0, follow_redirects=True) as client:
+        health_ok = False
+        for health_path in health_candidates:
+            health_url = f"{base_url}{health_path}" if health_path != "/" else f"{base_url}/"
+            for headers in auth_header_variants:
+                try:
+                    health_response = client.get(health_url, headers=headers)
+                    if health_response.status_code < 500:
+                        health_ok = True
+                        break
+                except Exception as error:
+                    last_error = error
+            if health_ok:
+                break
+        if not health_ok and last_error:
+            raise last_error
+
+        search_payloads = [
+            {"query": "ping", "search_type": "keyword"},
+            {"query": "ping"},
+            {"message": "ping"},
+            {"text": "ping"},
+        ]
+        for search_path in candidate_search_paths:
+            search_url = f"{base_url}{search_path}"
+            for headers in auth_header_variants:
+                request_headers = {**headers, "Content-Type": "application/json"}
+                for payload in search_payloads:
+                    try:
+                        response = client.post(search_url, headers=request_headers, json=payload)
+                        if response.status_code in {401, 403}:
+                            response.raise_for_status()
+                        if response.status_code in {404, 405, 422}:
+                            last_error = httpx.HTTPStatusError(
+                                "Onyx search endpoint rejected request",
+                                request=response.request,
+                                response=response,
+                            )
+                            continue
+                        response.raise_for_status()
+                        try:
+                            result = response.json()
+                        except ValueError as exc:
+                            raise ValueError("Onyx 检索接口未返回 JSON") from exc
+                        if not isinstance(result, (dict, list)):
+                            raise ValueError("Onyx 检索接口返回结构异常")
+                        return True, f"Onyx 服务可达，检索接口测试通过（{search_path}）"
+                    except Exception as error:
+                        last_error = error
+        if last_error:
+            raise last_error
+    raise ValueError("Onyx 检索接口测试失败")
+
+
+def test_dify_provider(config: Dict[str, Any]) -> Tuple[bool, str]:
+    base_url = normalize_base_url(config.get("base_url", ""))
+    api_key = (config.get("api_key") or "").strip()
+    workflow_id = (config.get("workflow_id") or "").strip()
+    if not api_key:
+        raise ValueError("Dify API Key 不能为空")
+    if not workflow_id:
+        raise ValueError("Dify workflow_id 不能为空")
+    run_url = f"{base_url}/v1/workflows/run"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "inputs": {"ping": "health_check"},
+        "response_mode": "blocking",
+        "user": "deepanalyze-local-test",
+        "workflow_id": workflow_id,
+    }
+
+    with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+        response = client.post(run_url, headers=headers, json=payload)
+        response.raise_for_status()
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise ValueError("Dify Workflow 接口未返回 JSON") from exc
+        if not isinstance(result, dict):
+            raise ValueError("Dify Workflow 接口返回结构异常")
+        if not any(key in result for key in ("data", "workflow_run_id", "task_id", "outputs")):
+            raise ValueError("Dify Workflow 响应缺少预期字段")
+    return True, "Dify Workflow 接口测试通过"
+
+
+def run_kb_provider_test(provider: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+    tested_at = datetime.now().isoformat(timespec="seconds")
+    try:
+        if provider == "onyx":
+            _, message = test_onyx_provider(settings.get("onyx", {}))
+        elif provider == "dify":
+            _, message = test_dify_provider(settings.get("dify", {}))
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
+        return {
+            "provider": provider,
+            "success": True,
+            "status": "passed",
+            "message": message,
+            "tested_at": tested_at,
+        }
+    except Exception as error:
+        return {
+            "provider": provider,
+            "success": False,
+            "status": "failed",
+            "message": normalize_http_error(error),
+            "tested_at": tested_at,
+        }
 
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
@@ -3342,6 +3667,65 @@ async def execute_db_sql(body: dict = Body(...)):
         }
     except Exception as e:
         print(f"Execute DB SQL Error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@app.get("/api/kb/settings")
+async def get_kb_settings():
+    try:
+        return {"success": True, "settings": load_kb_settings(raw=False)}
+    except Exception as e:
+        print(f"Get KB settings error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/kb/settings")
+async def update_kb_settings(body: dict = Body(...)):
+    try:
+        current = load_kb_settings(raw=True)
+        merged = normalize_kb_settings_input(body, current)
+        save_kb_settings(merged)
+        return {"success": True, "settings": load_kb_settings(raw=False), "message": "知识库配置已保存"}
+    except Exception as e:
+        print(f"Save KB settings error: {e}")
+        return {"success": False, "message": str(e)}
+
+
+@app.post("/api/kb/test")
+async def test_kb_settings(body: dict = Body(...)):
+    try:
+        provider = body.get("provider", "all")
+        payload_settings = body.get("settings")
+        current = load_kb_settings(raw=True)
+        merged = normalize_kb_settings_input(payload_settings, current) if isinstance(payload_settings, dict) else current
+
+        providers = ["onyx", "dify"] if provider == "all" else [provider]
+        results = []
+        for item in providers:
+            if item not in {"onyx", "dify"}:
+                return {"success": False, "message": f"Unsupported provider: {item}"}
+            results.append(run_kb_provider_test(item, merged))
+
+        for result in results:
+            merged.setdefault("test_status", {})[result["provider"]] = {
+                "status": result["status"],
+                "message": result["message"],
+                "tested_at": result["tested_at"],
+            }
+        save_kb_settings(merged)
+
+        success = all(result["success"] for result in results)
+        response: Dict[str, Any] = {
+            "success": success,
+            "provider": provider,
+            "results": results,
+            "settings": load_kb_settings(raw=False),
+        }
+        if len(results) == 1:
+            response.update(results[0])
+        return response
+    except Exception as e:
+        print(f"Test KB settings error: {e}")
         return {"success": False, "message": str(e)}
 
 

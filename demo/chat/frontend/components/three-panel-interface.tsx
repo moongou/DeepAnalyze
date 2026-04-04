@@ -17,7 +17,7 @@ import { Slider } from "@/components/ui/slider";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { API_URLS, API_CONFIG } from "@/lib/config";
+import { API_URLS, API_CONFIG, MODEL_PROVIDER_PRESETS, cloneModelProviderConfig, stringifyModelHeaders, parseModelHeadersInput, type ModelProviderConfig } from "@/lib/config";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
@@ -87,6 +87,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 interface Message {
   id: string;
@@ -458,6 +459,13 @@ export function ThreePanelInterface() {
 
   // 数据库连接相关状态
   const [showDatabaseDialog, setShowDatabaseDialog] = useState(false);
+  const [showSystemSettings, setShowSystemSettings] = useState(false);
+  const [systemSettingsTab, setSystemSettingsTab] = useState<"model" | "database" | "knowledge">("model");
+  const [modelProviderConfig, setModelProviderConfig] = useState<ModelProviderConfig>(
+    cloneModelProviderConfig()
+  );
+  const [modelHeadersInput, setModelHeadersInput] = useState("");
+  const [showRawModelHeaders, setShowRawModelHeaders] = useState(false);
   const [dbType, setDbType] = useState("mysql");
   const [dbConfig, setDbConfig] = useState({
     host: "localhost",
@@ -512,8 +520,39 @@ export function ThreePanelInterface() {
   // 雨途斩棘录功能状态
   const [hasAnalysisCompleted, setHasAnalysisCompleted] = useState(false); // 分析任务是否完成
   const [knowledgeBaseEnabled, setKnowledgeBaseEnabled] = useState(true); // 知识库是否启用
+  const [externalKnowledgeEnabled, setExternalKnowledgeEnabled] = useState(true);
   const [isRecordingKnowledge, setIsRecordingKnowledge] = useState(false); // 是否正在记录知识
   const [showKnowledgeSettings, setShowKnowledgeSettings] = useState(false); // 知识库设置弹窗
+  const [knowledgePreferredView, setKnowledgePreferredView] = useState<"html" | "table">("html");
+  const [showKnowledgeHints, setShowKnowledgeHints] = useState(true);
+  const [autoOpenYutuAfterAnalysis, setAutoOpenYutuAfterAnalysis] = useState(false);
+  const [knowledgeSettingsLoaded, setKnowledgeSettingsLoaded] = useState(false);
+  const [isLoadingKnowledgeConfig, setIsLoadingKnowledgeConfig] = useState(false);
+  const [isSavingKnowledgeConfig, setIsSavingKnowledgeConfig] = useState(false);
+  const [knowledgeTestTarget, setKnowledgeTestTarget] = useState<"onyx" | "dify" | "all" | null>(null);
+  const [knowledgeTestResults, setKnowledgeTestResults] = useState<Record<string, { status: string; message: string; tested_at: string | null }>>({});
+  const [onyxConfig, setOnyxConfig] = useState({
+    enabled: false,
+    base_url: "http://localhost:3000",
+    api_key: "",
+    search_path: "/api/chat/search",
+    has_api_key: false,
+  });
+  const [difyConfig, setDifyConfig] = useState({
+    enabled: false,
+    base_url: "http://localhost:5000",
+    api_key: "",
+    workflow_id: "",
+    has_api_key: false,
+  });
+
+  const applyModelPreset = (presetId: string) => {
+    const preset = cloneModelProviderConfig(
+      MODEL_PROVIDER_PRESETS.find((item) => item.id === presetId) || MODEL_PROVIDER_PRESETS[0]
+    );
+    setModelProviderConfig(preset);
+    setModelHeadersInput(stringifyModelHeaders(preset.headers));
+  };
 
   // 智能体介绍面板状态
   const [showAgentIntro, setShowAgentIntro] = useState(false);
@@ -1433,6 +1472,149 @@ ${analysisContent}
     }
   };
 
+  const applyKnowledgeSettings = (settings: any) => {
+    setKnowledgeBaseEnabled(Boolean(settings?.knowledge_base_enabled));
+    setExternalKnowledgeEnabled(Boolean(settings?.providers_enabled));
+    const internalPreferences = settings?.internal_preferences || {};
+    if (internalPreferences.preferred_view === "html" || internalPreferences.preferred_view === "table") {
+      setKnowledgePreferredView(internalPreferences.preferred_view);
+    }
+    setShowKnowledgeHints(Boolean(internalPreferences.show_hints));
+    setAutoOpenYutuAfterAnalysis(Boolean(internalPreferences.auto_open_yutu_after_analysis));
+
+    const nextOnyx = settings?.onyx || {};
+    setOnyxConfig({
+      enabled: Boolean(nextOnyx.enabled),
+      base_url: nextOnyx.base_url || "http://localhost:3000",
+      api_key: "",
+      search_path: nextOnyx.search_path || "/api/chat/search",
+      has_api_key: Boolean(nextOnyx.has_api_key),
+    });
+
+    const nextDify = settings?.dify || {};
+    setDifyConfig({
+      enabled: Boolean(nextDify.enabled),
+      base_url: nextDify.base_url || "http://localhost:5000",
+      api_key: "",
+      workflow_id: nextDify.workflow_id || "",
+      has_api_key: Boolean(nextDify.has_api_key),
+    });
+
+    setKnowledgeTestResults(settings?.test_status || {});
+    setKnowledgeSettingsLoaded(true);
+  };
+
+  const loadKnowledgeConfig = useCallback(async () => {
+    setIsLoadingKnowledgeConfig(true);
+    try {
+      const response = await fetch(API_URLS.KB_SETTINGS_GET);
+      const data = await response.json();
+      if (data.success) {
+        applyKnowledgeSettings(data.settings || {});
+      } else {
+        toast({ description: `知识库配置加载失败: ${data.message || "未知错误"}`, variant: "destructive" });
+      }
+    } catch (error) {
+      console.error("Load knowledge config error:", error);
+      toast({ description: "知识库配置加载失败", variant: "destructive" });
+    } finally {
+      setIsLoadingKnowledgeConfig(false);
+    }
+  }, []);
+
+  const buildKnowledgeSettingsPayload = () => ({
+    knowledge_base_enabled: knowledgeBaseEnabled,
+    providers_enabled: externalKnowledgeEnabled,
+    internal_preferences: {
+      preferred_view: knowledgePreferredView,
+      show_hints: showKnowledgeHints,
+      auto_open_yutu_after_analysis: autoOpenYutuAfterAnalysis,
+    },
+    onyx: {
+      enabled: onyxConfig.enabled,
+      base_url: onyxConfig.base_url,
+      api_key: onyxConfig.api_key || (onyxConfig.has_api_key ? "••••••••" : ""),
+      search_path: onyxConfig.search_path,
+    },
+    dify: {
+      enabled: difyConfig.enabled,
+      base_url: difyConfig.base_url,
+      api_key: difyConfig.api_key || (difyConfig.has_api_key ? "••••••••" : ""),
+      workflow_id: difyConfig.workflow_id,
+    },
+  });
+
+  const handleSaveKnowledgeConfig = async () => {
+    setIsSavingKnowledgeConfig(true);
+    try {
+      const response = await fetch(API_URLS.KB_SETTINGS_SAVE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildKnowledgeSettingsPayload()),
+      });
+      const data = await response.json();
+      if (data.success) {
+        applyKnowledgeSettings(data.settings || {});
+        if (typeof window !== "undefined") {
+          localStorage.setItem("knowledgeBaseEnabled", knowledgeBaseEnabled ? "true" : "false");
+          localStorage.setItem(
+            "knowledgeSettings",
+            JSON.stringify({
+              preferredView: knowledgePreferredView,
+              showKnowledgeHints,
+              autoOpenYutuAfterAnalysis,
+            })
+          );
+        }
+        toast({ description: data.message || "知识库配置已保存" });
+      } else {
+        toast({ description: `保存失败: ${data.message || "未知错误"}`, variant: "destructive" });
+      }
+    } catch (error) {
+      console.error("Save knowledge config error:", error);
+      toast({ description: "知识库配置保存失败", variant: "destructive" });
+    } finally {
+      setIsSavingKnowledgeConfig(false);
+    }
+  };
+
+  const handleTestKnowledgeProvider = async (provider: "onyx" | "dify" | "all") => {
+    setKnowledgeTestTarget(provider);
+    try {
+      const response = await fetch(API_URLS.KB_TEST, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, settings: buildKnowledgeSettingsPayload() }),
+      });
+      const data = await response.json();
+      if (Array.isArray(data.results)) {
+        const nextResults: Record<string, { status: string; message: string; tested_at: string | null }> = {};
+        data.results.forEach((item: any) => {
+          nextResults[item.provider] = {
+            status: item.status,
+            message: item.message,
+            tested_at: item.tested_at || null,
+          };
+        });
+        setKnowledgeTestResults((prev) => ({ ...prev, ...nextResults }));
+      }
+      if (data.settings) {
+        applyKnowledgeSettings(data.settings);
+      }
+      if (data.success) {
+        toast({ description: provider === "all" ? "知识服务测试通过" : `${provider === "onyx" ? "Onyx" : "Dify"} 测试通过` });
+      } else {
+        const errorMessage = data.message || data.results?.find((item: any) => !item.success)?.message || "测试失败";
+        toast({ description: errorMessage, variant: "destructive" });
+      }
+    } catch (error) {
+      console.error("Test knowledge provider error:", error);
+      toast({ description: "知识服务测试请求失败", variant: "destructive" });
+    } finally {
+      setKnowledgeTestTarget(null);
+    }
+  };
+
   const saveProject = async (confirmed = false) => {
     if (!isLoggedIn) {
       setShowAuthModal(true);
@@ -1939,11 +2121,52 @@ ${analysisContent}
 
   // 页面加载时：弹出登录对话框（仅在首次加载时）
   useEffect(() => {
-    // 加载知识库设置
     const savedKnowledgeEnabled = localStorage.getItem("knowledgeBaseEnabled");
     if (savedKnowledgeEnabled !== null) {
       setKnowledgeBaseEnabled(savedKnowledgeEnabled === "true");
     }
+
+    const savedKnowledgeSettings = localStorage.getItem("knowledgeSettings");
+    if (savedKnowledgeSettings) {
+      try {
+        const parsed = JSON.parse(savedKnowledgeSettings);
+        if (parsed.preferredView === "html" || parsed.preferredView === "table") {
+          setKnowledgePreferredView(parsed.preferredView);
+        }
+        if (typeof parsed.showKnowledgeHints === "boolean") {
+          setShowKnowledgeHints(parsed.showKnowledgeHints);
+        }
+        if (typeof parsed.autoOpenYutuAfterAnalysis === "boolean") {
+          setAutoOpenYutuAfterAnalysis(parsed.autoOpenYutuAfterAnalysis);
+        }
+      } catch {
+        // ignore invalid local knowledge settings
+      }
+    }
+
+    const savedModelProvider = localStorage.getItem("modelProviderConfig");
+    if (savedModelProvider) {
+      try {
+        const parsed = JSON.parse(savedModelProvider);
+        const nextConfig = cloneModelProviderConfig({
+          ...MODEL_PROVIDER_PRESETS[0],
+          ...parsed,
+          headers: { ...(parsed.headers || {}) },
+        });
+        setModelProviderConfig(nextConfig);
+        setModelHeadersInput(stringifyModelHeaders(nextConfig.headers));
+      } catch {
+        const fallback = cloneModelProviderConfig();
+        setModelProviderConfig(fallback);
+        setModelHeadersInput(stringifyModelHeaders(fallback.headers));
+      }
+    } else {
+      const fallback = cloneModelProviderConfig();
+      setModelProviderConfig(fallback);
+      setModelHeadersInput(stringifyModelHeaders(fallback.headers));
+    }
+
+    loadKnowledgeConfig();
 
     if (!isLoggedIn) {
       setShowAuthModal(true);
@@ -1951,7 +2174,18 @@ ${analysisContent}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 仅在挂载时执行一次
 
-  // 当登录弹窗显示时，刷新用户列表
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(
+      "knowledgeSettings",
+      JSON.stringify({
+        preferredView: knowledgePreferredView,
+        showKnowledgeHints,
+        autoOpenYutuAfterAnalysis,
+      })
+    );
+  }, [knowledgePreferredView, showKnowledgeHints, autoOpenYutuAfterAnalysis]);
+
   useEffect(() => {
     const loadRegisteredUsers = async () => {
       try {
@@ -4110,11 +4344,14 @@ ${analysisContent}
                     variant="ghost"
                     size="sm"
                     className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                    title="连接数据库并查询数据"
-                    onClick={() => setShowDatabaseDialog(true)}
+                    title="系统设置"
+                    onClick={() => {
+                      setSystemSettingsTab("model");
+                      setShowSystemSettings(true);
+                    }}
                   >
                     <Database className="h-3 w-3 mr-1" />
-                    连数据库
+                    系统设置
                   </Button>
                 </div>
                 <div
@@ -5891,6 +6128,476 @@ ${analysisContent}
                 "确认提交"
               )}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showSystemSettings} onOpenChange={setShowSystemSettings}>
+        <DialogContent className="max-w-[98vw] w-[1800px] h-[92vh] p-0 overflow-hidden flex flex-col">
+          <DialogHeader className="px-6 py-4 border-b">
+            <DialogTitle className="flex items-center gap-2">
+              <Database className="h-5 w-5 text-blue-600" />
+              系统设置
+            </DialogTitle>
+            <DialogDescription>
+              统一管理模型配置、数据库连接和知识库设置。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
+            <Tabs value={systemSettingsTab} onValueChange={(value) => setSystemSettingsTab(value as "model" | "database" | "knowledge")} className="h-full flex flex-col">
+              <TabsList className="grid w-full grid-cols-3 max-w-[520px]">
+                <TabsTrigger value="model">模型设置</TabsTrigger>
+                <TabsTrigger value="database">数据库设置</TabsTrigger>
+                <TabsTrigger value="knowledge">知识库设置</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="model" className="mt-4 flex-1 overflow-y-auto space-y-6">
+                <section className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="model-preset">预设模型</Label>
+                      <Select
+                        value={modelProviderConfig.id}
+                        onValueChange={applyModelPreset}
+                      >
+                        <SelectTrigger id="model-preset">
+                          <SelectValue placeholder="选择模型预设" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {MODEL_PROVIDER_PRESETS.map((preset) => (
+                            <SelectItem key={preset.id} value={preset.id}>
+                              {preset.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="model-provider-type">Provider 类型</Label>
+                      <Input
+                        id="model-provider-type"
+                        value={modelProviderConfig.providerType}
+                        onChange={(e) =>
+                          setModelProviderConfig((prev) => ({
+                            ...prev,
+                            providerType: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="model-label">显示名称</Label>
+                      <Input
+                        id="model-label"
+                        value={modelProviderConfig.label}
+                        onChange={(e) =>
+                          setModelProviderConfig((prev) => ({ ...prev, label: e.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="model-name">模型名</Label>
+                      <Input
+                        id="model-name"
+                        value={modelProviderConfig.model}
+                        onChange={(e) =>
+                          setModelProviderConfig((prev) => ({ ...prev, model: e.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className="col-span-2 space-y-1.5">
+                      <Label htmlFor="model-description">描述</Label>
+                      <Input
+                        id="model-description"
+                        value={modelProviderConfig.description}
+                        onChange={(e) =>
+                          setModelProviderConfig((prev) => ({ ...prev, description: e.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className="col-span-2 space-y-1.5">
+                      <Label htmlFor="model-base-url">Base URL</Label>
+                      <Input
+                        id="model-base-url"
+                        value={modelProviderConfig.baseUrl}
+                        onChange={(e) =>
+                          setModelProviderConfig((prev) => ({ ...prev, baseUrl: e.target.value }))
+                        }
+                      />
+                    </div>
+                    <div className="col-span-2 space-y-1.5">
+                      <Label htmlFor="model-api-key">API Key</Label>
+                      <Input
+                        id="model-api-key"
+                        type="password"
+                        value={modelProviderConfig.apiKey}
+                        onChange={(e) =>
+                          setModelProviderConfig((prev) => ({ ...prev, apiKey: e.target.value }))
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border p-4 space-y-3 bg-gray-50 dark:bg-gray-900/30">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-sm font-medium">自定义请求头</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          用于兼容自定义 OpenAI 接口、网关或厂商额外认证头。
+                        </div>
+                      </div>
+                      <Button variant="outline" size="sm" onClick={() => setShowRawModelHeaders((prev) => !prev)}>
+                        {showRawModelHeaders ? "收起" : "展开"}
+                      </Button>
+                    </div>
+                    {showRawModelHeaders ? (
+                      <Textarea
+                        value={modelHeadersInput}
+                        onChange={(e) => {
+                          const nextValue = e.target.value;
+                          setModelHeadersInput(nextValue);
+                          setModelProviderConfig((prev) => ({
+                            ...prev,
+                            headers: parseModelHeadersInput(nextValue),
+                          }));
+                        }}
+                        className="min-h-[120px] font-mono text-xs"
+                        placeholder={"Authorization: Bearer xxx\nX-Trace-Id: demo"}
+                      />
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-lg border p-4 space-y-2 bg-blue-50 dark:bg-blue-950/20 text-sm">
+                    <div className="font-medium text-blue-700 dark:text-blue-300">当前分析参数</div>
+                    <div className="text-xs text-blue-700 dark:text-blue-300">分析策略与温度仍保留在聊天输入区，不从那里移除，避免影响现有分析流程。</div>
+                    <div className="text-xs text-gray-600 dark:text-gray-300">当前分析策略：{analysisStrategy}</div>
+                    <div className="text-xs text-gray-600 dark:text-gray-300">当前温度：{temperature ?? "自动"}</div>
+                  </div>
+                </section>
+              </TabsContent>
+
+              <TabsContent value="database" className="mt-4 flex-1 overflow-y-auto">
+                <div className="h-full min-h-0 overflow-hidden rounded-lg border">
+                  <ResizablePanelGroup direction="horizontal" className="h-full min-h-[560px]">
+                    <ResizablePanel defaultSize={20} minSize={15} className="bg-gray-50 dark:bg-gray-900/20 border-r">
+                      <div className="p-4 space-y-4">
+                        <Label className="text-sm font-semibold">选择数据库类型</Label>
+                        <RadioGroup value={dbType} onValueChange={setDbType} className="space-y-2">
+                          {[
+                            { id: "mysql", label: "MySQL", icon: "🐬" },
+                            { id: "mssql", label: "SQL Server", icon: "🪟" },
+                            { id: "postgresql", label: "PostgreSQL", icon: "🐘" },
+                            { id: "oracle", label: "Oracle", icon: "🏢" },
+                            { id: "sqlite", label: "SQLite", icon: "📂" },
+                          ].map((item) => (
+                            <div key={item.id} className="flex items-center space-x-2 p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+                              <RadioGroupItem value={item.id} id={`system-${item.id}`} />
+                              <Label htmlFor={`system-${item.id}`} className="flex-1 cursor-pointer flex items-center gap-2">
+                                <span>{item.icon}</span>
+                                <span>{item.label}</span>
+                              </Label>
+                            </div>
+                          ))}
+                        </RadioGroup>
+                      </div>
+                    </ResizablePanel>
+
+                    <ResizableHandle withHandle />
+
+                    <ResizablePanel defaultSize={80} minSize={50}>
+                      <div className="h-full flex flex-col overflow-hidden">
+                        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                          <section className="space-y-3">
+                            <h3 className="text-sm font-semibold flex items-center gap-2">
+                              <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">1</span>
+                              配置连接信息
+                            </h3>
+                            <div className="grid grid-cols-2 gap-4">
+                              <div className="space-y-1.5">
+                                <Label htmlFor="system-db-host">主机名 / 地址</Label>
+                                <Input id="system-db-host" placeholder="localhost" value={dbConfig.host} onChange={(e) => setDbConfig({ ...dbConfig, host: e.target.value })} />
+                              </div>
+                              <div className="space-y-1.5">
+                                <Label htmlFor="system-db-port">端口</Label>
+                                <Input id="system-db-port" placeholder={dbType === "mysql" ? "3306" : dbType === "mssql" ? "1433" : "5432"} value={dbConfig.port} onChange={(e) => setDbConfig({ ...dbConfig, port: e.target.value })} />
+                              </div>
+                              <div className="space-y-1.5">
+                                <Label htmlFor="system-db-user">用户名</Label>
+                                <Input id="system-db-user" value={dbConfig.user} onChange={(e) => setDbConfig({ ...dbConfig, user: e.target.value })} />
+                              </div>
+                              <div className="space-y-1.5">
+                                <Label htmlFor="system-db-pass">密码</Label>
+                                <Input id="system-db-pass" type="password" value={dbConfig.password} onChange={(e) => setDbConfig({ ...dbConfig, password: e.target.value })} />
+                              </div>
+                              <div className="col-span-2 space-y-1.5">
+                                <Label htmlFor="system-db-name">{dbType === "sqlite" ? "SQLite 文件绝对路径" : "数据库名称"}</Label>
+                                <Input id="system-db-name" value={dbConfig.database} onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })} />
+                              </div>
+                            </div>
+                            <div className="flex gap-2 justify-end">
+                              <Button variant="outline" size="sm" onClick={handleTestConnection} disabled={isTestingDb}>
+                                {isTestingDb ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                                测试连接
+                              </Button>
+                            </div>
+                          </section>
+
+                          <section className={`space-y-3 transition-opacity ${!isDbTested ? "opacity-50 pointer-events-none" : ""}`}>
+                            <h3 className="text-sm font-semibold flex items-center gap-2">
+                              <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">2</span>
+                              智能生成查询语句
+                              {!isDbTested && <span className="text-xs font-normal text-amber-600 ml-2">(请先完成步骤 1 测试连接)</span>}
+                            </h3>
+                            <div className="space-y-2">
+                              <Textarea
+                                placeholder="描述您的查询需求，例如：统计过去三个月每个月的进出口额总计，并按月份排序"
+                                className="min-h-[80px] resize-none"
+                                value={dbPrompt}
+                                onChange={(e) => setDbPrompt(e.target.value)}
+                              />
+                              <div className="flex justify-end">
+                                <Button size="sm" className="bg-blue-600 hover:bg-blue-700" onClick={handleGenerateSql} disabled={isGeneratingSql || !dbPrompt.trim()}>
+                                  {isGeneratingSql ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : <Sparkles className="mr-2 h-3 w-3" />}
+                                  生成 SQL
+                                </Button>
+                              </div>
+                            </div>
+                          </section>
+
+                          <section className={`space-y-3 transition-opacity ${!isDbTested ? "opacity-50 pointer-events-none" : ""}`}>
+                            <h3 className="text-sm font-semibold flex items-center gap-2">
+                              <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">3</span>
+                              预览并执行 SQL
+                            </h3>
+                            <div className="space-y-2">
+                              <Textarea className="min-h-[120px] font-mono text-sm" value={dbGeneratedSql} onChange={(e) => setDbGeneratedSql(e.target.value)} spellCheck={false} />
+                              <div className="grid grid-cols-2 gap-4 items-end bg-gray-50 dark:bg-gray-900/40 p-4 rounded-lg border">
+                                <div className="space-y-1.5">
+                                  <Label htmlFor="system-dataset-name">保存为数据集名称</Label>
+                                  <Input id="system-dataset-name" value={dbDatasetName} onChange={(e) => setDbDatasetName(e.target.value)} />
+                                </div>
+                                <div className="space-y-1.5">
+                                  <Label>执行模式</Label>
+                                  <Select value={dbExecuteMode} onValueChange={(v: any) => setDbExecuteMode(v)}>
+                                    <SelectTrigger>
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="overwrite">覆盖现有文件</SelectItem>
+                                      <SelectItem value="append">追加到现有文件</SelectItem>
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                              </div>
+                            </div>
+                          </section>
+                        </div>
+
+                        <div className="px-6 py-4 border-t bg-gray-50 dark:bg-gray-950 flex justify-end gap-3">
+                          <Button
+                            className="bg-green-600 hover:bg-green-700 text-white min-w-[120px]"
+                            onClick={handleExecuteDbSql}
+                            disabled={isExecutingDbSql || !dbGeneratedSql.trim()}
+                          >
+                            {isExecutingDbSql ? (
+                              <>
+                                <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                                正在导入...
+                              </>
+                            ) : (
+                              <>
+                                <Play className="mr-2 h-4 w-4" />
+                                立即执行并导入
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                      </div>
+                    </ResizablePanel>
+                  </ResizablePanelGroup>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="knowledge" className="mt-4 flex-1 overflow-y-auto space-y-6">
+                <section className="space-y-6">
+                  <div className="rounded-lg border p-4 bg-white dark:bg-gray-950 space-y-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="text-sm font-medium">内部知识库（雨途斩棘录）</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">保留当前 Yutu 注入与右上角独立入口。这里负责正式配置与状态查看。</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {isLoadingKnowledgeConfig ? <RefreshCw className="h-4 w-4 animate-spin text-gray-400" /> : null}
+                        <Button variant="outline" size="sm" onClick={loadKnowledgeConfig} disabled={isLoadingKnowledgeConfig}>
+                          刷新配置
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="flex items-center justify-between p-4 border rounded-lg">
+                        <div>
+                          <div className="text-sm font-medium">启用内部知识库</div>
+                          <div className="text-xs text-gray-500 dark:text-gray-400">控制当前会话是否继续使用雨途知识注入。</div>
+                        </div>
+                        <Switch checked={knowledgeBaseEnabled} onCheckedChange={setKnowledgeBaseEnabled} />
+                      </div>
+                      <div className="rounded-lg border p-4 space-y-2 bg-gray-50 dark:bg-gray-900/30">
+                        <div className="text-sm font-medium">当前状态摘要</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">内部知识库：{knowledgeBaseEnabled ? "已启用" : "已停用"}</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">雨途记录数：{yutuRecords.length}</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">当前用户：{currentUser === "rainforgrain" ? "超级用户" : "普通用户"}</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">知识记录中：{isRecordingKnowledge ? "是" : "否"}</div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <Label>默认知识库视图</Label>
+                        <Select value={knowledgePreferredView} onValueChange={(value: "html" | "table") => setKnowledgePreferredView(value)}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="html">HTML 视图</SelectItem>
+                            <SelectItem value="table">表格视图</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="rounded-md border p-3 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-medium">显示知识提示</div>
+                            <div className="text-[11px] text-gray-500 dark:text-gray-400">仅影响前端提示文案显示。</div>
+                          </div>
+                          <Switch checked={showKnowledgeHints} onCheckedChange={setShowKnowledgeHints} />
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-medium">分析后提示打开雨途</div>
+                            <div className="text-[11px] text-gray-500 dark:text-gray-400">仅影响界面提示，不强制自动打开。</div>
+                          </div>
+                          <Switch checked={autoOpenYutuAfterAnalysis} onCheckedChange={setAutoOpenYutuAfterAnalysis} />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border p-4 bg-white dark:bg-gray-950 space-y-5">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="text-sm font-medium">外部知识服务（本地 Docker）</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">正式保存并测试本地 Docker 下的 Onyx 与 Dify Workflow 配置。</div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs text-gray-500 dark:text-gray-400">启用外部知识服务</span>
+                        <Switch checked={externalKnowledgeEnabled} onCheckedChange={setExternalKnowledgeEnabled} />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="rounded-lg border p-4 space-y-4">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <div className="text-sm font-medium">Onyx</div>
+                            <div className="text-[11px] text-gray-500 dark:text-gray-400">测试服务可达性 + 检索接口。</div>
+                          </div>
+                          <Switch checked={onyxConfig.enabled} onCheckedChange={(checked) => setOnyxConfig((prev) => ({ ...prev, enabled: checked }))} />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>Base URL</Label>
+                          <Input value={onyxConfig.base_url} onChange={(e) => setOnyxConfig((prev) => ({ ...prev, base_url: e.target.value }))} placeholder="http://localhost:3000" />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>API Key</Label>
+                          <Input
+                            type="password"
+                            value={onyxConfig.api_key}
+                            onChange={(e) => setOnyxConfig((prev) => ({ ...prev, api_key: e.target.value, has_api_key: prev.has_api_key || Boolean(e.target.value) }))}
+                            placeholder={onyxConfig.has_api_key ? "已保存，留空则保持不变" : "按需填写 API Key"}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>检索路径</Label>
+                          <Input value={onyxConfig.search_path} onChange={(e) => setOnyxConfig((prev) => ({ ...prev, search_path: e.target.value }))} placeholder="/api/chat/search" />
+                        </div>
+                        <div className="rounded-md border bg-gray-50 dark:bg-gray-900/30 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
+                          <div>状态：{knowledgeTestResults.onyx?.status || "never_tested"}</div>
+                          <div>结果：{knowledgeTestResults.onyx?.message || "尚未测试"}</div>
+                          <div>时间：{knowledgeTestResults.onyx?.tested_at || "-"}</div>
+                        </div>
+                        <div className="flex justify-end">
+                          <Button variant="outline" size="sm" onClick={() => handleTestKnowledgeProvider("onyx")} disabled={knowledgeTestTarget !== null || isSavingKnowledgeConfig}>
+                            {knowledgeTestTarget === "onyx" ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                            测试 Onyx
+                          </Button>
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border p-4 space-y-4">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <div className="text-sm font-medium">Dify Workflow</div>
+                            <div className="text-[11px] text-gray-500 dark:text-gray-400">测试 Workflow API、鉴权和 workflow_id。</div>
+                          </div>
+                          <Switch checked={difyConfig.enabled} onCheckedChange={(checked) => setDifyConfig((prev) => ({ ...prev, enabled: checked }))} />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>Base URL</Label>
+                          <Input value={difyConfig.base_url} onChange={(e) => setDifyConfig((prev) => ({ ...prev, base_url: e.target.value }))} placeholder="http://localhost:5000" />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>API Key</Label>
+                          <Input
+                            type="password"
+                            value={difyConfig.api_key}
+                            onChange={(e) => setDifyConfig((prev) => ({ ...prev, api_key: e.target.value, has_api_key: prev.has_api_key || Boolean(e.target.value) }))}
+                            placeholder={difyConfig.has_api_key ? "已保存，留空则保持不变" : "请输入 Dify API Key"}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>Workflow ID</Label>
+                          <Input value={difyConfig.workflow_id} onChange={(e) => setDifyConfig((prev) => ({ ...prev, workflow_id: e.target.value }))} placeholder="workflow-xxxx" />
+                        </div>
+                        <div className="rounded-md border bg-gray-50 dark:bg-gray-900/30 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
+                          <div>状态：{knowledgeTestResults.dify?.status || "never_tested"}</div>
+                          <div>结果：{knowledgeTestResults.dify?.message || "尚未测试"}</div>
+                          <div>时间：{knowledgeTestResults.dify?.tested_at || "-"}</div>
+                        </div>
+                        <div className="flex justify-end">
+                          <Button variant="outline" size="sm" onClick={() => handleTestKnowledgeProvider("dify")} disabled={knowledgeTestTarget !== null || isSavingKnowledgeConfig}>
+                            {knowledgeTestTarget === "dify" ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                            测试 Dify
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {showKnowledgeHints ? (
+                      <div className="rounded-lg border border-dashed p-4 text-xs text-gray-500 dark:text-gray-400">
+                        建议先保存，再分别测试 Onyx 与 Dify。保存成功不代表可用，只有测试通过才会更新最近测试状态。
+                      </div>
+                    ) : null}
+                  </div>
+                </section>
+              </TabsContent>
+            </Tabs>
+          </div>
+          <DialogFooter className="px-6 py-4 border-t justify-between">
+            <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+              {knowledgeSettingsLoaded ? "配置已加载" : "尚未加载配置"}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={() => handleTestKnowledgeProvider("all")} disabled={knowledgeTestTarget !== null || isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
+                {knowledgeTestTarget === "all" ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
+                测试全部
+              </Button>
+              <Button onClick={handleSaveKnowledgeConfig} disabled={isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
+                {isSavingKnowledgeConfig ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
+                保存配置
+              </Button>
+              <Button variant="outline" onClick={() => setShowSystemSettings(false)}>关闭</Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

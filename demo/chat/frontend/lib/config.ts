@@ -1,4 +1,203 @@
 // API配置
+export type ModelProviderType =
+  | "deepanalyze"
+  | "openai"
+  | "anthropic"
+  | "google"
+  | "deepseek"
+  | "qwen"
+  | "zhipu"
+  | "moonshot"
+  | "doubao"
+  | "baidu"
+  | "siliconflow"
+  | "ollama"
+  | "openai_compatible"
+  | string;
+
+export interface ModelProviderConfig {
+  id: string;
+  providerType: ModelProviderType;
+  label: string;
+  description: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  headers?: Record<string, string>;
+  isLocal?: boolean;
+  supportsOpenAICompatible?: boolean;
+}
+
+export const MODEL_PROVIDER_PRESETS: ModelProviderConfig[] = [
+  {
+    id: "deepanalyze-default",
+    providerType: "deepanalyze",
+    label: "DeepAnalyze 默认",
+    description: "项目默认本地 vLLM 服务",
+    baseUrl: process.env.NEXT_PUBLIC_AI_API_URL || "http://localhost:8000/v1",
+    model: "DeepAnalyze-8B",
+    apiKey: "",
+    isLocal: true,
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "ollama-qwen",
+    providerType: "ollama",
+    label: "Ollama / Qwen",
+    description: "本地 Ollama OpenAI 兼容接口",
+    baseUrl: "http://localhost:11434/v1",
+    model: "qwen2.5:14b",
+    apiKey: "ollama",
+    isLocal: true,
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "openai-gpt5",
+    providerType: "openai",
+    label: "OpenAI",
+    description: "OpenAI 官方兼容接口",
+    baseUrl: "https://api.openai.com/v1",
+    model: "gpt-5",
+    apiKey: "",
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "anthropic-sonnet",
+    providerType: "anthropic",
+    label: "Anthropic Claude",
+    description: "通过兼容网关接入 Claude",
+    baseUrl: "https://api.anthropic.com/v1",
+    model: "claude-sonnet-4-5",
+    apiKey: "",
+    supportsOpenAICompatible: false,
+  },
+  {
+    id: "google-gemini",
+    providerType: "google",
+    label: "Google Gemini",
+    description: "Gemini / Vertex 风格模型入口",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    model: "gemini-2.5-pro",
+    apiKey: "",
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "deepseek-chat",
+    providerType: "deepseek",
+    label: "DeepSeek",
+    description: "DeepSeek 官方 OpenAI 兼容接口",
+    baseUrl: "https://api.deepseek.com/v1",
+    model: "deepseek-chat",
+    apiKey: "",
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "qwen-max",
+    providerType: "qwen",
+    label: "阿里百炼 / Qwen",
+    description: "DashScope OpenAI 兼容接口",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model: "qwen-max",
+    apiKey: "",
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "zhipu-glm",
+    providerType: "zhipu",
+    label: "智谱 GLM",
+    description: "智谱 OpenAI 兼容接口",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-4-plus",
+    apiKey: "",
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "moonshot-kimi",
+    providerType: "moonshot",
+    label: "月之暗面 Kimi",
+    description: "Moonshot OpenAI 兼容接口",
+    baseUrl: "https://api.moonshot.cn/v1",
+    model: "moonshot-v1-128k",
+    apiKey: "",
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "doubao-ark",
+    providerType: "doubao",
+    label: "字节豆包 / Ark",
+    description: "火山方舟兼容接口",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    model: "doubao-1.5-pro-32k-250115",
+    apiKey: "",
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "baidu-ernie",
+    providerType: "baidu",
+    label: "百度千帆",
+    description: "千帆兼容接口",
+    baseUrl: "https://qianfan.baidubce.com/v2",
+    model: "ernie-4.0-turbo-8k",
+    apiKey: "",
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "siliconflow",
+    providerType: "siliconflow",
+    label: "SiliconFlow",
+    description: "第三方多模型聚合平台",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    model: "deepseek-ai/DeepSeek-V3",
+    apiKey: "",
+    supportsOpenAICompatible: true,
+  },
+  {
+    id: "custom-openai-compatible",
+    providerType: "openai_compatible",
+    label: "自定义兼容接口",
+    description: "适配自托管 vLLM / LM Studio / 任意兼容网关",
+    baseUrl: "http://localhost:8000/v1",
+    model: "your-model-name",
+    apiKey: "",
+    supportsOpenAICompatible: true,
+  },
+];
+
+export const cloneModelProviderConfig = (
+  config: ModelProviderConfig = MODEL_PROVIDER_PRESETS[0]
+): ModelProviderConfig => ({
+  ...config,
+  headers: { ...(config.headers || {}) },
+});
+
+export const stringifyModelHeaders = (headers: Record<string, string> = {}) =>
+  Object.entries(headers)
+    .filter(([key, value]) => key.trim() && String(value).trim())
+    .map(([key, value]) => `${key}: ${value}`)
+    .join("\n");
+
+export const parseModelHeadersInput = (value: string): Record<string, string> => {
+  const headers: Record<string, string> = {};
+  value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .forEach((line) => {
+      const separatorIndex = line.indexOf(":");
+      if (separatorIndex <= 0) return;
+      const key = line.slice(0, separatorIndex).trim();
+      const headerValue = line.slice(separatorIndex + 1).trim();
+      if (!key || !headerValue) return;
+      headers[key] = headerValue;
+    });
+  return headers;
+};
+
+export const getModelProviderPreset = (id: string) => {
+  const preset = MODEL_PROVIDER_PRESETS.find((item) => item.id === id);
+  return cloneModelProviderConfig(preset || MODEL_PROVIDER_PRESETS[0]);
+};
+
 export const API_CONFIG = {
   // 后端API基础地址
   BACKEND_BASE_URL:
@@ -60,13 +259,15 @@ export const API_CONFIG = {
     YUTU_DELETE: "/api/yutu/delete",
     YUTU_SEARCH: "/api/yutu/search",
     YUTU_INIT: "/api/yutu/init",
-    YUTU_ORGANIZE: "/api/yutu/organize",
-    YUTU_ORGANIZE_CONFIRM: "/api/yutu/organize/confirm",
-    YUTU_ORGANIZE_CANCEL: "/api/yutu/organize/cancel",
     YUTU_BACKUP_CREATE: "/api/yutu/backup/create",
     YUTU_BACKUP_LIST: "/api/yutu/backup/list",
     YUTU_BACKUP_RESTORE: "/api/yutu/backup/restore",
     YUTU_BACKUP_DELETE: "/api/yutu/backup/delete",
+
+    // 知识库
+    KB_SETTINGS_GET: "/api/kb/settings",
+    KB_SETTINGS_SAVE: "/api/kb/settings",
+    KB_TEST: "/api/kb/test",
 
     // 数据库连接
     DB_TEST: "/api/db/test",
@@ -105,13 +306,15 @@ export const API_URLS = {
   YUTU_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_DELETE),
   YUTU_SEARCH: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_SEARCH),
   YUTU_INIT: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_INIT),
-  YUTU_ORGANIZE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ORGANIZE),
-  YUTU_ORGANIZE_CONFIRM: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ORGANIZE_CONFIRM),
-  YUTU_ORGANIZE_CANCEL: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ORGANIZE_CANCEL),
   YUTU_BACKUP_CREATE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_CREATE),
   YUTU_BACKUP_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_LIST),
   YUTU_BACKUP_RESTORE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_RESTORE),
   YUTU_BACKUP_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_DELETE),
+
+  // 知识库
+  KB_SETTINGS_GET: buildApiUrl(API_CONFIG.ENDPOINTS.KB_SETTINGS_GET),
+  KB_SETTINGS_SAVE: buildApiUrl(API_CONFIG.ENDPOINTS.KB_SETTINGS_SAVE),
+  KB_TEST: buildApiUrl(API_CONFIG.ENDPOINTS.KB_TEST),
 
   // 数据库连接
   DB_TEST: buildApiUrl(API_CONFIG.ENDPOINTS.DB_TEST),
