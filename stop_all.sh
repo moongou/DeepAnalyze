@@ -39,6 +39,9 @@ echo "Performing safety sweep..."
 # MLX model server
 pkill -f "mlx_lm.server" 2>/dev/null || true
 
+# vLLM model server (GPU mode)
+pkill -f "vllm" 2>/dev/null || true
+
 # Backend (FastAPI/uvicorn)
 pkill -f "backend.py" 2>/dev/null || true
 

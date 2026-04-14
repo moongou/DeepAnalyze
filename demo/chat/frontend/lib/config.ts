@@ -273,6 +273,10 @@ export const API_CONFIG = {
     DB_TEST: "/api/db/test",
     DB_GENERATE_SQL: "/api/db/generate-sql",
     DB_EXECUTE: "/api/db/execute",
+
+    // 系统设置
+    SETTINGS_HARDWARE: "/api/settings/hardware",
+    SETTINGS_DEFAULTS: "/api/settings/defaults",
   },
 };
 
@@ -320,6 +324,10 @@ export const API_URLS = {
   DB_TEST: buildApiUrl(API_CONFIG.ENDPOINTS.DB_TEST),
   DB_GENERATE_SQL: buildApiUrl(API_CONFIG.ENDPOINTS.DB_GENERATE_SQL),
   DB_EXECUTE: buildApiUrl(API_CONFIG.ENDPOINTS.DB_EXECUTE),
+
+  // 系统设置
+  SETTINGS_HARDWARE: buildApiUrl(API_CONFIG.ENDPOINTS.SETTINGS_HARDWARE),
+  SETTINGS_DEFAULTS: buildApiUrl(API_CONFIG.ENDPOINTS.SETTINGS_DEFAULTS),
 
   // 认证
   AUTH_REGISTER: buildApiUrl(API_CONFIG.ENDPOINTS.AUTH_REGISTER),
