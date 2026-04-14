@@ -2703,7 +2703,16 @@ def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
 
 def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
-    """使用 python-pptx 生成 PPTX 报告"""
+    """使用 python-pptx 生成 PPTX 报告
+
+    Args:
+        md_text: Markdown 格式的分析报告文本
+        base_name: 输出文件的基础名称（不含扩展名）
+        workspace_dir: 目标工作目录路径
+
+    Returns:
+        生成的 PPTX 文件路径，失败时返回 None
+    """
     try:
         from pptx import Presentation
         from pptx.util import Inches, Pt
@@ -2711,8 +2720,11 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
         from pptx.enum.text import PP_ALIGN
         import re as _re
 
-        Path(workspace_dir).mkdir(parents=True, exist_ok=True)
-        pptx_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pptx")
+        # Sanitize base_name to prevent path traversal
+        safe_base_name = Path(base_name).name.replace("..", "")
+        ws_path = Path(workspace_dir).resolve()
+        ws_path.mkdir(parents=True, exist_ok=True)
+        pptx_path = uniquify_path(ws_path / f"{safe_base_name}.pptx")
 
         prs = Presentation()
         prs.slide_width = Inches(13.333)
@@ -2766,9 +2778,9 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
                 clean_body = _re.sub(r'!\[.*?\]\(.*?\)', '[图表]', clean_body)
                 clean_body = _re.sub(r'\[.*?\]\(.*?\)', '', clean_body)
 
-                max_chars = 1500
-                if len(clean_body) > max_chars:
-                    clean_body = clean_body[:max_chars] + "..."
+                MAX_PPTX_SLIDE_CHARS = 1500
+                if len(clean_body) > MAX_PPTX_SLIDE_CHARS:
+                    clean_body = clean_body[:MAX_PPTX_SLIDE_CHARS] + "..."
 
                 p2 = tf2.paragraphs[0]
                 p2.text = clean_body
