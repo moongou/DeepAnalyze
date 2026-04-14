@@ -6133,7 +6133,7 @@ ${analysisContent}
       </Dialog>
 
       <Dialog open={showSystemSettings} onOpenChange={setShowSystemSettings}>
-        <DialogContent className="max-w-[98vw] w-[1800px] h-[92vh] p-0 overflow-hidden flex flex-col">
+        <DialogContent className="dialog-page-like max-w-none w-auto h-auto p-0 overflow-hidden flex flex-col">
           <DialogHeader className="px-6 py-4 border-b">
             <DialogTitle className="flex items-center gap-2">
               <Database className="h-5 w-5 text-blue-600" />

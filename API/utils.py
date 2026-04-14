@@ -3,6 +3,7 @@ Utility functions for DeepAnalyze API Server
 Contains helper functions for file operations, workspace management, and more
 """
 
+import hashlib
 import os
 import json
 import re
@@ -21,13 +22,481 @@ from typing import List, Optional, Dict, Any, Tuple
 from functools import partial
 
 from config import WORKSPACE_BASE_DIR, HTTP_SERVER_PORT
+from shared_dependency_recovery import (
+    build_dependency_install_block,
+    extract_missing_python_packages,
+    install_missing_python_packages,
+)
+
+try:
+    from demo.chat.yutu_zhanyilu import add_error_solution, search_errors, add_env_todo
+except Exception:
+    add_error_solution = None
+    search_errors = None
+    add_env_todo = None
 
 
-def get_thread_workspace(thread_id: str) -> str:
-    """Get workspace directory for a thread"""
-    workspace_dir = os.path.join(WORKSPACE_BASE_DIR, thread_id)
-    os.makedirs(workspace_dir, exist_ok=True)
-    return workspace_dir
+SESSION_YUTU_FAILURES: Dict[str, Dict[str, Any]] = {}
+KNOWN_ANALYSIS_PITFALL_HINTS = [
+    "- pandas DataFrame.pivot 必须使用关键字参数：pivot(index=..., columns=..., values=...)；不要写成位置参数。",
+    "- seaborn heatmap 在 annot=True 时，fmt='d' 只能用于整数计数矩阵；如果数据是 float、比例、均值或聚合结果，请改用 fmt='.2f' 或其他浮点格式。",
+    "- pandas DataFrame.to_markdown() 依赖 tabulate；如果需要 markdown 表格输出，先确认环境里可导入 tabulate。",
+]
+
+
+def _hash_text(content: str) -> str:
+    return hashlib.sha256((content or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _build_python_syntax_error_output(code_str: str, exc: SyntaxError) -> str:
+    line_no = getattr(exc, "lineno", None)
+    offset = getattr(exc, "offset", None)
+    text = getattr(exc, "text", "") or ""
+    msg = getattr(exc, "msg", str(exc)) or "SyntaxError"
+    lowered = msg.lower()
+
+    if "unterminated triple-quoted" in lowered:
+        issue = "检测到未闭合的三引号字符串"
+    elif "f-string" in lowered and "unterminated" in lowered:
+        issue = "检测到未闭合的 f-string"
+    elif "unterminated string literal" in lowered:
+        issue = "检测到未闭合的字符串字面量"
+    elif "invalid syntax" in lowered and ('\"\"\"' in code_str or "'''" in code_str):
+        issue = "检测到可能由三引号或引号嵌套导致的语法错误"
+    else:
+        issue = "检测到 Python 语法错误"
+
+    pointer = ""
+    if offset and text:
+        pointer = " " * max(offset - 1, 0) + "^"
+
+    detail_lines = [
+        "[SyntaxError]: generated Python failed validation before execution.",
+        issue,
+        f"Message: {msg}",
+    ]
+    if line_no is not None:
+        detail_lines.append(f"Line: {line_no}")
+    if offset is not None:
+        detail_lines.append(f"Column: {offset}")
+    if text:
+        detail_lines.append("Code:")
+        detail_lines.append(text.rstrip("\n"))
+    if pointer:
+        detail_lines.append(pointer)
+    detail_lines.append("Execution did not start. Fix the Python code before retrying.")
+    return "\n".join(detail_lines)
+
+
+def preflight_python_code(code_str: str) -> Optional[str]:
+    try:
+        compile(code_str, "<generated-python>", "exec")
+        return None
+    except SyntaxError as exc:
+        return _build_python_syntax_error_output(code_str, exc)
+
+
+def prepare_python_execution(code_str: str) -> Tuple[str, Optional[str]]:
+    validation_error = preflight_python_code(code_str)
+    if validation_error:
+        return code_str, validation_error
+    return code_str, None
+
+
+def prepare_r_execution_environment(child_env: Dict[str, str], workspace_dir: str) -> Dict[str, Any]:
+    runtime = {
+        "r_home": None,
+        "rscript_available": False,
+        "rpy2_available": False,
+        "mode": "python_only",
+        "notes": [],
+    }
+
+    try:
+        r_home = subprocess.check_output(["R", "RHOME"], text=True).strip()
+        if r_home and os.path.exists(r_home):
+            runtime["r_home"] = r_home
+            child_env.setdefault("R_HOME", r_home)
+            r_lib = os.path.join(r_home, "lib")
+            brew_lib = "/opt/homebrew/lib"
+            lib_paths = [r_lib]
+            if os.path.exists(brew_lib):
+                lib_paths.append(brew_lib)
+
+            fake_lib_dir = os.path.abspath(os.path.join(workspace_dir, ".lib"))
+            os.makedirs(fake_lib_dir, exist_ok=True)
+            fake_blas = os.path.join(fake_lib_dir, "libRblas.dylib")
+            target_r_lib = os.path.join(r_lib, "libR.dylib")
+            if not os.path.exists(fake_blas) and os.path.exists(target_r_lib):
+                try:
+                    os.symlink(target_r_lib, fake_blas)
+                except Exception:
+                    pass
+            if os.path.exists(fake_lib_dir):
+                lib_paths.insert(0, fake_lib_dir)
+
+            path_str = ":".join([p for p in lib_paths if p])
+            if path_str:
+                if child_env.get("DYLD_LIBRARY_PATH"):
+                    child_env["DYLD_LIBRARY_PATH"] = f"{path_str}:{child_env['DYLD_LIBRARY_PATH']}"
+                else:
+                    child_env["DYLD_LIBRARY_PATH"] = path_str
+                child_env["LD_LIBRARY_PATH"] = child_env["DYLD_LIBRARY_PATH"]
+                child_env["DYLD_FALLBACK_LIBRARY_PATH"] = child_env["DYLD_LIBRARY_PATH"]
+    except Exception as exc:
+        runtime["notes"].append(f"R_HOME unavailable: {exc}")
+        fallback_home = "/opt/homebrew/opt/r/lib/R"
+        if os.path.exists(fallback_home):
+            runtime["r_home"] = fallback_home
+            child_env.setdefault("R_HOME", fallback_home)
+            r_lib = os.path.join(fallback_home, "lib")
+            child_env["DYLD_LIBRARY_PATH"] = f"{r_lib}:/opt/homebrew/lib"
+            child_env["LD_LIBRARY_PATH"] = child_env["DYLD_LIBRARY_PATH"]
+            child_env["DYLD_FALLBACK_LIBRARY_PATH"] = child_env["DYLD_LIBRARY_PATH"]
+
+    try:
+        subprocess.run(
+            ["Rscript", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=child_env,
+        )
+        runtime["rscript_available"] = True
+    except Exception as exc:
+        runtime["notes"].append(f"Rscript unavailable: {exc}")
+
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", "import rpy2.robjects"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            env=child_env,
+        )
+        runtime["rpy2_available"] = probe.returncode == 0
+        if probe.returncode != 0 and probe.stderr:
+            runtime["notes"].append(f"rpy2 unavailable: {probe.stderr.strip()}")
+    except Exception as exc:
+        runtime["notes"].append(f"rpy2 probe failed: {exc}")
+
+    if runtime["rpy2_available"]:
+        runtime["mode"] = "python_rpy2"
+    elif runtime["rscript_available"]:
+        runtime["mode"] = "python_rscript"
+
+    return runtime
+
+
+def build_analysis_artifact_feedback(workspace_dir: str) -> str:
+    workspace_path = Path(workspace_dir)
+    manifest_path = workspace_path / ".analysis_manifest.json"
+    generated_dir = workspace_path / "generated"
+    summary_lines: List[str] = []
+
+    manifest = None
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = None
+    if isinstance(manifest, dict):
+        summary_lines.append("[Analysis Manifest]")
+        plan = manifest.get("plan") or []
+        if isinstance(plan, list) and plan:
+            summary_lines.append("Planned subtasks: " + ", ".join(str(item) for item in plan[:8]))
+        completed = manifest.get("completed") or []
+        if isinstance(completed, list) and completed:
+            summary_lines.append("Completed subtasks: " + ", ".join(str(item) for item in completed[:8]))
+        artifacts = manifest.get("artifacts") or {}
+        if isinstance(artifacts, dict) and artifacts:
+            artifact_pairs = [f"{key}: {value}" for key, value in list(artifacts.items())[:8]]
+            summary_lines.append("Recorded artifacts: " + "; ".join(artifact_pairs))
+
+    if generated_dir.exists():
+        generated_files = sorted(
+            [p.name for p in generated_dir.iterdir() if p.is_file()],
+            key=str.lower,
+        )
+        if generated_files:
+            summary_lines.append("[Generated Files]")
+            summary_lines.extend(f"- {name}" for name in generated_files[:12])
+
+    if not summary_lines:
+        return ""
+    return "\n" + "\n".join(summary_lines)
+
+
+def normalize_analysis_error(error_type: str, error_message: str) -> Tuple[str, str, Optional[str], Optional[str]]:
+    normalized_type = error_type or "Unknown"
+    normalized_message = (error_message or "").strip()
+    solution = None
+    solution_code = None
+    lowered = normalized_message.lower()
+
+    if "dataframe.pivot() takes 1 positional argument but 4 were given" in lowered:
+        normalized_type = "PandasPivotUsageError"
+        normalized_message = "DataFrame.pivot() must use keyword arguments: pivot(index=..., columns=..., values=...)."
+        solution = (
+            "调用 pandas DataFrame.pivot 时不要使用位置参数。"
+            "请改为显式关键字参数写法：pivot(index=..., columns=..., values=...)。"
+        )
+        solution_code = "heatmap_data = dist_df.pivot(index='区域', columns='hour', values='车辆数')"
+    elif "unknown format code 'd' for object of type 'float'" in lowered:
+        normalized_type = "SeabornHeatmapFormatError"
+        normalized_message = "sns.heatmap with annot=True cannot use fmt='d' on float-valued data."
+        solution = (
+            "当热力图数据是 float、比例、均值或其他非整数聚合结果时，不要使用 fmt='d'。"
+            "仅在整数计数矩阵上使用 fmt='d'；否则改用 fmt='.2f' 等浮点格式，或先确认数据确实应转换为整数。"
+        )
+        solution_code = "sns.heatmap(heatmap_data, annot=True, fmt='.2f', cmap='YlOrRd')"
+
+    return normalized_type, normalized_message, solution, solution_code
+
+
+def detect_execution_error(exe_output: str) -> dict:
+    """
+    检测代码执行输出中的错误，但不直接写入雨途斩棘录。
+    """
+    result = {
+        "has_error": False,
+        "error_type": "Unknown",
+        "error_message": "",
+        "similar_found": False,
+        "solution": None,
+        "solution_code": None,
+        "record_category": "runtime_code_generation",
+    }
+
+    if not exe_output or not exe_output.strip():
+        return result
+
+    error_patterns = [
+        (r"ModuleNotFoundError|ImportError:\s*(.+?)(?:\n|$)", "ImportError"),
+        (r"ValueError:\s*(.+?)(?:\n|$)", "ValueError"),
+        (r"TypeError:\s*(.+?)(?:\n|$)", "TypeError"),
+        (r"RuntimeError:\s*(.+?)(?:\n|$)", "RuntimeError"),
+        (r"KeyError:\s*['\"](.+?)['\"]", "KeyError"),
+        (r"FileNotFoundError:\s*(.+?)(?:\n|$)", "FileNotFoundError"),
+        (r"TimeoutError:\s*(.+?)(?:\n|$)", "TimeoutError"),
+        (r"SyntaxError:\s*(.+?)(?:\n|$)", "SyntaxError"),
+        (r"AttributeError:\s*(.+?)(?:\n|$)", "AttributeError"),
+        (r"IndexError:\s*(.+?)(?:\n|$)", "IndexError"),
+        (r"MemoryError:\s*(.+?)(?:\n|$)", "MemoryError"),
+        (r"ZeroDivisionError:\s*(.+?)(?:\n|$)", "ZeroDivisionError"),
+        (r"(?:Error|Exception|Error:)\s*(.+?)(?:\n|$)", "RuntimeError"),
+        (r"Traceback \(most recent call last\):(.+?)(?:\n\n|\Z)", "PythonError"),
+    ]
+
+    error_type = "Unknown"
+    error_message = ""
+    for pattern, err_type in error_patterns:
+        match = re.search(pattern, exe_output, re.IGNORECASE | re.DOTALL)
+        if match:
+            error_type = err_type
+            error_msg = match.group(1) if match.lastindex else match.group(0)
+            error_message = (error_msg.strip()[:500] if error_msg else exe_output[:500])
+            break
+
+    has_error = (
+        error_type != "Unknown"
+        or ("Error" in exe_output and "Success" not in exe_output)
+        or ("error" in exe_output.lower() and "0 error" not in exe_output.lower())
+    ) and not (
+        exe_output.strip().endswith("OK")
+        or "Successfully" in exe_output
+        or "successfully" in exe_output
+    )
+
+    if "Error" in exe_output and "[Error]:" in exe_output:
+        has_error = True
+    elif error_type == "Unknown" and "error" in exe_output.lower():
+        error_type = "RuntimeError"
+        error_message = exe_output[:500]
+
+    if not has_error:
+        return result
+
+    error_type, error_message, solution, solution_code = normalize_analysis_error(error_type, error_message)
+
+    result["has_error"] = True
+    result["error_type"] = error_type
+    result["error_message"] = error_message
+    result["solution"] = solution
+    result["solution_code"] = solution_code
+    if error_type in {"ImportError", "FontNotFoundError", "UnicodeError", "FileNotFoundError"} or "tabulate" in error_message.lower():
+        result["record_category"] = "base_environment_fixable"
+
+    if search_errors is None:
+        return result
+
+    try:
+        keywords = [error_type]
+        if normalized_keywords := re.findall(r"[A-Za-z_]+", error_message):
+            keywords.extend(normalized_keywords[:4])
+        similar_errors = search_errors(keywords=keywords, page_size=3)
+        if similar_errors and similar_errors.get("items"):
+            result["similar_found"] = True
+    except Exception:
+        pass
+
+    return result
+
+
+def remember_failed_execution(session_id: str, error_info: dict, code_str: str, workspace_dir: str, exe_output: str) -> None:
+    if not session_id or not error_info.get("has_error"):
+        return
+    SESSION_YUTU_FAILURES[session_id] = {
+        "error_type": error_info.get("error_type") or "Unknown",
+        "error_message": error_info.get("error_message") or "",
+        "error_context": f"工作区: {workspace_dir}\n代码长度: {len(code_str)} 字符",
+        "code_str": code_str,
+        "code_hash": _hash_text(code_str),
+        "exe_output": (exe_output or "")[:4000],
+        "solution": error_info.get("solution"),
+        "solution_code": error_info.get("solution_code"),
+        "record_category": error_info.get("record_category") or "runtime_code_generation",
+    }
+
+
+def record_verified_yutu_solution(session_id: str, code_str: str, workspace_dir: str, exe_output: str) -> dict:
+    pending = SESSION_YUTU_FAILURES.get(session_id)
+    if not pending:
+        return {"recorded": False}
+    if add_error_solution is None:
+        return {"recorded": False}
+
+    error_type = pending.get("error_type") or "Unknown"
+    error_message = pending.get("error_message") or ""
+    error_context = pending.get("error_context") or f"工作区: {workspace_dir}"
+    record_category = pending.get("record_category") or "runtime_code_generation"
+    success_summary = (exe_output or "").strip()
+    success_summary = success_summary[:1500] if success_summary else "执行成功，未返回额外输出。"
+    if record_category == "base_environment_fixable":
+        if add_env_todo is None:
+            return {"recorded": False}
+        recorded = add_env_todo(
+            title=f"补齐基础环境能力：{error_type}",
+            description=(
+                f"检测到可通过基础环境完善解决的问题。\n错误消息：{error_message}\n"
+                f"建议系统管理员确认是否应将相关依赖/字体/工具预装到基础环境中。"
+            ),
+            source_error_hash=None,
+            related_error_type=error_type,
+            priority="medium",
+            created_by="system_verified",
+        )
+        if recorded:
+            SESSION_YUTU_FAILURES.pop(session_id, None)
+        return {
+            "recorded": recorded,
+            "error_type": error_type,
+            "error_message": error_message,
+            "record_category": record_category,
+        }
+    solution = pending.get("solution") or (
+        "同一会话中再次执行后已真实跑通。后续成功代码已验证可以解决该问题。"
+        f"\n\n成功输出摘要：\n{success_summary}"
+    )
+    resolution_evidence = (
+        f"失败代码哈希: {pending.get('code_hash', '')}\n"
+        f"成功代码哈希: {_hash_text(code_str)}\n\n"
+        f"最近一次失败输出：\n{pending.get('exe_output', '')[:1500]}\n\n"
+        f"成功输出：\n{success_summary}"
+    )
+
+    recorded = add_error_solution(
+        error_type=error_type,
+        error_message=error_message,
+        error_context=error_context,
+        solution=solution,
+        solution_code=code_str,
+        confidence=0.9,
+        created_by="system_verified",
+        verification_status="verified",
+        verified_count=1,
+        failure_count=1,
+        resolution_evidence=resolution_evidence,
+        record_category=record_category,
+    )
+    if recorded:
+        SESSION_YUTU_FAILURES.pop(session_id, None)
+    return {
+        "recorded": recorded,
+        "error_type": error_type,
+        "error_message": error_message,
+    }
+
+
+def build_execution_guidance(error_info: Dict[str, Any]) -> str:
+    if not error_info.get("has_error"):
+        return ""
+    solution = (error_info.get("solution") or "").strip()
+    solution_code = (error_info.get("solution_code") or "").strip()
+    if not solution and not solution_code:
+        return ""
+
+    lines = ["[Known fix guidance]"]
+    if solution:
+        lines.append(solution)
+    if solution_code:
+        lines.append(f"参考写法: {solution_code}")
+    return "\n" + "\n".join(lines)
+
+
+def build_yutu_pitfall_context(limit: int = 5) -> str:
+    if search_errors is None:
+        return ""
+    try:
+        results = search_errors(keywords=["pivot", "heatmap", "seaborn", "pandas", "format", "float"], page_size=limit)
+    except Exception:
+        return ""
+
+    items = (results or {}).get("items") or []
+    if not items:
+        return ""
+
+    lines = ["# Historical pitfalls to avoid"]
+    for item in items[:limit]:
+        error_type = str(item.get("error_type") or "").strip()
+        error_message = str(item.get("error_message") or "").strip()
+        solution = str(item.get("solution") or "").strip()
+        if error_type:
+            lines.append(f"- {error_type}: {error_message}")
+        elif error_message:
+            lines.append(f"- {error_message}")
+        if solution:
+            lines.append(f"  Fix: {solution[:220]}")
+    return "\n" + "\n".join(lines)
+
+
+def inject_analysis_runtime_hints(message_content: str, workspace_dir: str) -> str:
+    base = str(message_content or "").rstrip()
+    hints = [
+        "# Analysis Workflow",
+        "- 先把大任务拆成较小子任务，再逐个完成。",
+        "- 每个子任务成功后，都应把可复用结果保存为命名明确的文件。",
+        "- 继续分析前，先检查已有中间文件和 generated/ 目录，优先复用，避免重复生成相同图表和整段报告。",
+        "- 最后一轮只做汇总组装，使用前面已经生成的结果，不要从头重跑全部分析。",
+        "- 当前执行宿主是 Python；如果用户指定 R，请通过 rpy2 或 Rscript 从 Python 调用 R，不要输出无法直接在 Python 中运行的裸 R 脚本。",
+        *KNOWN_ANALYSIS_PITFALL_HINTS,
+    ]
+    artifact_feedback = build_analysis_artifact_feedback(workspace_dir)
+    if artifact_feedback:
+        hints.append(artifact_feedback.strip())
+
+    yutu_context = build_yutu_pitfall_context()
+    if yutu_context:
+        hints.append(yutu_context.strip())
+
+    hint_block = "\n".join(hints)
+    if hint_block in base:
+        return base
+    if not base:
+        return hint_block
+    return f"{base}\n\n{hint_block}"
 
 
 def build_download_url(thread_id: str, rel_path: str) -> str:
@@ -123,38 +592,92 @@ def prepare_vllm_messages(
             )
         else:
             vllm_messages[last_user_idx]["content"] = f"# Instruction\n{instruction_body}"
+        vllm_messages[last_user_idx]["content"] = inject_analysis_runtime_hints(
+            vllm_messages[last_user_idx]["content"], workspace_dir
+        )
 
     return vllm_messages
 
 
+def _decorate_runtime_output(raw_output: str, runtime: Dict[str, Any]) -> str:
+    output = raw_output
+    if runtime.get("mode") != "python_only" or runtime.get("notes"):
+        runtime_lines = [
+            f"[Runtime] Python-hosted R mode: {runtime.get('mode', 'python_only')}"
+        ]
+        if runtime.get("r_home"):
+            runtime_lines.append(f"[Runtime] R_HOME={runtime['r_home']}")
+        for note in runtime.get("notes", [])[:3]:
+            runtime_lines.append(f"[Runtime] {note}")
+        output = "\n".join(runtime_lines) + "\n" + output
+    return output
+
+
+def _run_python_script_once(tmp_path: str, exec_cwd: str, child_env: Dict[str, str], timeout_sec: int, runtime: Dict[str, Any]) -> str:
+    completed = subprocess.run(
+        [sys.executable, tmp_path],
+        cwd=exec_cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_sec,
+        env=child_env,
+    )
+    output = (completed.stdout or "") + (completed.stderr or "")
+    return _decorate_runtime_output(output, runtime)
+
+
+def _build_dependency_install_block(missing_packages: List[str], install_result: Dict[str, Any]) -> str:
+    install_lines = [
+        "[DependencyInstaller] Missing Python packages detected.",
+        f"[DependencyInstaller] Requested install: {', '.join(missing_packages)}",
+        "[DependencyInstaller] pip install output:",
+        install_result.get("output") or "(no pip output)",
+    ]
+    return "\n" + "\n".join(install_lines) + "\n"
+
+
 def execute_code_safe(
-    code_str: str, workspace_dir: str, timeout_sec: int = 120
+    code_str: str, workspace_dir: str, timeout_sec: int = 120, allow_network_installs: bool = True
 ) -> str:
     """Execute Python code in a separate process with timeout"""
     exec_cwd = os.path.abspath(workspace_dir)
     os.makedirs(exec_cwd, exist_ok=True)
     tmp_path = None
     try:
+        prepared_code, validation_error = prepare_python_execution(code_str)
+        if validation_error:
+            return validation_error
+
         fd, tmp_path = tempfile.mkstemp(suffix=".py", dir=exec_cwd)
         os.close(fd)
         with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(code_str)
+            f.write(prepared_code)
 
         child_env = os.environ.copy()
         child_env.setdefault("MPLBACKEND", "Agg")
         child_env.setdefault("QT_QPA_PLATFORM", "offscreen")
         child_env.pop("DISPLAY", None)
 
-        completed = subprocess.run(
-            [sys.executable, tmp_path],
-            cwd=exec_cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            env=child_env,
-        )
-        output = (completed.stdout or "") + (completed.stderr or "")
-        return output
+        runtime = prepare_r_execution_environment(child_env, exec_cwd)
+
+        output = _run_python_script_once(tmp_path, exec_cwd, child_env, timeout_sec, runtime)
+        if not allow_network_installs:
+            return output
+
+        missing_packages = extract_missing_python_packages(output)
+        if not missing_packages:
+            return output
+
+        install_result = install_missing_python_packages(missing_packages, exec_cwd, child_env)
+        install_block = build_dependency_install_block(missing_packages, install_result)
+        if not install_result.get("success"):
+            return output + install_block
+
+        retry_output = _run_python_script_once(tmp_path, exec_cwd, child_env, timeout_sec, runtime)
+        retry_block = "\n[DependencyInstaller] Re-ran the script after installing dependencies.\n"
+        return output + install_block + retry_block + retry_output
     except subprocess.TimeoutExpired:
         return f"[Timeout]: execution exceeded {timeout_sec} seconds"
     except Exception as e:
@@ -168,47 +691,68 @@ def execute_code_safe(
 
 
 async def execute_code_safe_async(
-    code_str: str, workspace_dir: str, timeout_sec: int = 120
+    code_str: str, workspace_dir: str, timeout_sec: int = 120, allow_network_installs: bool = True
 ) -> str:
     """Execute Python code in a separate process with timeout (async version)"""
     exec_cwd = os.path.abspath(workspace_dir)
     os.makedirs(exec_cwd, exist_ok=True)
     tmp_path = None
     try:
+        prepared_code, validation_error = prepare_python_execution(code_str)
+        if validation_error:
+            return validation_error
+
         fd, tmp_path = tempfile.mkstemp(suffix=".py", dir=exec_cwd)
         os.close(fd)
         with open(tmp_path, "w", encoding="utf-8") as f:
-            f.write(code_str)
+            f.write(prepared_code)
 
         child_env = os.environ.copy()
         child_env.setdefault("MPLBACKEND", "Agg")
         child_env.setdefault("QT_QPA_PLATFORM", "offscreen")
         child_env.pop("DISPLAY", None)
 
-        # Use asyncio.subprocess for non-blocking execution
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, tmp_path,
-            cwd=exec_cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=child_env,
-        )
+        runtime = prepare_r_execution_environment(child_env, exec_cwd)
 
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout_sec
+        async def _run_script_once() -> str:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, tmp_path,
+                cwd=exec_cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=child_env,
             )
-            output = (stdout.decode() if stdout else "") + (stderr.decode() if stderr else "")
-            return output
-        except asyncio.TimeoutError:
-            # Kill the process if it times out
             try:
-                process.kill()
-                await process.wait()
-            except Exception:
-                pass
-            return f"[Timeout]: execution exceeded {timeout_sec} seconds"
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=timeout_sec
+                )
+                output = (stdout.decode() if stdout else "") + (stderr.decode() if stderr else "")
+                return _decorate_runtime_output(output, runtime)
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                    await process.wait()
+                except Exception:
+                    pass
+                return f"[Timeout]: execution exceeded {timeout_sec} seconds"
+
+        output = await _run_script_once()
+        if not allow_network_installs:
+            return output
+
+        missing_packages = extract_missing_python_packages(output)
+        if not missing_packages:
+            return output
+
+        install_result = install_missing_python_packages(missing_packages, exec_cwd, child_env)
+        install_block = build_dependency_install_block(missing_packages, install_result)
+        if not install_result.get("success"):
+            return output + install_block
+
+        retry_output = await _run_script_once()
+        retry_block = "\n[DependencyInstaller] Re-ran the script after installing dependencies.\n"
+        return output + install_block + retry_block + retry_output
     except Exception as e:
         return f"[Error]: {str(e)}"
     finally:
