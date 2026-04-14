@@ -377,6 +377,16 @@ const StreamingSectionBody = memo(
     prev.renderSectionContent === next.renderSectionContent
 );
 
+// 智能体行为原则配置
+const ANALYSIS_PRINCIPLES = [
+  { label: "自我纠错", desc: "自动检测错误并尝试修复，最多重试3次", key: "selfCorrectionEnabled" },
+  { label: "短代码预测试", desc: "执行复杂分析前，先用小样本验证关键假设", key: "shortTestEnabled" },
+  { label: "大任务拆分", desc: "将复杂目标分解为结构化任务树逐步执行", key: "taskDecompositionEnabled" },
+  { label: "可解释性输出", desc: "输出特征重要性、判断依据链条等解释信息", key: "explainabilityEnabled" },
+  { label: "高效处理", desc: "复用中间结果，避免重复代码，并行执行", key: "efficientProcessingEnabled" },
+  { label: "死循环检测", desc: "自动检测并跳出分析死循环，更换分析策略", key: "deadLoopDetectionEnabled" },
+] as const;
+
 export function ThreePanelInterface() {
   const { toast } = useToast();
   const [isDarkMode, setIsDarkMode] = useState(false); // 服务端默认 false
@@ -5878,28 +5888,34 @@ ${analysisContent}
                 智能体行为原则
               </div>
               <div className="space-y-1.5">
-                {[
-                  { label: "自我纠错", desc: "自动检测错误并尝试修复，最多重试3次", state: selfCorrectionEnabled, setter: setSelfCorrectionEnabled, key: "selfCorrectionEnabled" },
-                  { label: "短代码预测试", desc: "执行复杂分析前，先用小样本验证关键假设", state: shortTestEnabled, setter: setShortTestEnabled, key: "shortTestEnabled" },
-                  { label: "大任务拆分", desc: "将复杂目标分解为结构化任务树逐步执行", state: taskDecompositionEnabled, setter: setTaskDecompositionEnabled, key: "taskDecompositionEnabled" },
-                  { label: "可解释性输出", desc: "输出特征重要性、判断依据链条等解释信息", state: explainabilityEnabled, setter: setExplainabilityEnabled, key: "explainabilityEnabled" },
-                  { label: "高效处理", desc: "复用中间结果，避免重复代码，并行执行", state: efficientProcessingEnabled, setter: setEfficientProcessingEnabled, key: "efficientProcessingEnabled" },
-                  { label: "死循环检测", desc: "自动检测并跳出分析死循环，更换分析策略", state: deadLoopDetectionEnabled, setter: setDeadLoopDetectionEnabled, key: "deadLoopDetectionEnabled" },
-                ].map((item) => (
-                  <div key={item.key} className="flex items-center justify-between py-1.5 px-3 border rounded-lg">
-                    <div>
-                      <div className="text-xs font-medium">{item.label}</div>
-                      <div className="text-[10px] text-gray-500">{item.desc}</div>
-                    </div>
-                    <Switch
-                      checked={item.state}
-                      onCheckedChange={(checked) => {
-                        item.setter(checked);
-                        localStorage.setItem(item.key, checked ? "true" : "false");
-                      }}
-                    />
-                  </div>
-                ))}
+                {(() => {
+                  const principleStates: Record<string, { state: boolean; setter: (v: boolean) => void }> = {
+                    selfCorrectionEnabled: { state: selfCorrectionEnabled, setter: setSelfCorrectionEnabled },
+                    shortTestEnabled: { state: shortTestEnabled, setter: setShortTestEnabled },
+                    taskDecompositionEnabled: { state: taskDecompositionEnabled, setter: setTaskDecompositionEnabled },
+                    explainabilityEnabled: { state: explainabilityEnabled, setter: setExplainabilityEnabled },
+                    efficientProcessingEnabled: { state: efficientProcessingEnabled, setter: setEfficientProcessingEnabled },
+                    deadLoopDetectionEnabled: { state: deadLoopDetectionEnabled, setter: setDeadLoopDetectionEnabled },
+                  };
+                  return ANALYSIS_PRINCIPLES.map((item) => {
+                    const ps = principleStates[item.key];
+                    return (
+                      <div key={item.key} className="flex items-center justify-between py-1.5 px-3 border rounded-lg">
+                        <div>
+                          <div className="text-xs font-medium">{item.label}</div>
+                          <div className="text-[10px] text-gray-500">{item.desc}</div>
+                        </div>
+                        <Switch
+                          checked={ps.state}
+                          onCheckedChange={(checked) => {
+                            ps.setter(checked);
+                            localStorage.setItem(item.key, checked ? "true" : "false");
+                          }}
+                        />
+                      </div>
+                    );
+                  });
+                })()}
               </div>
             </div>
 
