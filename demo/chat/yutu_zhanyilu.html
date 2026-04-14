@@ -6,254 +6,1314 @@
     <title>雨途斩棘录 - 智能体错误修正记录</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: "Microsoft YaHei", "SimHei", sans-serif;
-            background: #f5f5f5;
-            color: #333;
-            line-height: 1.6;
-            padding: 20px;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        .header {
-            background: linear-gradient(135deg, #1a237e 0%, #3949ab 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            text-align: center;
-        }
-        .header h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-            font-weight: bold;
-        }
-        .header p {
-            font-size: 1.1em;
-            opacity: 0.9;
-        }
-        .stats {
-            display: flex;
-            justify-content: center;
-            gap: 30px;
-            margin-top: 20px;
-            flex-wrap: wrap;
-        }
-        .stat-item {
-            background: rgba(255,255,255,0.1);
-            padding: 15px 30px;
-            border-radius: 8px;
-            text-align: center;
-        }
-        .stat-number {
-            font-size: 2em;
-            font-weight: bold;
-            display: block;
-        }
-        .stat-label {
-            font-size: 0.9em;
-            opacity: 0.8;
-        }
-        .entry {
-            background: white;
-            border-radius: 8px;
-            padding: 25px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        }
-        .entry-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
-            padding-bottom: 15px;
-            border-bottom: 2px solid #eee;
-        }
-        .error-type {
-            display: inline-block;
-            padding: 5px 12px;
-            border-radius: 4px;
-            font-weight: bold;
-            font-size: 0.9em;
-        }
+        body { font-family: "Microsoft YaHei", "SimHei", sans-serif; background: #f5f5f5; color: #333; line-height: 1.6; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { background: linear-gradient(135deg, #1a237e 0%, #3949ab 100%); color: white; padding: 30px; border-radius: 10px; margin-bottom: 20px; text-align: center; }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; font-weight: bold; }
+        .header p { font-size: 1.05em; opacity: 0.9; }
+        .stats { display: flex; justify-content: center; gap: 20px; margin-top: 20px; flex-wrap: wrap; }
+        .stat-item { background: rgba(255,255,255,0.12); padding: 15px 24px; border-radius: 8px; text-align: center; min-width: 140px; }
+        .stat-number { font-size: 1.8em; font-weight: bold; display: block; }
+        .stat-label { font-size: 0.9em; opacity: 0.82; }
+        .entry { background: white; border-radius: 8px; padding: 25px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .entry-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 15px; padding-bottom: 15px; border-bottom: 2px solid #eee; flex-wrap: wrap; }
+        .entry-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .serial { display: inline-flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; border-radius: 999px; background: #e8eaf6; color: #283593; font-weight: bold; }
+        .error-type { display: inline-block; padding: 5px 12px; border-radius: 4px; font-weight: bold; font-size: 0.9em; }
         .error-type.ImportError { background: #e3f2fd; color: #1565c0; }
         .error-type.ValueError { background: #ffebee; color: #c62828; }
         .error-type.TypeError { background: #fff3e0; color: #ef6c00; }
-        .error-type.RuntimeError { background: #f3e5f5; color: #7b1fa2; }
+        .error-type.RuntimeError, .error-type.PythonError { background: #f3e5f5; color: #7b1fa2; }
         .error-type.default { background: #eceff1; color: #455a64; }
-        .error-hash {
-            font-family: monospace;
-            font-size: 0.85em;
-            color: #666;
-            background: #f5f5f5;
-            padding: 3px 8px;
-            border-radius: 4px;
-        }
-        .error-message {
-            background: #fff3e0;
-            padding: 15px;
-            border-left: 4px solid #ff9800;
-            margin-bottom: 15px;
-            font-family: monospace;
-            white-space: pre-wrap;
-            word-break: break-all;
-        }
-        .error-context {
-            background: #f5f5f5;
-            padding: 10px 15px;
-            margin-bottom: 15px;
-            border-radius: 4px;
-            font-size: 0.9em;
-            color: #666;
-        }
-        .solution {
-            background: #e8f5e9;
-            padding: 20px;
-            border-left: 4px solid #4caf50;
-            margin-bottom: 15px;
-        }
-        .solution h4 {
-            color: #2e7d32;
-            margin-bottom: 10px;
-            font-size: 1.1em;
-        }
-        .solution pre {
-            background: #1a1a1a;
-            color: #f8f8f2;
-            padding: 15px;
-            border-radius: 4px;
-            overflow-x: auto;
-            font-family: "Consolas", "Monaco", monospace;
-            font-size: 0.9em;
-            line-height: 1.5;
-        }
-        .solution code {
-            font-family: "Consolas", "Monaco", monospace;
-        }
-        .meta {
-            display: flex;
-            gap: 20px;
-            font-size: 0.85em;
-            color: #666;
-            padding-top: 15px;
-            border-top: 1px solid #eee;
-            flex-wrap: wrap;
-        }
-        .meta span {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-        }
-        .confidence-bar {
-            height: 6px;
-            background: #eee;
-            border-radius: 3px;
-            overflow: hidden;
-            margin-top: 8px;
-        }
-        .confidence-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #4caf50, #8bc34a);
-            transition: width 0.3s;
-        }
+        .status { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 0.82em; font-weight: bold; background: #e8f5e9; color: #2e7d32; }
+        .error-hash { font-family: monospace; font-size: 0.85em; color: #666; background: #f5f5f5; padding: 3px 8px; border-radius: 4px; }
+        .error-message { background: #fff3e0; padding: 15px; border-left: 4px solid #ff9800; margin-bottom: 15px; font-family: monospace; white-space: pre-wrap; word-break: break-word; }
+        .error-context { background: #f5f5f5; padding: 10px 15px; margin-bottom: 15px; border-radius: 4px; font-size: 0.92em; color: #666; white-space: pre-wrap; }
+        .solution { background: #e8f5e9; padding: 20px; border-left: 4px solid #4caf50; margin-bottom: 15px; }
+        .solution h4 { color: #2e7d32; margin-bottom: 10px; font-size: 1.05em; }
+        .solution p { white-space: pre-wrap; word-break: break-word; }
+        .solution pre { background: #1a1a1a; color: #f8f8f2; padding: 15px; border-radius: 4px; overflow-x: auto; font-family: "Consolas", "Monaco", monospace; font-size: 0.88em; line-height: 1.5; margin-top: 12px; white-space: pre-wrap; word-break: break-word; }
+        .evidence { background: #f1f8ff; padding: 12px 14px; border-left: 4px solid #64b5f6; margin-bottom: 15px; border-radius: 4px; white-space: pre-wrap; word-break: break-word; font-size: 0.92em; }
+        .meta { display: flex; gap: 20px; font-size: 0.85em; color: #666; padding-top: 15px; border-top: 1px solid #eee; flex-wrap: wrap; }
+        .confidence-bar { height: 6px; background: #eee; border-radius: 3px; overflow: hidden; margin-top: 8px; }
+        .confidence-fill { height: 100%; background: linear-gradient(90deg, #4caf50, #8bc34a); transition: width 0.3s; }
         .confidence-low { background: linear-gradient(90deg, #ff9800, #ffc107); }
         .confidence-high { background: linear-gradient(90deg, #4caf50, #8bc34a); }
-        .empty-state {
-            text-align: center;
-            padding: 60px 20px;
-            color: #666;
-        }
-        .empty-icon {
-            font-size: 4em;
-            margin-bottom: 20px;
-        }
-        .footer {
-            text-align: center;
-            padding: 20px;
-            color: #666;
-            font-size: 0.9em;
-        }
-        .tag {
-            display: inline-block;
-            background: #e0e0e0;
-            padding: 3px 8px;
-            border-radius: 3px;
-            font-size: 0.8em;
-            margin-right: 5px;
-        }
+        .empty-state { text-align: center; padding: 60px 20px; color: #666; }
+        .empty-icon { font-size: 4em; margin-bottom: 20px; }
+        .footer { text-align: center; padding: 20px; color: #666; font-size: 0.9em; }
+        .section-title { font-size: 1.4em; margin: 28px 0 16px; color: #283593; }
+        .env-entry { background: #fff; border-radius: 8px; padding: 22px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .env-meta { display: flex; gap: 16px; flex-wrap: wrap; font-size: 0.85em; color: #666; margin-top: 12px; }
+        .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 0.82em; font-weight: bold; background: #e3f2fd; color: #1565c0; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>📖 雨途斩棘录</h1>
-            <p>智能体错误修正记录与解决方案知识库</p>
+            <p>记录已真实跑通、已验证有效的错误修复方法</p>
             <div class="stats">
-                <div class="stat-item">
-                    <span class="stat-number">14</span>
-                    <span class="stat-label">错误记录</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-number">16</span>
-                    <span class="stat-label">总解决次数</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-number">14</span>
-                    <span class="stat-label">唯一错误类型</span>
-                </div>
+                <div class="stat-item"><span class="stat-number">30</span><span class="stat-label">错误记录</span></div>
+                <div class="stat-item"><span class="stat-number">47</span><span class="stat-label">验证成功次数</span></div>
+                <div class="stat-item"><span class="stat-number">8</span><span class="stat-label">失败观测次数</span></div>
+                <div class="stat-item"><span class="stat-number">0</span><span class="stat-label">环境待办未确认</span></div>
             </div>
         </div>
-
+        <h2 class="section-title">错误修复知识库</h2>
         <div class="entries">
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.TypeError">TypeError</span>
-                    <span class="error-hash">a7532b11178aea5d</span>
+                    <div class="entry-left">
+                        <span class="serial">1</span>
+                        <span class="error-type RuntimeError">RuntimeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">ef2030a4f8395175</span>
                 </div>
-                <div class="error-message">Index must be a MultiIndex</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774414791694_e86v7486l
-代码长度: 3340 字符
-                </div>
+                <div class="error-message">: name 'pd' is not defined. Did you mean: '_d'?</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775225926533_n6wrpnemb
+代码长度: 3300 字符</div>
+
                 <div class="solution">
-                    <h4>✅ 解决方案</h4>
-                    <p>检查变量类型，确保操作符两边的数据类型兼容。</p>
-                </div>
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>同一会话中再次执行后已真实跑通。后续成功代码已验证可以解决该问题。
+
+成功输出摘要：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 最终文件访问测试 ===
+vehicle_dist_report_v2.pdf: 可正常访问
+heatmap_time_region_v2.png: 可正常访问
+region_pct_trend.png: 可正常访问
+time_region_dist.csv: 可正常访问
+analysis_summary.txt: 可正常访问
+final_delivery_notes.txt: 可正常访问
+final_summary.txt: 可正常访问
+analysis_end_confirmation.txt: 可正常访问
+
+=== 分析任务正式结束 ===
+最终结束语已保存: analysis_final_end.txt
+所有文件访问测试完成
+
+您可以使用以下文件进行后续操作:
+- vehicle_dist_report_v2.pdf: 可正常访问
+- heatmap_time_region_v2.png: 可正常访问
+- region_pct_trend.png: 可正常访问
+- time_region_dist.csv: 可正常访问
+- analysis_summary.txt: 可正常访问
+- final_delivery_notes.txt: 可正常访问
+- final_summary.txt: 可正常访问
+- analysis_end_confirmation.txt: 可正常访问</p>
+
+                    <pre><code>
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import os
+
+# 使用动态解析的字体目录
+_ASSETS_FONTS = &quot;/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts&quot;
+_FONT_DIRS = [
+    _ASSETS_FONTS,
+    &quot;/System/Library/Fonts&quot;,
+    &quot;/Library/Fonts&quot;,
+    &quot;/System/Library/Fonts/Supplemental&quot;,
+]
+for _d in _FONT_DIRS:
+    if os.path.exists(_d):
+        for _ff in os.listdir(_d):
+            if _ff.lower().endswith(('.ttf', '.ttc', '.otf')):
+                try:
+                    fm.fontManager.addfont(os.path.join(_d, _ff))
+                except Exception:
+                    pass
+
+# 优先使用支持中文的字体系列（按优先级排序）
+plt.rcParams['font.sans-serif'] = [
+    # assets/fonts 中的中文字体（优先，纯 TTF）
+    'SimHei',           # assets/simhei.ttf（黑体，主标题）
+    'SimKai',           # assets/simkai.ttf（楷体，引用/强调）
+    'STFangSong',       # assets/STFangSong.ttf（仿宋，正文）
+    'STHeiti',          # assets/STHeiti.ttf（黑体，备选）
+    # macOS 系统 CJK 字体
+    'Heiti TC',         # macOS 繁体黑体
+    'PingFang SC',      # macOS 苹方简体中文
+    'PingFang TC',      # macOS 苹方繁体中文
+    'Kaiti SC',         # macOS 楷体
+    'Songti SC',        # macOS 宋体
+    'Arial Unicode MS', # macOS 内置
+    'DejaVu Sans',
+    'sans-serif',
+]
+plt.rcParams['axes.unicode_minus'] = False
+# 额外：确保数据标签、图例、标题全部使用 sans-serif 字体族
+plt.rcParams['font.family'] = 'sans-serif'
+
+import os
+import pandas as pd
+
+# 1. 最终文件访问测试（保持不变）
+print(&quot;=== 最终文件访问测试 ===&quot;)
+files_to_check = [
+    &quot;vehicle_dist_report_v2.pdf&quot;,
+    &quot;heatmap_time_region_v2.png&quot;,
+    &quot;region_pct_trend.png&quot;,
+    &quot;time_region_dist.csv&quot;,
+    &quot;analysis_summary.txt&quot;,
+    &quot;final_delivery_notes.txt&quot;,
+    &quot;final_summary.txt&quot;,
+    &quot;analysis_end_confirmation.txt&quot;
+]
+
+file_access_status = {}
+for file in files_to_check:
+    try:
+        with open(file, 'rb') as f:
+            file_access_status[file] = &quot;可正常访问&quot;
+            print(f&quot;{file}: 可正常访问&quot;)
+    except Exception as e:
+        file_access_status[file] = f&quot;访问失败 - {str(e)}&quot;
+        print(f&quot;{file}: {str(e)}&quot;)
+
+# 2. 生成最终结束语（修正后）
+final_end = &quot;&quot;&quot;
+# 车辆分布分析 - 最终结束
+
+所有分析任务已圆满完成，输出文件均可正常使用。
+感谢您的使用！如需进一步分析，请重新提交新数据。
+
+分析结束时间: {time}
+&quot;&quot;&quot;.format(time=pd.Timestamp.now().strftime(&quot;%Y-%m-%d %H:%M:%S&quot;))
+
+# 保存最终结束语
+with open(&quot;analysis_final_end.txt&quot;, &quot;w&quot;) as f:
+    f.write(final_end)
+
+print(&quot;\n=== 分析任务正式结束 ===&quot;)
+print(&quot;最终结束语已保存: analysis_final_end.txt&quot;)
+print(&quot;所有文件访问测试完成&quot;)
+print(&quot;\n您可以使用以下文件进行后续操作:&quot;)
+for file, status in file_access_status.items():
+    print(f&quot;- {file}: {status}&quot;)
+
+# # Analysis Workflow
+# - 先把大任务拆成较小子任务，再逐个完成。
+# - 每个子任务成功后，都应把可复用结果保存为命名明确的文件。
+# - 继续分析前，先检查已有中间文件和 generated/ 目录，优先复用，避免重复生成相同图表和整段报告。
+# - 最后一轮只做汇总组装，使用前面已经生成的结果，不要从头重跑全部分析。
+# - pandas DataFrame.pivot 必须使用关键字参数：pivot(index=..., columns=..., values=...)；不要写成位置参数。
+# - seaborn heatmap 在 annot=True 时，fmt='d' 只能用于整数计数矩阵；如果数据是 float、比例、均值或聚合结果，请改用 fmt='.2f' 或其他浮点格式。
+# - pandas DataFrame.to_markdown() 依赖 tabulate；如果需要 markdown 表格输出，先确认环境里可导入 tabulate。
+# - 当前执行宿主是 Python；如果用户指定 R，请通过 rpy2 或 Rscript 从 Python 调用 R，不要输出无法直接在 Python 中运行的裸 R 脚本。
+# [Generated Files]
+# - analysis_end_confirmation.txt
+# - analysis_summary.txt
+# - data_exploration_results.csv
+# - final_delivery_notes.txt
+# - final_summary.txt
+# - heatmap_time_region.png
+# - heatmap_time_region_v2.png
+# - libR.dylib
+# - region_pct_trend.png
+# - time_region_dist.csv
+# - vehicle_dist_report.pdf
+# - vehicle_dist_report_v2.pdf</code></pre>
+</div>
+                <div class="evidence"><strong>验证证据：</strong>失败代码哈希: f624618ef549cdda6edc45c3ffe87436696350ab5e282d3fa111b2f193910332
+成功代码哈希: c25922998138305dda69616af4eca026d8d20afca889418ccc6d922999773d7f
+
+最近一次失败输出：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 最终文件访问测试 ===
+vehicle_dist_report_v2.pdf: 可正常访问
+heatmap_time_region_v2.png: 可正常访问
+region_pct_trend.png: 可正常访问
+time_region_dist.csv: 可正常访问
+analysis_summary.txt: 可正常访问
+final_delivery_notes.txt: 可正常访问
+final_summary.txt: 可正常访问
+analysis_end_confirmation.txt: 可正常访问
+Traceback (most recent call last):
+  File &quot;/Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775225926533_n6wrpnemb/tmpo_fwsipv.py&quot;, line 79, in &lt;module&gt;
+    &quot;&quot;&quot;.format(time=pd.Timestamp.now().strftime(&quot;%Y-%m-%d %H:%M:%S&quot;))
+                    ^^
+NameError: name 'pd' is not defined. Did you mean: '_d'?
+
+
+成功输出：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 最终文件访问测试 ===
+vehicle_dist_report_v2.pdf: 可正常访问
+heatmap_time_region_v2.png: 可正常访问
+region_pct_trend.png: 可正常访问
+time_region_dist.csv: 可正常访问
+analysis_summary.txt: 可正常访问
+final_delivery_notes.txt: 可正常访问
+final_summary.txt: 可正常访问
+analysis_end_confirmation.txt: 可正常访问
+
+=== 分析任务正式结束 ===
+最终结束语已保存: analysis_final_end.txt
+所有文件访问测试完成
+
+您可以使用以下文件进行后续操作:
+- vehicle_dist_report_v2.pdf: 可正常访问
+- heatmap_time_region_v2.png: 可正常访问
+- region_pct_trend.png: 可正常访问
+- time_region_dist.csv: 可正常访问
+- analysis_summary.txt: 可正常访问
+- final_delivery_notes.txt: 可正常访问
+- final_summary.txt: 可正常访问
+- analysis_end_confirmation.txt: 可正常访问</div>
 
                 <div class="meta">
-                    <span>📅 创建时间: 2026-03-25 05:05:06</span>
-                    <span>🔄 更新时间: 2026-03-25 05:05:06</span>
-                    <span>👤 创建者: system_auto</span>
-                    <span>📊 使用次数: 0</span>
-                    <span>🎯 置信度: 70%</span>
+                    <span>📅 创建时间: 2026-04-03 14:37:02</span>
+                    <span>🕒 更新时间: 2026-04-03 14:37:02</span>
+                    <span>✅ 最近验证: 2026-04-03 22:37:02</span>
+                    <span>👤 创建者: system_verified</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 1</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 90%</span>
                 </div>
                 <div class="confidence-bar">
-                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                    <div class="confidence-fill confidence-high" style="width: 90.0%"></div>
                 </div>
             </div>
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.default">KeyError</span>
-                    <span class="error-hash">68cb8b0374df00eb</span>
+                    <div class="entry-left">
+                        <span class="serial">2</span>
+                        <span class="error-type RuntimeError">RuntimeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">2ecbc62b3ec161b3</span>
                 </div>
-                <div class="error-message">timestamp</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774414791694_e86v7486l
-代码长度: 3067 字符
-                </div>
+                <div class="error-message">: name 'generate_report_pdf' is not defined</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775225926533_n6wrpnemb
+代码长度: 3081 字符</div>
+
                 <div class="solution">
-                    <h4>✅ 解决方案</h4>
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>同一会话中再次执行后已真实跑通。后续成功代码已验证可以解决该问题。
+
+成功输出摘要：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+报告生成成功: vehicle_dist_report.pdf
+已保存分布数据: time_region_dist.csv
+2026-04-03 22:25:54,165 - pdf_utils - INFO - 开始注册中文字体，字体目录: /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts
+2026-04-03 22:25:54,203 - pdf_utils - INFO - 成功注册字体: SimHei -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf
+2026-04-03 22:25:54,218 - pdf_utils - INFO - 注册粗体字体: SimHei-Bold
+2026-04-03 22:25:54,225 - pdf_utils - INFO - 成功注册字体: SimKai -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf
+2026-04-03 22:25:54,232 - pdf_utils - INFO - 注册粗体字体: SimKai-Bold
+2026-04-03 22:25:54,275 - pdf_utils - INFO - 成功注册字体: STFangSong -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf
+2026-04-03 22:25:54,300 - pdf_utils - INFO - 注册粗体字体: STFangSong-Bold
+2026-04-03 22:25:54,344 - pdf_utils - INFO - 成功注册字体: STHeiti -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STHeiti.ttf
+2026-04-03 22:25:54,369 - pdf_utils - INFO - 注册粗体字体: STHeiti-Bold
+2026-04-03 22:25:54,412 - pdf_utils - INFO - 成功注册字体: LiSongPro -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/LiSongPro.ttf
+2026-04-03 22:25:54,432 - pdf_utils - INFO - 注册粗体字体: LiSongPro-Bold
+2026-04-03 22:25:54,432 - pdf_utils - INFO - 字体注册完成: 成功 10 个，失败 0 个
+2026-04-03 22:25:54,466 - pdf_utils - INFO - PDF 生成成功: vehicle_dist_report.pdf</p>
+
+                    <pre><code>
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import os
+
+# 使用动态解析的字体目录
+_ASSETS_FONTS = &quot;/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts&quot;
+_FONT_DIRS = [
+    _ASSETS_FONTS,
+    &quot;/System/Library/Fonts&quot;,
+    &quot;/Library/Fonts&quot;,
+    &quot;/System/Library/Fonts/Supplemental&quot;,
+]
+for _d in _FONT_DIRS:
+    if os.path.exists(_d):
+        for _ff in os.listdir(_d):
+            if _ff.lower().endswith(('.ttf', '.ttc', '.otf')):
+                try:
+                    fm.fontManager.addfont(os.path.join(_d, _ff))
+                except Exception:
+                    pass
+
+# 优先使用支持中文的字体系列（按优先级排序）
+plt.rcParams['font.sans-serif'] = [
+    # assets/fonts 中的中文字体（优先，纯 TTF）
+    'SimHei',           # assets/simhei.ttf（黑体，主标题）
+    'SimKai',           # assets/simkai.ttf（楷体，引用/强调）
+    'STFangSong',       # assets/STFangSong.ttf（仿宋，正文）
+    'STHeiti',          # assets/STHeiti.ttf（黑体，备选）
+    # macOS 系统 CJK 字体
+    'Heiti TC',         # macOS 繁体黑体
+    'PingFang SC',      # macOS 苹方简体中文
+    'PingFang TC',      # macOS 苹方繁体中文
+    'Kaiti SC',         # macOS 楷体
+    'Songti SC',        # macOS 宋体
+    'Arial Unicode MS', # macOS 内置
+    'DejaVu Sans',
+    'sans-serif',
+]
+plt.rcParams['axes.unicode_minus'] = False
+# 额外：确保数据标签、图例、标题全部使用 sans-serif 字体族
+plt.rcParams['font.family'] = 'sans-serif'
+
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from agent_utils import generate_report_pdf
+
+# 1. 读取数据
+df = pd.read_excel('abc-now.xlsx')
+
+# 2. 提取小时和区域
+df['hour'] = df['时间'].dt.hour
+region_counts = df['区域'].value_counts()
+
+# 3. 生成分布数据
+dist_df = df.groupby(['hour', '区域']).size().unstack(fill_value=0)
+
+# 4. 可视化
+plt.figure(figsize=(12, 6))
+sns.heatmap(dist_df, annot=True, fmt='d', cmap='YlOrRd')
+plt.title('车辆分布：时间×区域热力图')
+plt.savefig('heatmap_time_region.png')
+plt.close()
+
+# 5. 生成报告
+report_md = f&quot;&quot;&quot;
+# 车辆分布分析报告
+
+## 数据概览
+- 总记录数: {len(df)}
+- 时间范围: {df['时间'].min()} 至 {df['时间'].max()}
+- 区域分布: {region_counts.to_markdown()}
+
+## 分析结果
+### 时间×区域分布
+![热力图](heatmap_time_region.png)
+
+### 详细数据
+{dist_df.to_markdown()}
+
+## 结论
+1. 车辆在{region_counts.idxmax()}区域出现频率最高
+2. 时间分布呈现{'' if dist_df.std().idxmax() == 0 else '明显'}的时间规律性
+&quot;&quot;&quot;
+
+try:
+    generate_report_pdf(report_md, &quot;vehicle_dist_report.pdf&quot;, title=&quot;车辆分布分析&quot;)
+    print(&quot;报告生成成功: vehicle_dist_report.pdf&quot;)
+except Exception as e:
+    print(f&quot;报告生成失败: {str(e)}&quot;)
+    # 备选方案：保存为文本
+    with open(&quot;vehicle_dist_report.txt&quot;, &quot;w&quot;) as f:
+        f.write(report_md)
+    print(&quot;已保存文本报告: vehicle_dist_report.txt&quot;)
+
+# 保存分析结果
+dist_df.to_csv('time_region_dist.csv')
+print(&quot;已保存分布数据: time_region_dist.csv&quot;)
+
+# # Analysis Workflow
+# - 先把大任务拆成较小子任务，再逐个完成。
+# - 每个子任务成功后，都应把可复用结果保存为命名明确的文件。
+# - 继续分析前，先检查已有中间文件和 generated/ 目录，优先复用，避免重复生成相同图表和整段报告。
+# - 最后一轮只做汇总组装，使用前面已经生成的结果，不要从头重跑全部分析。
+# - pandas DataFrame.pivot 必须使用关键字参数：pivot(index=..., columns=..., values=...)；不要写成位置参数。
+# - seaborn heatmap 在 annot=True 时，fmt='d' 只能用于整数计数矩阵；如果数据是 float、比例、均值或聚合结果，请改用 fmt='.2f' 或其他浮点格式。
+# - pandas DataFrame.to_markdown() 依赖 tabulate；如果需要 markdown 表格输出，先确认环境里可导入 tabulate。
+# - 当前执行宿主是 Python；如果用户指定 R，请通过 rpy2 或 Rscript 从 Python 调用 R，不要输出无法直接在 Python 中运行的裸 R 脚本。
+# [Generated Files]
+# - data_exploration_results.csv
+# - libR.dylib</code></pre>
+</div>
+                <div class="evidence"><strong>验证证据：</strong>失败代码哈希: 4af4e213bab14bad998091dcf0dc91ed90e0920a304864fffdda7971b821b815
+成功代码哈希: a4708430369713df892bb82e453095492cc4774083959d466f17519f3cb1f984
+
+最近一次失败输出：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 完整数据结构 ===
+列名列表： ['车辆', '区域', '时间']
+
+数据类型：
+车辆            object
+区域            object
+时间    datetime64[ns]
+dtype: object
+
+前5行样例：
+        车辆       区域                  时间
+0  桂FB1360  富民商贸615 2021-06-14 23:01:00
+1  冀A293E1  富民商贸615 2021-06-14 21:44:00
+2  鲁QH6630  富民商贸615 2021-06-14 20:50:00
+3  赣D18340  富民商贸615 2021-06-14 19:01:00
+4  吉C4G488  富民商贸615 2021-06-14 18:30:00
+
+未找到明确表示小时的列
+
+可能表示区域的列： ['区域']
+
+已保存探查结果到 data_exploration_results.csv
+Traceback (most recent call last):
+  File &quot;/Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775225926533_n6wrpnemb/tmp60yfx8oq.py&quot;, line 94, in &lt;module&gt;
+    generate_report_pdf(report_md, &quot;data_exploration_report.pdf&quot;, title=&quot;数据结构探查&quot;)
+    ^^^^^^^^^^^^^^^^^^^
+NameError: name 'generate_report_pdf' is not defined
+
+
+成功输出：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+报告生成成功: vehicle_dist_report.pdf
+已保存分布数据: time_region_dist.csv
+2026-04-03 22:25:54,165 - pdf_utils - INFO - 开始注册中文字体，字体目录: /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts
+2026-04-03 22:25:54,203 - pdf_utils - INFO - 成功注册字体: SimHei -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf
+2026-04-03 22:25:54,218 - pdf_utils - INFO - 注册粗体字体: SimHei-Bold
+2026-04-03 22:25:54,225 - pdf_utils - INFO - 成功注册字体: SimKai -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf
+2026-04-03 22:25:54,232 - pdf_utils - INFO - 注册粗体字体: SimKai-Bold
+2026-04-03 22:25:54,275 - pdf_utils - INFO - 成功注册字体: STFangSong -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf
+2026-04-03 22:25:54,300 - pdf_utils - INFO - 注册粗体字体: STFangSong-Bold
+2026-04-03 22:25:54,344 - pdf_utils - INFO - 成功注册字体: STHeiti -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STHeiti.ttf
+2026-04-03 22:25:54,369 - pdf_utils - INFO - 注册粗体字体: STHeiti-Bold
+2026-04-03 22:25:54,412 - pdf_utils - INFO - 成功注册字体: LiSongPro -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/LiSongPro.ttf
+2026-04-03 22:25:54,432 - pdf_utils - INFO - 注册粗体字体: LiSongPro-Bold
+2026-04-03 22:25:54,432 - pdf_utils - INFO - 字体注册完成: 成功 10 个，失败 0 个
+2026-04-03 22:25:54,466 - pdf_utils - INFO - PDF 生成成功: vehicle_dist_report.pdf</div>
+
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-03 14:25:54</span>
+                    <span>🕒 更新时间: 2026-04-03 14:25:54</span>
+                    <span>✅ 最近验证: 2026-04-03 22:25:54</span>
+                    <span>👤 创建者: system_verified</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 1</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 90%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 90.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">3</span>
+                        <span class="error-type RuntimeError">RuntimeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">5ffa68e697d99bc8</span>
+                </div>
+                <div class="error-message">]: generated Python failed validation before execution.</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775216342501_b50b26as1
+代码长度: 4141 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>同一会话中再次执行后已真实跑通。后续成功代码已验证可以解决该问题。
+
+成功输出摘要：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 异常值时间分布分析 ===
+已生成异常值时间分布图到 generated/outlier_time_distribution.png
+已生成异常值区域分布图到 generated/outlier_area_distribution.png
+
+=== 区域间差异统计检验 ===
+区域间车辆数差异的Kruskal-Wallis检验 p-value: 0.0000
+
+已生成增强版最终报告到 enhanced_final_vehicle_distribution_report.pdf
+2026-04-03 20:00:47,214 - pdf_utils - INFO - 开始注册中文字体，字体目录: /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts
+2026-04-03 20:00:47,250 - pdf_utils - INFO - 成功注册字体: SimHei -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf
+2026-04-03 20:00:47,288 - pdf_utils - INFO - 注册粗体字体: SimHei-Bold
+2026-04-03 20:00:47,296 - pdf_utils - INFO - 成功注册字体: SimKai -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf
+2026-04-03 20:00:47,303 - pdf_utils - INFO - 注册粗体字体: SimKai-Bold
+2026-04-03 20:00:47,335 - pdf_utils - INFO - 成功注册字体: STFangSong -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf
+2026-04-03 20:00:47,384 - pdf_utils - INFO - 注册粗体字体: STFangSong-Bold
+2026-04-03 20:00:47,409 - pdf_utils - INFO - 成功注册字体: STHeiti -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STHeiti.ttf
+2026-04-03 20:00:47,461 - pdf_utils - INFO - 注册粗体字体: STHeiti-Bold
+2026-04-03 20:00:47,481 - pdf_utils - INFO - 成功注册字体: LiSongPro -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/LiSongPro.ttf
+2026-04-03 20:00:47,503 - pdf_utils - INFO - 注册粗体字体: LiSongPro-Bold
+2026-04-03 20:00:47,503 - pdf_utils - INFO - 字体注册完成: 成功 10 个，失败 0 个
+2026-0</p>
+
+                    <pre><code>
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import os
+
+# 使用动态解析的字体目录
+_ASSETS_FONTS = &quot;/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts&quot;
+_FONT_DIRS = [
+    _ASSETS_FONTS,
+    &quot;/System/Library/Fonts&quot;,
+    &quot;/Library/Fonts&quot;,
+    &quot;/System/Library/Fonts/Supplemental&quot;,
+]
+for _d in _FONT_DIRS:
+    if os.path.exists(_d):
+        for _ff in os.listdir(_d):
+            if _ff.lower().endswith(('.ttf', '.ttc', '.otf')):
+                try:
+                    fm.fontManager.addfont(os.path.join(_d, _ff))
+                except Exception:
+                    pass
+
+# 优先使用支持中文的字体系列（按优先级排序）
+plt.rcParams['font.sans-serif'] = [
+    # assets/fonts 中的中文字体（优先，纯 TTF）
+    'SimHei',           # assets/simhei.ttf（黑体，主标题）
+    'SimKai',           # assets/simkai.ttf（楷体，引用/强调）
+    'STFangSong',       # assets/STFangSong.ttf（仿宋，正文）
+    'STHeiti',          # assets/STHeiti.ttf（黑体，备选）
+    # macOS 系统 CJK 字体
+    'Heiti TC',         # macOS 繁体黑体
+    'PingFang SC',      # macOS 苹方简体中文
+    'PingFang TC',      # macOS 苹方繁体中文
+    'Kaiti SC',         # macOS 楷体
+    'Songti SC',        # macOS 宋体
+    'Arial Unicode MS', # macOS 内置
+    'DejaVu Sans',
+    'sans-serif',
+]
+plt.rcParams['axes.unicode_minus'] = False
+# 额外：确保数据标签、图例、标题全部使用 sans-serif 字体族
+plt.rcParams['font.family'] = 'sans-serif'
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+from pathlib import Path
+
+# 加载数据
+dist_df = pd.read_csv(&quot;generated/vehicle_distribution.csv&quot;)
+
+# 计算四分位数
+Q1 = dist_df['车辆数'].quantile(0.25)
+Q3 = dist_df['车辆数'].quantile(0.75)
+
+# 异常值时间分布分析
+print(&quot;=== 异常值时间分布分析 ===&quot;)
+outliers = dist_df[(dist_df['车辆数'] &gt; 70)]  # 基于之前检测的异常值范围
+if len(outliers) &gt; 0:
+    # 异常值的时间分布
+    plt.figure(figsize=(10, 5))
+    sns.countplot(x='hour', data=outliers)
+    plt.title(&quot;异常值的时间分布&quot;)
+    plt.xlabel(&quot;小时&quot;)
+    plt.ylabel(&quot;异常值数量&quot;)
+    plt.tight_layout()
+    plt.savefig(&quot;generated/outlier_time_distribution.png&quot;, dpi=300)
+    plt.close()
+    print(&quot;已生成异常值时间分布图到 generated/outlier_time_distribution.png&quot;)
+    
+    # 异常值的区域分布
+    plt.figure(figsize=(8, 4))
+    sns.countplot(y='区域', data=outliers)
+    plt.title(&quot;异常值的区域分布&quot;)
+    plt.xlabel(&quot;异常值数量&quot;)
+    plt.ylabel(&quot;区域&quot;)
+    plt.tight_layout()
+    plt.savefig(&quot;generated/outlier_area_distribution.png&quot;, dpi=300)
+    plt.close()
+    print(&quot;已生成异常值区域分布图到 generated/outlier_area_distribution.png&quot;)
+
+# 区域-时间分布的统计显著性检验
+print(&quot;\n=== 区域间差异统计检验 ===&quot;)
+groups = [group['车辆数'].values for name, group in dist_df.groupby('区域')]
+h_stat, p_val = stats.kruskal(*groups)
+print(f&quot;区域间车辆数差异的Kruskal-Wallis检验 p-value: {p_val:.4f}&quot;)
+
+# 生成增强版最终报告（修正字符串格式化）
+enhanced_final_report = f&quot;&quot;&quot;
+# 车辆时空分布增强版最终分析报告
+
+## 异常值时间分布分析
+{f&quot;异常值主要集中在{outliers['hour'].mode()[0]}点&quot; if len(outliers) &gt; 0 else &quot;无异常值&quot;}
+{f&quot;异常值时间分布图: `generated/outlier_time_distribution.png`&quot; if len(outliers) &gt; 0 else &quot;&quot;}
+{f&quot;异常值区域分布图: `generated/outlier_area_distribution.png`&quot; if len(outliers) &gt; 0 else &quot;&quot;}
+
+## 区域间差异统计检验
+- 区域间车辆数差异的Kruskal-Wallis检验 p-value: {p_val:.4f}
+- {'区域间存在显著差异' if p_val &lt; 0.05 else '区域间无显著差异'}
+
+## 分布特征总结
+1. 区域车辆数范围: {dist_df['车辆数'].min()} - {dist_df['车辆数'].max()}辆
+2. 区域车辆数中位数: {dist_df['车辆数'].median()}辆
+3. 区域车辆数四分位数:
+   - Q1: {Q1:.1f}辆
+   - Q3: {Q3:.1f}辆
+
+## 图表参考
+1. 区域-时间热力图: `generated/heatmap.png`
+2. 区域分布柱状图: `generated/bar_chart.png`
+3. 时间分布折线图: `generated/time_trend.png`
+4. 区域分布箱线图: `generated/boxplot.png`
+&quot;&quot;&quot;
+
+# 生成增强版PDF报告
+from agent_utils import generate_report_pdf
+generate_report_pdf(enhanced_final_report, &quot;enhanced_final_vehicle_distribution_report.pdf&quot;, title=&quot;车辆时空分布增强版最终分析报告&quot;)
+print(&quot;\n已生成增强版最终报告到 enhanced_final_vehicle_distribution_report.pdf&quot;)
+
+# # Analysis Workflow
+# - 先把大任务拆成较小子任务，再逐个完成。
+# - 每个子任务成功后，都应把可复用结果保存为命名明确的文件。
+# - 继续分析前，先检查已有中间文件和 generated/ 目录，优先复用，避免重复生成相同图表和整段报告。
+# - 最后一轮只做汇总组装，使用前面已经生成的结果，不要从头重跑全部分析。
+# - 当前执行宿主是 Python；如果用户指定 R，请通过 rpy2 或 Rscript 从 Python 调用 R，不要输出无法直接在 Python 中运行的裸 R 脚本。
+# [Generated Files]
+# - area_stats.csv
+# - bar_chart.png
+# - boxplot.png
+# - boxplot_modified.png
+# - enhanced_vehicle_distribution_report.pdf
+# - final_vehicle_distribution_report.pdf
+# - heatmap.png
+# - libR.dylib
+# - time_trend.png
+# - vehicle_distribution.csv
+# - vehicle_distribution_report.pdf</code></pre>
+</div>
+                <div class="evidence"><strong>验证证据：</strong>失败代码哈希: 1da2318b7ac742b8179de3e2d330cc4b5c2fca391a2ed560af3151efc2b263b1
+成功代码哈希: 56ed6842daf4f6f6b1bb3694235d16417620fd8a68f6221fb50295140d844598
+
+最近一次失败输出：
+[SyntaxError]: generated Python failed validation before execution.
+检测到 Python 语法错误
+Message: '{' was never closed
+Line: 99
+Column: 1
+Code:
+{f&quot;{'区域间存在显著差异' if p_val &lt; 0.05 else '区域间无显著差异'}&quot;
+^
+Execution did not start. Fix the Python code before retrying.
+
+成功输出：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 异常值时间分布分析 ===
+已生成异常值时间分布图到 generated/outlier_time_distribution.png
+已生成异常值区域分布图到 generated/outlier_area_distribution.png
+
+=== 区域间差异统计检验 ===
+区域间车辆数差异的Kruskal-Wallis检验 p-value: 0.0000
+
+已生成增强版最终报告到 enhanced_final_vehicle_distribution_report.pdf
+2026-04-03 20:00:47,214 - pdf_utils - INFO - 开始注册中文字体，字体目录: /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts
+2026-04-03 20:00:47,250 - pdf_utils - INFO - 成功注册字体: SimHei -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf
+2026-04-03 20:00:47,288 - pdf_utils - INFO - 注册粗体字体: SimHei-Bold
+2026-04-03 20:00:47,296 - pdf_utils - INFO - 成功注册字体: SimKai -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf
+2026-04-03 20:00:47,303 - pdf_utils - INFO - 注册粗体字体: SimKai-Bold
+2026-04-03 20:00:47,335 - pdf_utils - INFO - 成功注册字体: STFangSong -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf
+2026-04-03 20:00:47,384 - pdf_utils - INFO - 注册粗体字体: STFangSong-Bold
+2026-04-03 20:00:47,409 - pdf_utils - INFO - 成功注册字体: STHeiti -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STHeiti.ttf
+2026-04-03 20:00:47,461 - pdf_utils - INFO - 注册粗体字体: STHeiti-Bold
+2026-04-03 20:00:47,481 - pdf_utils - INFO - 成功注册字体: LiSongPro -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/LiSongPro.ttf
+2026-04-03 20:00:47,503 - pdf_utils - INFO - 注册粗体字体: LiSongPro-Bold
+2026-04-03 20:00:47,503 - pdf_utils - INFO - 字体注册完成: 成功 10 个，失败 0 个
+2026-0</div>
+
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-03 12:00:47</span>
+                    <span>🕒 更新时间: 2026-04-03 12:00:47</span>
+                    <span>✅ 最近验证: 2026-04-03 20:00:47</span>
+                    <span>👤 创建者: system_verified</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 1</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 90%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 90.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">4</span>
+                        <span class="error-type ValueError">ValueError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">9dafdde4219b64ef</span>
+                </div>
+                <div class="error-message">Unknown format code 'd' for object of type 'float'</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775216342501_b50b26as1
+代码长度: 4509 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>同一会话中再次执行后已真实跑通。后续成功代码已验证可以解决该问题。
+
+成功输出摘要：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 数据处理 ===
+原始数据类型:
+ 区域      object
+hour     int64
+车辆数      int64
+dtype: object
+使用 fmt='.0f' 成功
+
+已生成热力图到 generated/heatmap.png
+已生成柱状图到 generated/bar_chart.png
+已生成时间分布折线图到 generated/time_trend.png
+
+已生成区域统计表到 generated/area_stats.csv
+
+已生成最终报告到 vehicle_distribution_report.pdf
+2026-04-03 19:48:53,768 - pdf_utils - INFO - 开始注册中文字体，字体目录: /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts
+2026-04-03 19:48:53,785 - pdf_utils - INFO - 成功注册字体: SimHei -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf
+2026-04-03 19:48:53,821 - pdf_utils - INFO - 注册粗体字体: SimHei-Bold
+2026-04-03 19:48:53,829 - pdf_utils - INFO - 成功注册字体: SimKai -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf
+2026-04-03 19:48:53,837 - pdf_utils - INFO - 注册粗体字体: SimKai-Bold
+2026-04-03 19:48:53,885 - pdf_utils - INFO - 成功注册字体: STFangSong -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf
+2026-04-03 19:48:53,911 - pdf_utils - INFO - 注册粗体字体: STFangSong-Bold
+2026-04-03 19:48:53,965 - pdf_utils - INFO - 成功注册字体: STHeiti -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STHeiti.ttf
+2026-04-03 19:48:53,991 - pdf_utils - INFO - 注册粗体字体: STHeiti-Bold
+2026-04-03 19:48:54,013 - pdf_utils - INFO - 成功注册字体: LiSongPro -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/LiSongPro.ttf
+2026-04-03 19:48:54,057 - pdf_utils - INFO - 注册粗体字体: LiSongPro-Bold
+2026-04-03 19:48:54,058 - pdf_utils - INFO -</p>
+
+                    <pre><code>
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import os
+
+# 使用动态解析的字体目录
+_ASSETS_FONTS = &quot;/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts&quot;
+_FONT_DIRS = [
+    _ASSETS_FONTS,
+    &quot;/System/Library/Fonts&quot;,
+    &quot;/Library/Fonts&quot;,
+    &quot;/System/Library/Fonts/Supplemental&quot;,
+]
+for _d in _FONT_DIRS:
+    if os.path.exists(_d):
+        for _ff in os.listdir(_d):
+            if _ff.lower().endswith(('.ttf', '.ttc', '.otf')):
+                try:
+                    fm.fontManager.addfont(os.path.join(_d, _ff))
+                except Exception:
+                    pass
+
+# 优先使用支持中文的字体系列（按优先级排序）
+plt.rcParams['font.sans-serif'] = [
+    # assets/fonts 中的中文字体（优先，纯 TTF）
+    'SimHei',           # assets/simhei.ttf（黑体，主标题）
+    'SimKai',           # assets/simkai.ttf（楷体，引用/强调）
+    'STFangSong',       # assets/STFangSong.ttf（仿宋，正文）
+    'STHeiti',          # assets/STHeiti.ttf（黑体，备选）
+    # macOS 系统 CJK 字体
+    'Heiti TC',         # macOS 繁体黑体
+    'PingFang SC',      # macOS 苹方简体中文
+    'PingFang TC',      # macOS 苹方繁体中文
+    'Kaiti SC',         # macOS 楷体
+    'Songti SC',        # macOS 宋体
+    'Arial Unicode MS', # macOS 内置
+    'DejaVu Sans',
+    'sans-serif',
+]
+plt.rcParams['axes.unicode_minus'] = False
+# 额外：确保数据标签、图例、标题全部使用 sans-serif 字体族
+plt.rcParams['font.family'] = 'sans-serif'
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+
+# 设置可视化风格
+sns.set_theme(style=&quot;whitegrid&quot;, palette=&quot;muted&quot;)
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+
+# 创建生成目录
+Path(&quot;generated&quot;).mkdir(exist_ok=True)
+
+# 读取处理后的数据
+dist_df = pd.read_csv(&quot;generated/vehicle_distribution.csv&quot;)
+
+# 检查并处理数据
+print(&quot;=== 数据处理 ===&quot;)
+print(&quot;原始数据类型:\n&quot;, dist_df.dtypes)
+dist_df['车辆数'] = dist_df['车辆数'].astype(int)  # 确保整数类型
+
+# 生成热力图（修正后）
+plt.figure(figsize=(14, 8))
+heatmap_data = dist_df.pivot(index='区域', columns='hour', values='车辆数')
+heatmap_data = heatmap_data.fillna(0).astype(int)  # 处理NaN并确保整数
+
+# 尝试不同格式
+try:
+    sns.heatmap(heatmap_data, annot=True, fmt=&quot;.0f&quot;, cmap=&quot;YlOrRd&quot;, 
+                cbar_kws={'label': '车辆数量'})
+    print(&quot;使用 fmt='.0f' 成功&quot;)
+except Exception as e:
+    print(f&quot;热力图绘制错误: {str(e)}&quot;)
+    # 回退到简单格式
+    sns.heatmap(heatmap_data, annot=True, fmt=&quot;d&quot;, cmap=&quot;YlOrRd&quot;, 
+                cbar_kws={'label': '车辆数量'})
+
+plt.title(&quot;车辆在不同区域和时间的分布热力图&quot;, pad=20)
+plt.xlabel(&quot;小时&quot;, labelpad=10)
+plt.ylabel(&quot;区域&quot;, labelpad=10)
+plt.tight_layout()
+plt.savefig(&quot;generated/heatmap.png&quot;, dpi=300, bbox_inches='tight')
+plt.close()
+print(&quot;\n已生成热力图到 generated/heatmap.png&quot;)
+
+# 生成区域分布柱状图
+plt.figure(figsize=(12, 6))
+top_areas = dist_df['区域'].value_counts().nlargest(5).index
+for area in top_areas:
+    area_data = dist_df[dist_df['区域'] == area]
+    plt.bar(area_data['hour'], area_data['车辆数'], alpha=0.7, label=area)
+plt.title(&quot;主要区域车辆分布（按小时）&quot;, pad=15)
+plt.xlabel(&quot;小时&quot;, labelpad=10)
+plt.ylabel(&quot;车辆数&quot;, labelpad=10)
+plt.legend(title=&quot;区域&quot;, bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.savefig(&quot;generated/bar_chart.png&quot;, dpi=300, bbox_inches='tight')
+plt.close()
+print(&quot;已生成柱状图到 generated/bar_chart.png&quot;)
+
+# 生成时间分布折线图
+plt.figure(figsize=(14, 6))
+time_dist = dist_df.groupby('hour')['车辆数'].sum()
+time_dist.plot(kind='line', marker='o', color='royalblue')
+plt.title(&quot;全天车辆时间分布趋势&quot;, pad=15)
+plt.xlabel(&quot;小时&quot;, labelpad=10)
+plt.ylabel(&quot;总车辆数&quot;, labelpad=10)
+plt.grid(True, linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.savefig(&quot;generated/time_trend.png&quot;, dpi=300, bbox_inches='tight')
+plt.close()
+print(&quot;已生成时间分布折线图到 generated/time_trend.png&quot;)
+
+# 生成区域分布统计表
+area_stats = dist_df.groupby('区域')['车辆数'].sum().sort_values(ascending=False)
+area_stats.to_csv(&quot;generated/area_stats.csv&quot;)
+print(&quot;\n已生成区域统计表到 generated/area_stats.csv&quot;)
+
+# 生成最终报告
+report_md = f&quot;&quot;&quot;
+# 车辆时空分布分析报告
+
+## 分析概述
+本报告分析了{len(dist_df)}条车辆记录在{dist_df['区域'].nunique()}个区域和24小时内的分布情况。
+
+## 关键发现
+1. **区域分布**：
+   - 最主要区域：{dist_df['区域'].value_counts().idxmax()}（{dist_df['区域'].value_counts().max()}辆）
+   - 区域分布详见：`generated/area_stats.csv`
+
+2. **时间分布**：
+   - 全天车辆总数：{dist_df['车辆数'].sum()}辆
+   - 时间分布趋势图：`generated/time_trend.png`
+
+3. **区域-时间热力图**：
+   - 详细分布见：`generated/heatmap.png`
+&quot;&quot;&quot;
+
+# 使用agent_utils生成PDF报告
+from agent_utils import generate_report_pdf
+generate_report_pdf(report_md, &quot;vehicle_distribution_report.pdf&quot;, title=&quot;车辆时空分布分析报告&quot;)
+print(&quot;\n已生成最终报告到 vehicle_distribution_report.pdf&quot;)
+
+# # Analysis Workflow
+# - 先把大任务拆成较小子任务，再逐个完成。
+# - 每个子任务成功后，都应把可复用结果保存为命名明确的文件。
+# - 继续分析前，先检查已有中间文件和 generated/ 目录，优先复用，避免重复生成相同图表和整段报告。
+# - 最后一轮只做汇总组装，使用前面已经生成的结果，不要从头重跑全部分析。
+# - 当前执行宿主是 Python；如果用户指定 R，请通过 rpy2 或 Rscript 从 Python 调用 R，不要输出无法直接在 Python 中运行的裸 R 脚本。
+# [Generated Files]
+# - libR.dylib
+# - vehicle_distribution.csv</code></pre>
+</div>
+                <div class="evidence"><strong>验证证据：</strong>失败代码哈希: 65163f817b2785483787e4a185d553692f5c4b448a16bb9d1e34ce514f498d28
+成功代码哈希: 8a3eab35daba20e80ad93547fb1deedc26fd7b6621312a39f0cf9c057d7fd9e7
+
+最近一次失败输出：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 数据类型检查 ===
+车辆数列原始类型: int64
+转换后类型: int64
+Traceback (most recent call last):
+  File &quot;/Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775216342501_b50b26as1/tmpxwmwdvvc.py&quot;, line 71, in &lt;module&gt;
+    sns.heatmap(heatmap_data, annot=True, fmt=&quot;d&quot;, cmap=&quot;YlOrRd&quot;, 
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File &quot;/Users/m3max/IdeaProjects/DeepAnalyze/demo/jupyter/.venv/lib/python3.12/site-packages/seaborn/matrix.py&quot;, line 459, in heatmap
+    plotter.plot(ax, cbar_ax, kwargs)
+  File &quot;/Users/m3max/IdeaProjects/DeepAnalyze/demo/jupyter/.venv/lib/python3.12/site-packages/seaborn/matrix.py&quot;, line 352, in plot
+    self._annotate_heatmap(ax, mesh)
+  File &quot;/Users/m3max/IdeaProjects/DeepAnalyze/demo/jupyter/.venv/lib/python3.12/site-packages/seaborn/matrix.py&quot;, line 260, in _annotate_heatmap
+    annotation = (&quot;{:&quot; + self.fmt + &quot;}&quot;).format(val)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Unknown format code 'd' for object of type 'float'
+
+
+成功输出：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 数据处理 ===
+原始数据类型:
+ 区域      object
+hour     int64
+车辆数      int64
+dtype: object
+使用 fmt='.0f' 成功
+
+已生成热力图到 generated/heatmap.png
+已生成柱状图到 generated/bar_chart.png
+已生成时间分布折线图到 generated/time_trend.png
+
+已生成区域统计表到 generated/area_stats.csv
+
+已生成最终报告到 vehicle_distribution_report.pdf
+2026-04-03 19:48:53,768 - pdf_utils - INFO - 开始注册中文字体，字体目录: /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts
+2026-04-03 19:48:53,785 - pdf_utils - INFO - 成功注册字体: SimHei -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf
+2026-04-03 19:48:53,821 - pdf_utils - INFO - 注册粗体字体: SimHei-Bold
+2026-04-03 19:48:53,829 - pdf_utils - INFO - 成功注册字体: SimKai -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf
+2026-04-03 19:48:53,837 - pdf_utils - INFO - 注册粗体字体: SimKai-Bold
+2026-04-03 19:48:53,885 - pdf_utils - INFO - 成功注册字体: STFangSong -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf
+2026-04-03 19:48:53,911 - pdf_utils - INFO - 注册粗体字体: STFangSong-Bold
+2026-04-03 19:48:53,965 - pdf_utils - INFO - 成功注册字体: STHeiti -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STHeiti.ttf
+2026-04-03 19:48:53,991 - pdf_utils - INFO - 注册粗体字体: STHeiti-Bold
+2026-04-03 19:48:54,013 - pdf_utils - INFO - 成功注册字体: LiSongPro -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/LiSongPro.ttf
+2026-04-03 19:48:54,057 - pdf_utils - INFO - 注册粗体字体: LiSongPro-Bold
+2026-04-03 19:48:54,058 - pdf_utils - INFO -</div>
+
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-03 11:48:54</span>
+                    <span>🕒 更新时间: 2026-04-03 11:48:54</span>
+                    <span>✅ 最近验证: 2026-04-03 19:48:54</span>
+                    <span>👤 创建者: system_verified</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 1</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 90%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 90.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">5</span>
+                        <span class="error-type ImportError">ImportError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">3c76cb3d63708b4e</span>
+                </div>
+                <div class="error-message">ModuleNotFoundError</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775216342501_b50b26as1
+代码长度: 4637 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>同一会话中再次执行后已真实跑通。后续成功代码已验证可以解决该问题。
+
+成功输出摘要：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 区域间差异成对比较 ===
+
+=== 异常值时间分布特征分析 ===
+
+已生成最终分析报告到 final_analysis_report.pdf
+2026-04-03 20:17:24,257 - pdf_utils - INFO - 开始注册中文字体，字体目录: /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts
+2026-04-03 20:17:24,288 - pdf_utils - INFO - 成功注册字体: SimHei -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf
+2026-04-03 20:17:24,304 - pdf_utils - INFO - 注册粗体字体: SimHei-Bold
+2026-04-03 20:17:24,329 - pdf_utils - INFO - 成功注册字体: SimKai -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf
+2026-04-03 20:17:24,337 - pdf_utils - INFO - 注册粗体字体: SimKai-Bold
+2026-04-03 20:17:24,361 - pdf_utils - INFO - 成功注册字体: STFangSong -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf
+2026-04-03 20:17:24,408 - pdf_utils - INFO - 注册粗体字体: STFangSong-Bold
+2026-04-03 20:17:24,432 - pdf_utils - INFO - 成功注册字体: STHeiti -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STHeiti.ttf
+2026-04-03 20:17:24,481 - pdf_utils - INFO - 注册粗体字体: STHeiti-Bold
+2026-04-03 20:17:24,501 - pdf_utils - INFO - 成功注册字体: LiSongPro -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/LiSongPro.ttf
+2026-04-03 20:17:24,522 - pdf_utils - INFO - 注册粗体字体: LiSongPro-Bold
+2026-04-03 20:17:24,522 - pdf_utils - INFO - 字体注册完成: 成功 10 个，失败 0 个
+2026-04-03 20:17:24,528 - pdf_utils - INFO - PDF 生成成功: final_analysis_report.pdf</p>
+
+                    <pre><code>
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import os
+
+# 使用动态解析的字体目录
+_ASSETS_FONTS = &quot;/Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts&quot;
+_FONT_DIRS = [
+    _ASSETS_FONTS,
+    &quot;/System/Library/Fonts&quot;,
+    &quot;/Library/Fonts&quot;,
+    &quot;/System/Library/Fonts/Supplemental&quot;,
+]
+for _d in _FONT_DIRS:
+    if os.path.exists(_d):
+        for _ff in os.listdir(_d):
+            if _ff.lower().endswith(('.ttf', '.ttc', '.otf')):
+                try:
+                    fm.fontManager.addfont(os.path.join(_d, _ff))
+                except Exception:
+                    pass
+
+# 优先使用支持中文的字体系列（按优先级排序）
+plt.rcParams['font.sans-serif'] = [
+    # assets/fonts 中的中文字体（优先，纯 TTF）
+    'SimHei',           # assets/simhei.ttf（黑体，主标题）
+    'SimKai',           # assets/simkai.ttf（楷体，引用/强调）
+    'STFangSong',       # assets/STFangSong.ttf（仿宋，正文）
+    'STHeiti',          # assets/STHeiti.ttf（黑体，备选）
+    # macOS 系统 CJK 字体
+    'Heiti TC',         # macOS 繁体黑体
+    'PingFang SC',      # macOS 苹方简体中文
+    'PingFang TC',      # macOS 苹方繁体中文
+    'Kaiti SC',         # macOS 楷体
+    'Songti SC',        # macOS 宋体
+    'Arial Unicode MS', # macOS 内置
+    'DejaVu Sans',
+    'sans-serif',
+]
+plt.rcParams['axes.unicode_minus'] = False
+# 额外：确保数据标签、图例、标题全部使用 sans-serif 字体族
+plt.rcParams['font.family'] = 'sans-serif'
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+from pathlib import Path
+
+# 加载数据
+dist_df = pd.read_csv(&quot;generated/vehicle_distribution.csv&quot;)
+
+# 区域间差异成对比较
+print(&quot;=== 区域间差异成对比较 ===&quot;)
+areas = dist_df['区域'].unique()
+comparisons = []
+for i in range(len(areas)):
+    for j in range(i+1, len(areas)):
+        group1 = dist_df[dist_df['区域'] == areas[i]]['车辆数']
+        group2 = dist_df[dist_df['区域'] == areas[j]]['车辆数']
+        t_stat, p_val = stats.ttest_ind(group1, group2, equal_var=False)
+        comparisons.append({
+            '区域1': areas[i],
+            '区域2': areas[j],
+            't统计量': t_stat,
+            'p值': p_val
+        })
+
+comparisons_df = pd.DataFrame(comparisons)
+
+# 区域平均车辆数表格
+area_means = dist_df.groupby('区域')['车辆数'].mean().sort_values(ascending=False)
+area_means_table = &quot;| 区域 | 平均车辆数 |\n&quot;
+area_means_table += &quot;|------|------------|\n&quot;
+for area, mean in area_means.items():
+    area_means_table += f&quot;| {area} | {mean:.2f} |\n&quot;
+
+# 区域间比较表格
+comparisons_table = &quot;| 区域1 | 区域2 | t统计量 | p值 |\n&quot;
+comparisons_table += &quot;|------|------|---------|-----|\n&quot;
+comparisons_sorted = comparisons_df.sort_values('p值')
+for _, row in comparisons_sorted.head(10).iterrows():
+    comparisons_table += f&quot;| {row['区域1']} | {row['区域2']} | {row['t统计量']:.3f} | {row['p值']:.5f} |\n&quot;
+
+# 异常值时间分布特征分析
+print(&quot;\n=== 异常值时间分布特征分析 ===&quot;)
+outliers = dist_df[(dist_df['车辆数'] &gt; 70)]
+if len(outliers) &gt; 0:
+    time_features = outliers.groupby('hour')['车辆数'].agg(['mean', 'count'])
+    time_features_table = &quot;| 小时 | 平均值 | 计数 |\n&quot;
+    time_features_table += &quot;|------|--------|------|\n&quot;
+    for hour, row in time_features.iterrows():
+        time_features_table += f&quot;| {hour} | {row['mean']:.0f} | {row['count']} |\n&quot;
+
+# 生成最终分析报告
+final_report = f&quot;&quot;&quot;
+# 车辆时空分布最终分析报告
+
+## 区域间差异分析
+- 区域间车辆数存在显著差异 (p &lt; 0.0001)
+{area_means_table}
+
+## 区域间两两比较
+{comparisons_table}
+
+## 异常值时间分布特征
+{f&quot;异常值主要集中在{outliers['hour'].mode()[0]}点&quot; if len(outliers) &gt; 0 else &quot;无异常值&quot;}
+{f&quot;异常值时间分布特征:\n{time_features_table}&quot; if len(outliers) &gt; 0 else &quot;&quot;}
+{f&quot;异常值时间分布图: `generated/outlier_time_features.png`&quot; if len(outliers) &gt; 0 else &quot;&quot;}
+
+## 关键发现
+1. 区域间车辆数存在显著差异 (p &lt; 0.0001)
+2. 区域平均车辆数差异最大的是 {comparisons_sorted.loc[comparisons_sorted['p值'].idxmin(), '区域1']} vs {comparisons_sorted.loc[comparisons_sorted['p值'].idxmin(), '区域2']}
+3. {f&quot;异常值主要集中在{outliers['hour'].mode()[0]}点&quot; if len(outliers) &gt; 0 else &quot;无异常值&quot;}
+
+## 图表参考
+1. 区域平均车辆数比较: `generated/area_means_comparison.png`
+2. 区域-时间热力图: `generated/heatmap.png`
+3. 区域分布柱状图: `generated/bar_chart.png`
+4. 时间分布折线图: `generated/time_trend.png`
+5. 区域分布箱线图: `generated/boxplot.png`
+6. 异常值时间分布: `generated/outlier_time_distribution.png`
+7. 异常值区域分布: `generated/outlier_area_distribution.png`
+8. 异常值时间分布特征: `generated/outlier_time_features.png`
+&quot;&quot;&quot;
+
+# 生成最终PDF报告
+from agent_utils import generate_report_pdf
+generate_report_pdf(final_report, &quot;final_analysis_report.pdf&quot;, title=&quot;车辆时空分布最终分析报告&quot;)
+print(&quot;\n已生成最终分析报告到 final_analysis_report.pdf&quot;)
+
+# # Analysis Workflow
+# - 先把大任务拆成较小子任务，再逐个完成。
+# - 每个子任务成功后，都应把可复用结果保存为命名明确的文件。
+# - 继续分析前，先检查已有中间文件和 generated/ 目录，优先复用，避免重复生成相同图表和整段报告。
+# - 最后一轮只做汇总组装，使用前面已经生成的结果，不要从头重跑全部分析。
+# - 当前执行宿主是 Python；如果用户指定 R，请通过 rpy2 或 Rscript 从 Python 调用 R，不要输出无法直接在 Python 中运行的裸 R 脚本。
+# [Generated Files]
+# - area_means_comparison.png
+# - area_stats.csv
+# - bar_chart.png
+# - boxplot.png
+# - boxplot_modified.png
+# - enhanced_final_vehicle_distribution_report.pdf
+# - enhanced_vehicle_distribution_report.pdf
+# - final_analysis_summary_report.pdf
+# - final_vehicle_distribution_report.pdf
+# - heatmap.png
+# - libR.dylib
+# - outlier_area_distribution.png</code></pre>
+</div>
+                <div class="evidence"><strong>验证证据：</strong>失败代码哈希: 818a9311adbfe39fd44dabe70680942512493774493ae06cf56a2bdf070a2599
+成功代码哈希: 621e91ed0f20b2fd6110978fee7039d6aff12a6c4edcb1c7b648fb6b4368b4db
+
+最近一次失败输出：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 区域间差异成对比较 ===
+
+=== 异常值时间分布特征分析 ===
+Traceback (most recent call last):
+  File &quot;/Users/m3max/IdeaProjects/DeepAnalyze/demo/jupyter/.venv/lib/python3.12/site-packages/pandas/compat/_optional.py&quot;, line 135, in import_optional_dependency
+    module = importlib.import_module(name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File &quot;/Users/m3max/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/importlib/__init__.py&quot;, line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File &quot;&lt;frozen importlib._bootstrap&gt;&quot;, line 1387, in _gcd_import
+  File &quot;&lt;frozen importlib._bootstrap&gt;&quot;, line 1360, in _find_and_load
+  File &quot;&lt;frozen importlib._bootstrap&gt;&quot;, line 1324, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'tabulate'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File &quot;/Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775216342501_b50b26as1/tmpfumlaswh.py&quot;, line 99, in &lt;module&gt;
+    {comparisons_df.sort_values('p值').head(10).to_markdown(index=False)}
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File &quot;/Users/m3max/IdeaProjects/DeepAnalyze/demo/jupyter/.venv/lib/python3.12/site-packages/pandas/util/_decorators.py&quot;, line 333, in wrapper
+    
+
+成功输出：
+[Runtime] Python-hosted R mode: python_rpy2
+[Runtime] R_HOME=/opt/homebrew/Cellar/r/4.5.3/lib/R
+=== 区域间差异成对比较 ===
+
+=== 异常值时间分布特征分析 ===
+
+已生成最终分析报告到 final_analysis_report.pdf
+2026-04-03 20:17:24,257 - pdf_utils - INFO - 开始注册中文字体，字体目录: /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts
+2026-04-03 20:17:24,288 - pdf_utils - INFO - 成功注册字体: SimHei -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simhei.ttf
+2026-04-03 20:17:24,304 - pdf_utils - INFO - 注册粗体字体: SimHei-Bold
+2026-04-03 20:17:24,329 - pdf_utils - INFO - 成功注册字体: SimKai -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/simkai.ttf
+2026-04-03 20:17:24,337 - pdf_utils - INFO - 注册粗体字体: SimKai-Bold
+2026-04-03 20:17:24,361 - pdf_utils - INFO - 成功注册字体: STFangSong -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STFangSong.ttf
+2026-04-03 20:17:24,408 - pdf_utils - INFO - 注册粗体字体: STFangSong-Bold
+2026-04-03 20:17:24,432 - pdf_utils - INFO - 成功注册字体: STHeiti -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/STHeiti.ttf
+2026-04-03 20:17:24,481 - pdf_utils - INFO - 注册粗体字体: STHeiti-Bold
+2026-04-03 20:17:24,501 - pdf_utils - INFO - 成功注册字体: LiSongPro -&gt; /Users/m3max/IdeaProjects/DeepAnalyze/assets/fonts/LiSongPro.ttf
+2026-04-03 20:17:24,522 - pdf_utils - INFO - 注册粗体字体: LiSongPro-Bold
+2026-04-03 20:17:24,522 - pdf_utils - INFO - 字体注册完成: 成功 10 个，失败 0 个
+2026-04-03 20:17:24,528 - pdf_utils - INFO - PDF 生成成功: final_analysis_report.pdf</div>
+
+                <div class="meta">
+                    <span>📅 创建时间: 2026-03-24 05:57:46</span>
+                    <span>🕒 更新时间: 2026-04-03 12:17:24</span>
+                    <span>✅ 最近验证: 2026-04-03 12:17:24</span>
+                    <span>👤 创建者: system_verified</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 5</span>
+                    <span>🧪 失败观测: 4</span>
+                    <span>📊 使用次数: 5</span>
+                    <span>🎯 置信度: 90%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 90.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">6</span>
+                        <span class="error-type default">KeyError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">7922c9ef26422815</span>
+                </div>
+                <div class="error-message">region</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775177161510_giyi91squ
+代码长度: 4128 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
                     <p>检查字典键是否存在，使用 .get() 方法或先检查键是否存在。</p>
-                </div>
-
+</div>
                 <div class="meta">
-                    <span>📅 创建时间: 2026-03-25 05:02:00</span>
-                    <span>🔄 更新时间: 2026-03-25 05:02:00</span>
+                    <span>📅 创建时间: 2026-04-03 00:50:16</span>
+                    <span>🕒 更新时间: 2026-04-03 00:50:16</span>
+                    <span>✅ 最近验证: 2026-04-03 00:50:16</span>
                     <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
                     <span>📊 使用次数: 0</span>
                     <span>🎯 置信度: 70%</span>
                 </div>
@@ -264,50 +1324,30 @@
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.RuntimeError">RuntimeError</span>
-                    <span class="error-hash">368fffcf6104ab57</span>
+                    <div class="entry-left">
+                        <span class="serial">7</span>
+                        <span class="error-type default">SyntaxError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">470a6e02854e9f42</span>
                 </div>
-                <div class="error-message">: name 'top_regions' is not defined</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774347017937_motbul9ee
-代码长度: 2570 字符
-                </div>
+                <div class="error-message">unterminated string literal (detected at line 122)</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775149714875_5ms6iz7eq
+代码长度: 3698 字符</div>
+
                 <div class="solution">
-                    <h4>✅ 解决方案</h4>
-                    <p>遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。</p>
-                </div>
-
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查代码语法，确保Python语法正确。</p>
+</div>
                 <div class="meta">
-                    <span>📅 创建时间: 2026-03-25 03:54:51</span>
-                    <span>🔄 更新时间: 2026-03-25 03:54:51</span>
+                    <span>📅 创建时间: 2026-04-03 00:44:26</span>
+                    <span>🕒 更新时间: 2026-04-03 00:45:24</span>
+                    <span>✅ 最近验证: 2026-04-03 00:45:24</span>
                     <span>👤 创建者: system_auto</span>
-                    <span>📊 使用次数: 0</span>
-                    <span>🎯 置信度: 70%</span>
-                </div>
-                <div class="confidence-bar">
-                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
-                </div>
-            </div>
-
-            <div class="entry">
-                <div class="entry-header">
-                    <span class="error-type.default">KeyError</span>
-                    <span class="error-hash">a746621b3a618c1b</span>
-                </div>
-                <div class="error-message">小时</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774347017937_motbul9ee
-代码长度: 3812 字符
-                </div>
-                <div class="solution">
-                    <h4>✅ 解决方案</h4>
-                    <p>检查字典键是否存在，使用 .get() 方法或先检查键是否存在。</p>
-                </div>
-
-                <div class="meta">
-                    <span>📅 创建时间: 2026-03-25 03:51:08</span>
-                    <span>🔄 更新时间: 2026-03-25 03:56:30</span>
-                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
                     <span>📊 使用次数: 1</span>
                     <span>🎯 置信度: 70%</span>
                 </div>
@@ -318,23 +1358,532 @@
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.ValueError">ValueError</span>
+                    <div class="entry-left">
+                        <span class="serial">8</span>
+                        <span class="error-type default">FileNotFoundError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">b8e81445b3c0445a</span>
+                </div>
+                <div class="error-message">[Errno 2] No such file or directory: 'vehicle_paths.csv'</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775144508791_h8jn85i8q
+代码长度: 2659 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查文件路径是否正确，确保文件存在于指定位置。</p>
+
+                    <pre><code># 解决方案：检查文件是否存在，或使用绝对路径
+import os
+
+file_path = &quot;your_file.csv&quot;
+if os.path.exists(file_path):
+    # 读取文件
+    pass
+else:
+    print(f&quot;文件不存在: {file_path}&quot;)
+    # 列出工作区文件帮助调试
+    print(&quot;工作区文件:&quot;, os.listdir(&quot;.&quot;))
+</code></pre>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-02 15:53:54</span>
+                    <span>🕒 更新时间: 2026-04-02 15:53:54</span>
+                    <span>✅ 最近验证: 2026-04-02 15:53:54</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">9</span>
+                        <span class="error-type default">FileNotFoundError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">d8d119161c4394dc</span>
+                </div>
+                <div class="error-message">[Errno 2] No such file or directory: 'region_distribution.csv'</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775144508791_h8jn85i8q
+代码长度: 2775 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查文件路径是否正确，确保文件存在于指定位置。</p>
+
+                    <pre><code># 解决方案：检查文件是否存在，或使用绝对路径
+import os
+
+file_path = &quot;your_file.csv&quot;
+if os.path.exists(file_path):
+    # 读取文件
+    pass
+else:
+    print(f&quot;文件不存在: {file_path}&quot;)
+    # 列出工作区文件帮助调试
+    print(&quot;工作区文件:&quot;, os.listdir(&quot;.&quot;))
+</code></pre>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-02 15:50:11</span>
+                    <span>🕒 更新时间: 2026-04-02 15:50:11</span>
+                    <span>✅ 最近验证: 2026-04-02 15:50:11</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">10</span>
+                        <span class="error-type default">SyntaxError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">f75a6b207720b851</span>
+                </div>
+                <div class="error-message">invalid syntax</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775096328476_4amycsv9z
+代码长度: 2115 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查代码语法，确保Python语法正确。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-02 14:26:49</span>
+                    <span>🕒 更新时间: 2026-04-02 15:46:11</span>
+                    <span>✅ 最近验证: 2026-04-02 15:46:11</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 3</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 3</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">11</span>
+                        <span class="error-type default">SyntaxError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">0f7e5e1cb5080d5a</span>
+                </div>
+                <div class="error-message">unterminated string literal (detected at line 64)</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775096328476_4amycsv9z
+代码长度: 3460 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查代码语法，确保Python语法正确。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-02 14:48:54</span>
+                    <span>🕒 更新时间: 2026-04-02 14:48:54</span>
+                    <span>✅ 最近验证: 2026-04-02 14:48:54</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">12</span>
+                        <span class="error-type default">SyntaxError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">ff635ad36965cb07</span>
+                </div>
+                <div class="error-message">unterminated string literal (detected at line 103)</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775096328476_4amycsv9z
+代码长度: 3270 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查代码语法，确保Python语法正确。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-02 14:40:54</span>
+                    <span>🕒 更新时间: 2026-04-02 14:44:44</span>
+                    <span>✅ 最近验证: 2026-04-02 14:44:44</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">13</span>
+                        <span class="error-type default">SyntaxError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">6ce4c3ac7d4406e2</span>
+                </div>
+                <div class="error-message">unterminated triple-quoted string literal (detected at line 109)</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775096328476_4amycsv9z
+代码长度: 3335 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查代码语法，确保Python语法正确。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-02 14:37:12</span>
+                    <span>🕒 更新时间: 2026-04-02 14:37:12</span>
+                    <span>✅ 最近验证: 2026-04-02 14:37:12</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">14</span>
+                        <span class="error-type default">SyntaxError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">ad9b239df83af040</span>
+                </div>
+                <div class="error-message">unterminated triple-quoted string literal (detected at line 105)</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775096328476_4amycsv9z
+代码长度: 3268 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查代码语法，确保Python语法正确。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-02 14:33:38</span>
+                    <span>🕒 更新时间: 2026-04-02 14:33:38</span>
+                    <span>✅ 最近验证: 2026-04-02 14:33:38</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">15</span>
+                        <span class="error-type default">SyntaxError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">6560a221aa9f8c65</span>
+                </div>
+                <div class="error-message">unterminated triple-quoted f-string literal (detected at line 107)</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1775096328476_4amycsv9z
+代码长度: 3287 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查代码语法，确保Python语法正确。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-02 14:30:15</span>
+                    <span>🕒 更新时间: 2026-04-02 14:30:15</span>
+                    <span>✅ 最近验证: 2026-04-02 14:30:15</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">16</span>
+                        <span class="error-type TypeError">TypeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">8c60edfe571c09b0</span>
+                </div>
+                <div class="error-message">NDFrame.first() missing 1 required positional argument: 'offset'</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774950158551_ejq2dfa6m
+代码长度: 3148 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查变量类型，确保操作符两边的数据类型兼容。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-03-31 09:48:53</span>
+                    <span>🕒 更新时间: 2026-03-31 09:48:53</span>
+                    <span>✅ 最近验证: 2026-03-31 09:48:53</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">17</span>
+                        <span class="error-type default">MemoryError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">793de7e00369ce62</span>
+                </div>
+                <div class="error-message">Unable to allocate 2.46 PiB for an array with shape (346800000000002,) and data type float64</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774950158551_ejq2dfa6m
+代码长度: 2913 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>遇到 MemoryError 错误，请检查代码逻辑并参考错误消息进行修复。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-03-31 09:46:17</span>
+                    <span>🕒 更新时间: 2026-03-31 09:46:17</span>
+                    <span>✅ 最近验证: 2026-03-31 09:46:17</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">18</span>
+                        <span class="error-type TypeError">TypeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">a7532b11178aea5d</span>
+                </div>
+                <div class="error-message">Index must be a MultiIndex</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774414791694_e86v7486l
+代码长度: 3340 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查变量类型，确保操作符两边的数据类型兼容。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-03-25 05:05:06</span>
+                    <span>🕒 更新时间: 2026-03-25 05:05:06</span>
+                    <span>✅ 最近验证: 2026-03-25 05:05:06</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">19</span>
+                        <span class="error-type default">KeyError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">68cb8b0374df00eb</span>
+                </div>
+                <div class="error-message">timestamp</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774414791694_e86v7486l
+代码长度: 3067 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查字典键是否存在，使用 .get() 方法或先检查键是否存在。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-03-25 05:02:00</span>
+                    <span>🕒 更新时间: 2026-04-03 00:49:01</span>
+                    <span>✅ 最近验证: 2026-03-25 05:02:00</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">20</span>
+                        <span class="error-type default">KeyError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">a746621b3a618c1b</span>
+                </div>
+                <div class="error-message">小时</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774347017937_motbul9ee
+代码长度: 3812 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查字典键是否存在，使用 .get() 方法或先检查键是否存在。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-03-25 03:51:08</span>
+                    <span>🕒 更新时间: 2026-03-25 03:56:30</span>
+                    <span>✅ 最近验证: 2026-03-25 03:56:30</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">21</span>
+                        <span class="error-type RuntimeError">RuntimeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">368fffcf6104ab57</span>
+                </div>
+                <div class="error-message">: name 'top_regions' is not defined</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774347017937_motbul9ee
+代码长度: 2570 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-03-25 03:54:51</span>
+                    <span>🕒 更新时间: 2026-03-25 03:54:51</span>
+                    <span>✅ 最近验证: 2026-03-25 03:54:51</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">22</span>
+                        <span class="error-type ValueError">ValueError</span>
+                        <span class="status">已验证</span>
+                    </div>
                     <span class="error-hash">906d8e2fdbd631a6</span>
                 </div>
                 <div class="error-message">No objects to concatenate</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774346344581_oqvvmeu2k
-代码长度: 2251 字符
-                </div>
-                <div class="solution">
-                    <h4>✅ 解决方案</h4>
-                    <p>检查输入数据的类型和格式，确保参数值在有效范围内。</p>
-                </div>
 
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774346344581_oqvvmeu2k
+代码长度: 2251 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查输入数据的类型和格式，确保参数值在有效范围内。</p>
+</div>
                 <div class="meta">
                     <span>📅 创建时间: 2026-03-24 10:01:27</span>
-                    <span>🔄 更新时间: 2026-03-24 10:01:27</span>
+                    <span>🕒 更新时间: 2026-03-24 10:01:27</span>
+                    <span>✅ 最近验证: 2026-03-24 10:01:27</span>
                     <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
                     <span>📊 使用次数: 0</span>
                     <span>🎯 置信度: 70%</span>
                 </div>
@@ -345,23 +1894,30 @@
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.RuntimeError">RuntimeError</span>
+                    <div class="entry-left">
+                        <span class="serial">23</span>
+                        <span class="error-type RuntimeError">RuntimeError</span>
+                        <span class="status">已验证</span>
+                    </div>
                     <span class="error-hash">93eefc9e265fa78a</span>
                 </div>
                 <div class="error-message">: name 'glob' is not defined. Did you forget to import 'glob'?</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774330902829_0uamgujym
-代码长度: 2639 字符
-                </div>
-                <div class="solution">
-                    <h4>✅ 解决方案</h4>
-                    <p>遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。</p>
-                </div>
 
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774330902829_0uamgujym
+代码长度: 2639 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。</p>
+</div>
                 <div class="meta">
                     <span>📅 创建时间: 2026-03-24 06:08:03</span>
-                    <span>🔄 更新时间: 2026-03-24 06:08:03</span>
+                    <span>🕒 更新时间: 2026-03-24 06:08:03</span>
+                    <span>✅ 最近验证: 2026-03-24 06:08:03</span>
                     <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
                     <span>📊 使用次数: 0</span>
                     <span>🎯 置信度: 70%</span>
                 </div>
@@ -372,62 +1928,35 @@
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.ImportError">ImportError</span>
-                    <span class="error-hash">3c76cb3d63708b4e</span>
-                </div>
-                <div class="error-message">ModuleNotFoundError</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774330902829_0uamgujym
-代码长度: 3601 字符
-                </div>
-                <div class="solution">
-                    <h4>✅ 解决方案</h4>
-                    <pre><code># 解决方案：确保所有依赖已安装
-import subprocess
-import sys
-
-def install_package(package_name):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
-
-# 示例：安装缺失的包
-# install_package("package_name")
-</code></pre>
-                </div>
-
-                <div class="meta">
-                    <span>📅 创建时间: 2026-03-24 05:57:46</span>
-                    <span>🔄 更新时间: 2026-03-24 05:57:46</span>
-                    <span>👤 创建者: system_auto</span>
-                    <span>📊 使用次数: 0</span>
-                    <span>🎯 置信度: 70%</span>
-                </div>
-                <div class="confidence-bar">
-                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
-                </div>
-            </div>
-
-            <div class="entry">
-                <div class="entry-header">
-                    <span class="error-type.default">FPDFException</span>
+                    <div class="entry-left">
+                        <span class="serial">24</span>
+                        <span class="error-type default">FPDFException</span>
+                        <span class="status">已验证</span>
+                    </div>
                     <span class="error-hash">c5142f82f9c766b0</span>
                 </div>
                 <div class="error-message">Undefined font: simhei</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>使用 FPDF 生成 PDF 报告时，调用 set_font('SimHei') 提示字体未定义。这通常是因为 add_font 未能正确注册或作用域不对。
-                </div>
+
+                <div class="error-context"><strong>上下文：</strong>使用 FPDF 生成 PDF 报告时，调用 set_font('SimHei') 提示字体未定义。这通常是因为 add_font 未能正确注册或作用域不对。</div>
+
                 <div class="solution">
-                    <h4>✅ 解决方案</h4>
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>使用系统预封装的 agent_utils.init_fpdf_chinese() 获取已注册好所有中文字体的 FPDF 实例。确保 add_font 和 set_font 作用于同一个 pdf 对象。</p>
+
                     <pre><code>from agent_utils import init_fpdf_chinese
 pdf = init_fpdf_chinese()
 pdf.add_page()
 pdf.set_font('SimHei', 'B', 16)
 pdf.cell(0, 10, '标题', ln=True)</code></pre>
-                </div>
-
+</div>
                 <div class="meta">
                     <span>📅 创建时间: 2026-03-24 05:50:36</span>
-                    <span>🔄 更新时间: 2026-03-24 05:50:36</span>
+                    <span>🕒 更新时间: 2026-03-24 05:50:36</span>
+                    <span>✅ 最近验证: 2026-03-24 05:50:36</span>
                     <span>👤 创建者: Claude</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
                     <span>📊 使用次数: 0</span>
                     <span>🎯 置信度: 100%</span>
                 </div>
@@ -438,27 +1967,36 @@ pdf.cell(0, 10, '标题', ln=True)</code></pre>
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.TypeError">TypeError</span>
+                    <div class="entry-left">
+                        <span class="serial">25</span>
+                        <span class="error-type TypeError">TypeError</span>
+                        <span class="status">已验证</span>
+                    </div>
                     <span class="error-hash">35a4c7bd24d7c9b5</span>
                 </div>
                 <div class="error-message">Addition/subtraction of integers and integer-arrays with Timestamp is no longer supported</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>在 Pandas 2.0+ 中，直接对 Timestamp 进行整数加减（如 ts - 30）会报错。必须使用 Timedelta。
-                </div>
+
+                <div class="error-context"><strong>上下文：</strong>在 Pandas 2.0+ 中，直接对 Timestamp 进行整数加减（如 ts - 30）会报错。必须使用 Timedelta。</div>
+
                 <div class="solution">
-                    <h4>✅ 解决方案</h4>
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>使用 pd.Timedelta(days=N) 进行日期加减，或使用系统封装的 agent_utils.pandas_date_sub 函数。</p>
+
                     <pre><code>import pandas as pd
 from agent_utils import pandas_date_sub
 # 方式1
 new_date = old_date - pd.Timedelta(days=30)
 # 方式2
 new_date = pandas_date_sub(old_date, 30)</code></pre>
-                </div>
-
+</div>
                 <div class="meta">
                     <span>📅 创建时间: 2026-03-24 05:50:36</span>
-                    <span>🔄 更新时间: 2026-03-24 05:50:36</span>
+                    <span>🕒 更新时间: 2026-03-24 05:50:36</span>
+                    <span>✅ 最近验证: 2026-03-24 05:50:36</span>
                     <span>👤 创建者: Claude</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
                     <span>📊 使用次数: 0</span>
                     <span>🎯 置信度: 100%</span>
                 </div>
@@ -469,50 +2007,30 @@ new_date = pandas_date_sub(old_date, 30)</code></pre>
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.TypeError">TypeError</span>
-                    <span class="error-hash">790824475f43d464</span>
-                </div>
-                <div class="error-message">Addition/subtraction of integers and integer-arrays with Timestamp is no longer supported.  Instead of adding/subtracting `n`, use `n * obj.freq`</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774284367576_tenzi5nse
-代码长度: 4612 字符
-                </div>
-                <div class="solution">
-                    <h4>✅ 解决方案</h4>
-                    <p>检查变量类型，确保操作符两边的数据类型兼容。</p>
-                </div>
-
-                <div class="meta">
-                    <span>📅 创建时间: 2026-03-24 01:36:12</span>
-                    <span>🔄 更新时间: 2026-03-24 01:36:12</span>
-                    <span>👤 创建者: system_auto</span>
-                    <span>📊 使用次数: 0</span>
-                    <span>🎯 置信度: 70%</span>
-                </div>
-                <div class="confidence-bar">
-                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
-                </div>
-            </div>
-
-            <div class="entry">
-                <div class="entry-header">
-                    <span class="error-type.RuntimeError">RuntimeError</span>
+                    <div class="entry-left">
+                        <span class="serial">26</span>
+                        <span class="error-type RuntimeError">RuntimeError</span>
+                        <span class="status">已验证</span>
+                    </div>
                     <span class="error-hash">58fd5bf80a396460</span>
                 </div>
                 <div class="error-message">(</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774284367576_tenzi5nse
-代码长度: 4681 字符
-                </div>
-                <div class="solution">
-                    <h4>✅ 解决方案</h4>
-                    <p>遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。</p>
-                </div>
 
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774284367576_tenzi5nse
+代码长度: 4681 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。</p>
+</div>
                 <div class="meta">
                     <span>📅 创建时间: 2026-03-24 01:34:37</span>
-                    <span>🔄 更新时间: 2026-03-24 01:38:47</span>
+                    <span>🕒 更新时间: 2026-03-24 01:38:47</span>
+                    <span>✅ 最近验证: 2026-03-24 01:38:47</span>
                     <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
                     <span>📊 使用次数: 1</span>
                     <span>🎯 置信度: 70%</span>
                 </div>
@@ -523,23 +2041,64 @@ new_date = pandas_date_sub(old_date, 30)</code></pre>
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.ValueError">ValueError</span>
+                    <div class="entry-left">
+                        <span class="serial">27</span>
+                        <span class="error-type TypeError">TypeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">790824475f43d464</span>
+                </div>
+                <div class="error-message">Addition/subtraction of integers and integer-arrays with Timestamp is no longer supported.  Instead of adding/subtracting `n`, use `n * obj.freq`</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774284367576_tenzi5nse
+代码长度: 4612 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查变量类型，确保操作符两边的数据类型兼容。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-03-24 01:36:12</span>
+                    <span>🕒 更新时间: 2026-03-24 01:36:12</span>
+                    <span>✅ 最近验证: 2026-03-24 01:36:12</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
+                    <span>📊 使用次数: 0</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">28</span>
+                        <span class="error-type ValueError">ValueError</span>
+                        <span class="status">已验证</span>
+                    </div>
                     <span class="error-hash">5d336d38c26a90b4</span>
                 </div>
                 <div class="error-message">Worksheet named 'Indonesia Imports' not found</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774251543872_hnixbfk3q
-代码长度: 2924 字符
-                </div>
-                <div class="solution">
-                    <h4>✅ 解决方案</h4>
-                    <p>检查输入数据的类型和格式，确保参数值在有效范围内。</p>
-                </div>
 
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774251543872_hnixbfk3q
+代码长度: 2924 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查输入数据的类型和格式，确保参数值在有效范围内。</p>
+</div>
                 <div class="meta">
                     <span>📅 创建时间: 2026-03-23 07:59:10</span>
-                    <span>🔄 更新时间: 2026-03-23 08:50:40</span>
+                    <span>🕒 更新时间: 2026-03-23 08:50:40</span>
+                    <span>✅ 最近验证: 2026-03-23 08:50:40</span>
                     <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 12</span>
+                    <span>🧪 失败观测: 0</span>
                     <span>📊 使用次数: 12</span>
                     <span>🎯 置信度: 70%</span>
                 </div>
@@ -550,22 +2109,31 @@ new_date = pandas_date_sub(old_date, 30)</code></pre>
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.ImportError">ImportError</span>
+                    <div class="entry-left">
+                        <span class="serial">29</span>
+                        <span class="error-type ImportError">ImportError</span>
+                        <span class="status">已验证</span>
+                    </div>
                     <span class="error-hash">b2037e462a57fa96</span>
                 </div>
                 <div class="error-message">ModuleNotFoundError: No module named 'pandas'</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>在执行数据分析代码时，缺少pandas库
-                </div>
-                <div class="solution">
-                    <h4>✅ 解决方案</h4>
-                    <pre><code>pip install pandas</code></pre>
-                </div>
 
+                <div class="error-context"><strong>上下文：</strong>在执行数据分析代码时，缺少pandas库</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>安装pandas库</p>
+
+                    <pre><code>pip install pandas</code></pre>
+</div>
                 <div class="meta">
                     <span>📅 创建时间: 2026-03-21 06:58:49</span>
-                    <span>🔄 更新时间: 2026-03-21 06:59:58</span>
+                    <span>🕒 更新时间: 2026-03-21 06:59:58</span>
+                    <span>✅ 最近验证: 2026-03-21 06:59:58</span>
                     <span>👤 创建者: system</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
                     <span>📊 使用次数: 1</span>
                     <span>🎯 置信度: 95%</span>
                 </div>
@@ -576,15 +2144,21 @@ new_date = pandas_date_sub(old_date, 30)</code></pre>
 
             <div class="entry">
                 <div class="entry-header">
-                    <span class="error-type.ValueError">ValueError</span>
+                    <div class="entry-left">
+                        <span class="serial">30</span>
+                        <span class="error-type ValueError">ValueError</span>
+                        <span class="status">已验证</span>
+                    </div>
                     <span class="error-hash">8ff4b5c9ef48f866</span>
                 </div>
                 <div class="error-message">UnicodeDecodeError: 'utf-8' codec can't decode byte</div>
-                <div class="error-context">
-                    <strong>上下文：</strong>读取非UTF-8编码的文件时出现错误
-                </div>
+
+                <div class="error-context"><strong>上下文：</strong>读取非UTF-8编码的文件时出现错误</div>
+
                 <div class="solution">
-                    <h4>✅ 解决方案</h4>
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>使用chardet检测文件编码并转换</p>
+
                     <pre><code>
 import chardet
 
@@ -593,12 +2167,15 @@ with open('file.csv', 'rb') as f:
     encoding = chardet.detect(raw_data)['encoding']
     content = raw_data.decode(encoding, errors='ignore')
 </code></pre>
-                </div>
-
+</div>
                 <div class="meta">
                     <span>📅 创建时间: 2026-03-21 06:58:49</span>
-                    <span>🔄 更新时间: 2026-03-21 06:59:58</span>
+                    <span>🕒 更新时间: 2026-03-21 06:59:58</span>
+                    <span>✅ 最近验证: 2026-03-21 06:59:58</span>
                     <span>👤 创建者: system</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 0</span>
                     <span>📊 使用次数: 1</span>
                     <span>🎯 置信度: 90%</span>
                 </div>
@@ -608,9 +2185,17 @@ with open('file.csv', 'rb') as f:
             </div>
 
         </div>
+        <h2 class="section-title">环境完善建议</h2>
+        <div class="entries">
+
+            <div class="empty-state">
+                <div class="empty-icon">🛠️</div>
+                <h3>暂无环境完善建议</h3>
+                <p>当系统检测到可通过基础环境完善解决的问题时，会在这里形成管理员待办。</p>
+            </div>
 
         <div class="footer">
-            <p>雨途斩棘录 - 智能体的错误修正知识库</p>
+            <p>雨途斩棘录 - 智能体的已验证错误修复知识库</p>
             <p>超级用户: rainforgrain</p>
         </div>
     </div>

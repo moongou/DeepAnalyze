@@ -1,0 +1,538 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-03-27T10:25:11.419527",
+  "records": [
+    {
+      "id": 7,
+      "error_hash": "b2037e462a57fa96",
+      "error_type": "ImportError",
+      "error_message": "ModuleNotFoundError: No module named 'pandas'",
+      "error_context": "在执行数据分析代码时，缺少pandas库",
+      "solution": "安装pandas库",
+      "solution_code": "pip install pandas",
+      "confidence": 0.95,
+      "usage_count": 1,
+      "is_active": 1,
+      "created_at": "2026-03-21 06:58:49",
+      "updated_at": "2026-03-21 06:59:58",
+      "created_by": "system"
+    },
+    {
+      "id": 8,
+      "error_hash": "8ff4b5c9ef48f866",
+      "error_type": "ValueError",
+      "error_message": "UnicodeDecodeError: 'utf-8' codec can't decode byte",
+      "error_context": "读取非UTF-8编码的文件时出现错误",
+      "solution": "使用chardet检测文件编码并转换",
+      "solution_code": "\nimport chardet\n\nwith open('file.csv', 'rb') as f:\n    raw_data = f.read()\n    encoding = chardet.detect(raw_data)['encoding']\n    content = raw_data.decode(encoding, errors='ignore')\n",
+      "confidence": 0.9,
+      "usage_count": 1,
+      "is_active": 1,
+      "created_at": "2026-03-21 06:58:49",
+      "updated_at": "2026-03-21 06:59:58",
+      "created_by": "system"
+    },
+    {
+      "id": 9,
+      "error_hash": "5d336d38c26a90b4",
+      "error_type": "ValueError",
+      "error_message": "Worksheet named 'Indonesia Imports' not found",
+      "error_context": "工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774251543872_hnixbfk3q\n代码长度: 2924 字符",
+      "solution": "检查输入数据的类型和格式，确保参数值在有效范围内。",
+      "solution_code": "",
+      "confidence": 0.7,
+      "usage_count": 12,
+      "is_active": 1,
+      "created_at": "2026-03-23 07:59:10",
+      "updated_at": "2026-03-23 08:50:40",
+      "created_by": "system_auto"
+    },
+    {
+      "id": 10,
+      "error_hash": "58fd5bf80a396460",
+      "error_type": "RuntimeError",
+      "error_message": "(",
+      "error_context": "工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774284367576_tenzi5nse\n代码长度: 4681 字符",
+      "solution": "遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。",
+      "solution_code": "",
+      "confidence": 0.7,
+      "usage_count": 1,
+      "is_active": 1,
+      "created_at": "2026-03-24 01:34:37",
+      "updated_at": "2026-03-24 01:38:47",
+      "created_by": "system_auto"
+    },
+    {
+      "id": 11,
+      "error_hash": "790824475f43d464",
+      "error_type": "TypeError",
+      "error_message": "Addition/subtraction of integers and integer-arrays with Timestamp is no longer supported.  Instead of adding/subtracting `n`, use `n * obj.freq`",
+      "error_context": "工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774284367576_tenzi5nse\n代码长度: 4612 字符",
+      "solution": "检查变量类型，确保操作符两边的数据类型兼容。",
+      "solution_code": "",
+      "confidence": 0.7,
+      "usage_count": 0,
+      "is_active": 1,
+      "created_at": "2026-03-24 01:36:12",
+      "updated_at": "2026-03-24 01:36:12",
+      "created_by": "system_auto"
+    },
+    {
+      "id": 12,
+      "error_hash": "c5142f82f9c766b0",
+      "error_type": "FPDFException",
+      "error_message": "Undefined font: simhei",
+      "error_context": "使用 FPDF 生成 PDF 报告时，调用 set_font('SimHei') 提示字体未定义。这通常是因为 add_font 未能正确注册或作用域不对。",
+      "solution": "使用系统预封装的 agent_utils.init_fpdf_chinese() 获取已注册好所有中文字体的 FPDF 实例。确保 add_font 和 set_font 作用于同一个 pdf 对象。",
+      "solution_code": "from agent_utils import init_fpdf_chinese\npdf = init_fpdf_chinese()\npdf.add_page()\npdf.set_font('SimHei', 'B', 16)\npdf.cell(0, 10, '标题', ln=True)",
+      "confidence": 1.0,
+      "usage_count": 0,
+      "is_active": 1,
+      "created_at": "2026-03-24 05:50:36",
+      "updated_at": "2026-03-24 05:50:36",
+      "created_by": "Claude"
+    },
+    {
+      "id": 13,
+      "error_hash": "35a4c7bd24d7c9b5",
+      "error_type": "TypeError",
+      "error_message": "Addition/subtraction of integers and integer-arrays with Timestamp is no longer supported",
+      "error_context": "在 Pandas 2.0+ 中，直接对 Timestamp 进行整数加减（如 ts - 30）会报错。必须使用 Timedelta。",
+      "solution": "使用 pd.Timedelta(days=N) 进行日期加减，或使用系统封装的 agent_utils.pandas_date_sub 函数。",
+      "solution_code": "import pandas as pd\nfrom agent_utils import pandas_date_sub\n# 方式1\nnew_date = old_date - pd.Timedelta(days=30)\n# 方式2\nnew_date = pandas_date_sub(old_date, 30)",
+      "confidence": 1.0,
+      "usage_count": 0,
+      "is_active": 1,
+      "created_at": "2026-03-24 05:50:36",
+      "updated_at": "2026-03-24 05:50:36",
+      "created_by": "Claude"
+    },
+    {
+      "id": 14,
+      "error_hash": "3c76cb3d63708b4e",
+      "error_type": "ImportError",
+      "error_message": "ModuleNotFoundError",
+      "error_context": "工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774330902829_0uamgujym\n代码长度: 3601 字符",
+      "solution": "检查是否已安装所需的Python包，可能需要使用 pip install 安装缺失的模块。",
+      "solution_code": "# 解决方案：确保所有依赖已安装\nimport subprocess\nimport sys\n\ndef install_package(package_name):\n    subprocess.check_call([sys.executable, \"-m\", \"pip\", \"install\", package_name])\n\n# 示例：安装缺失的包\n# install_package(\"package_name\")\n",
+      "confidence": 0.7,
+      "usage_count": 1,
+      "is_active": 1,
+      "created_at": "2026-03-24 05:57:46",
+      "updated_at": "2026-03-26 15:13:39",
+      "created_by": "system_auto"
+    },
+    {
+      "id": 15,
+      "error_hash": "93eefc9e265fa78a",
+      "error_type": "RuntimeError",
+      "error_message": ": name 'glob' is not defined. Did you forget to import 'glob'?",
+      "error_context": "工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774330902829_0uamgujym\n代码长度: 2639 字符",
+      "solution": "遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。",
+      "solution_code": "",
+      "confidence": 0.7,
+      "usage_count": 0,
+      "is_active": 1,
+      "created_at": "2026-03-24 06:08:03",
+      "updated_at": "2026-03-24 06:08:03",
+      "created_by": "system_auto"
+    },
+    {
+      "id": 16,
+      "error_hash": "906d8e2fdbd631a6",
+      "error_type": "ValueError",
+      "error_message": "No objects to concatenate",
+      "error_context": "工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774346344581_oqvvmeu2k\n代码长度: 2251 字符",
+      "solution": "检查输入数据的类型和格式，确保参数值在有效范围内。",
+      "solution_code": "",
+      "confidence": 0.7,
+      "usage_count": 0,
+      "is_active": 1,
+      "created_at": "2026-03-24 10:01:27",
+      "updated_at": "2026-03-24 10:01:27",
+      "created_by": "system_auto"
+    },
+    {
+      "id": 17,
+      "error_hash": "a746621b3a618c1b",
+      "error_type": "KeyError",
+      "error_message": "小时",
+      "error_context": "工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774347017937_motbul9ee\n代码长度: 3812 字符",
+      "solution": "检查字典键是否存在，使用 .get() 方法或先检查键是否存在。",
+      "solution_code": "",
+      "confidence": 0.7,
+      "usage_count": 1,
+      "is_active": 1,
+      "created_at": "2026-03-25 03:51:08",
+      "updated_at": "2026-03-25 03:56:30",
+      "created_by": "system_auto"
+    },
+    {
+      "id": 18,
+      "error_hash": "368fffcf6104ab57",
+      "error_type": "RuntimeError",
+      "error_message": ": name 'top_regions' is not defined",
+      "error_context": "工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774347017937_motbul9ee\n代码长度: 2570 字符",
+      "solution": "遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。",
+      "solution_code": "",
+      "confidence": 0.7,
+      "usage_count": 0,
+      "is_active": 1,
+      "created_at": "2026-03-25 03:54:51",
+      "updated_at": "2026-03-25 03:54:51",
+      "created_by": "system_auto"
+    },
+    {
+      "id": 19,
+      "error_hash": "68cb8b0374df00eb",
+      "error_type": "KeyError",
+      "error_message": "timestamp",
+      "error_context": "工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774414791694_e86v7486l\n代码长度: 3067 字符",
+      "solution": "检查字典键是否存在，使用 .get() 方法或先检查键是否存在。",
+      "solution_code": "",
+      "confidence": 0.7,
+      "usage_count": 0,
+      "is_active": 1,
+      "created_at": "2026-03-25 05:02:00",
+      "updated_at": "2026-03-25 05:02:00",
+      "created_by": "system_auto"
+    },
+    {
+      "id": 20,
+      "error_hash": "a7532b11178aea5d",
+      "error_type": "TypeError",
+      "error_message": "Index must be a MultiIndex",
+      "error_context": "工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1774414791694_e86v7486l\n代码长度: 3340 字符",
+      "solution": "检查变量类型，确保操作符两边的数据类型兼容。",
+      "solution_code": "",
+      "confidence": 0.7,
+      "usage_count": 0,
+      "is_active": 1,
+      "created_at": "2026-03-25 05:05:06",
+      "updated_at": "2026-03-25 05:05:06",
+      "created_by": "system_auto"
+    }
+  ],
+  "keywords": [
+    {
+      "id": 33,
+      "error_hash": "b2037e462a57fa96",
+      "keyword": "importerror"
+    },
+    {
+      "id": 34,
+      "error_hash": "b2037e462a57fa96",
+      "keyword": "modulenotfounderror"
+    },
+    {
+      "id": 35,
+      "error_hash": "b2037e462a57fa96",
+      "keyword": "module"
+    },
+    {
+      "id": 36,
+      "error_hash": "b2037e462a57fa96",
+      "keyword": "named"
+    },
+    {
+      "id": 37,
+      "error_hash": "b2037e462a57fa96",
+      "keyword": "pandas"
+    },
+    {
+      "id": 38,
+      "error_hash": "8ff4b5c9ef48f866",
+      "keyword": "unicodedecodeerror"
+    },
+    {
+      "id": 39,
+      "error_hash": "8ff4b5c9ef48f866",
+      "keyword": "decode"
+    },
+    {
+      "id": 40,
+      "error_hash": "8ff4b5c9ef48f866",
+      "keyword": "valueerror"
+    },
+    {
+      "id": 41,
+      "error_hash": "8ff4b5c9ef48f866",
+      "keyword": "byte"
+    },
+    {
+      "id": 42,
+      "error_hash": "8ff4b5c9ef48f866",
+      "keyword": "codec"
+    },
+    {
+      "id": 43,
+      "error_hash": "5d336d38c26a90b4",
+      "keyword": "indonesia"
+    },
+    {
+      "id": 44,
+      "error_hash": "5d336d38c26a90b4",
+      "keyword": "imports"
+    },
+    {
+      "id": 45,
+      "error_hash": "5d336d38c26a90b4",
+      "keyword": "worksheet"
+    },
+    {
+      "id": 46,
+      "error_hash": "5d336d38c26a90b4",
+      "keyword": "found"
+    },
+    {
+      "id": 47,
+      "error_hash": "5d336d38c26a90b4",
+      "keyword": "valueerror"
+    },
+    {
+      "id": 48,
+      "error_hash": "5d336d38c26a90b4",
+      "keyword": "named"
+    },
+    {
+      "id": 49,
+      "error_hash": "58fd5bf80a396460",
+      "keyword": "runtimeerror"
+    },
+    {
+      "id": 50,
+      "error_hash": "790824475f43d464",
+      "keyword": "addition"
+    },
+    {
+      "id": 51,
+      "error_hash": "790824475f43d464",
+      "keyword": "integer"
+    },
+    {
+      "id": 52,
+      "error_hash": "790824475f43d464",
+      "keyword": "integers"
+    },
+    {
+      "id": 53,
+      "error_hash": "790824475f43d464",
+      "keyword": "timestamp"
+    },
+    {
+      "id": 54,
+      "error_hash": "790824475f43d464",
+      "keyword": "subtracting"
+    },
+    {
+      "id": 55,
+      "error_hash": "790824475f43d464",
+      "keyword": "arrays"
+    },
+    {
+      "id": 56,
+      "error_hash": "790824475f43d464",
+      "keyword": "subtraction"
+    },
+    {
+      "id": 57,
+      "error_hash": "790824475f43d464",
+      "keyword": "adding"
+    },
+    {
+      "id": 58,
+      "error_hash": "790824475f43d464",
+      "keyword": "freq"
+    },
+    {
+      "id": 59,
+      "error_hash": "790824475f43d464",
+      "keyword": "longer"
+    },
+    {
+      "id": 60,
+      "error_hash": "790824475f43d464",
+      "keyword": "supported"
+    },
+    {
+      "id": 61,
+      "error_hash": "790824475f43d464",
+      "keyword": "typeerror"
+    },
+    {
+      "id": 62,
+      "error_hash": "790824475f43d464",
+      "keyword": "instead"
+    },
+    {
+      "id": 63,
+      "error_hash": "c5142f82f9c766b0",
+      "keyword": "simhei"
+    },
+    {
+      "id": 64,
+      "error_hash": "c5142f82f9c766b0",
+      "keyword": "font"
+    },
+    {
+      "id": 65,
+      "error_hash": "c5142f82f9c766b0",
+      "keyword": "fpdfexception"
+    },
+    {
+      "id": 66,
+      "error_hash": "c5142f82f9c766b0",
+      "keyword": "undefined"
+    },
+    {
+      "id": 67,
+      "error_hash": "35a4c7bd24d7c9b5",
+      "keyword": "timestamp"
+    },
+    {
+      "id": 68,
+      "error_hash": "35a4c7bd24d7c9b5",
+      "keyword": "integer"
+    },
+    {
+      "id": 69,
+      "error_hash": "35a4c7bd24d7c9b5",
+      "keyword": "addition"
+    },
+    {
+      "id": 70,
+      "error_hash": "35a4c7bd24d7c9b5",
+      "keyword": "typeerror"
+    },
+    {
+      "id": 71,
+      "error_hash": "35a4c7bd24d7c9b5",
+      "keyword": "subtraction"
+    },
+    {
+      "id": 72,
+      "error_hash": "35a4c7bd24d7c9b5",
+      "keyword": "integers"
+    },
+    {
+      "id": 73,
+      "error_hash": "35a4c7bd24d7c9b5",
+      "keyword": "arrays"
+    },
+    {
+      "id": 74,
+      "error_hash": "35a4c7bd24d7c9b5",
+      "keyword": "longer"
+    },
+    {
+      "id": 75,
+      "error_hash": "35a4c7bd24d7c9b5",
+      "keyword": "supported"
+    },
+    {
+      "id": 76,
+      "error_hash": "3c76cb3d63708b4e",
+      "keyword": "importerror"
+    },
+    {
+      "id": 77,
+      "error_hash": "3c76cb3d63708b4e",
+      "keyword": "modulenotfounderror"
+    },
+    {
+      "id": 78,
+      "error_hash": "93eefc9e265fa78a",
+      "keyword": "runtimeerror"
+    },
+    {
+      "id": 79,
+      "error_hash": "93eefc9e265fa78a",
+      "keyword": "forget"
+    },
+    {
+      "id": 80,
+      "error_hash": "93eefc9e265fa78a",
+      "keyword": "glob"
+    },
+    {
+      "id": 81,
+      "error_hash": "93eefc9e265fa78a",
+      "keyword": "name"
+    },
+    {
+      "id": 82,
+      "error_hash": "93eefc9e265fa78a",
+      "keyword": "defined"
+    },
+    {
+      "id": 83,
+      "error_hash": "93eefc9e265fa78a",
+      "keyword": "import"
+    },
+    {
+      "id": 84,
+      "error_hash": "906d8e2fdbd631a6",
+      "keyword": "valueerror"
+    },
+    {
+      "id": 85,
+      "error_hash": "906d8e2fdbd631a6",
+      "keyword": "objects"
+    },
+    {
+      "id": 86,
+      "error_hash": "906d8e2fdbd631a6",
+      "keyword": "concatenate"
+    },
+    {
+      "id": 87,
+      "error_hash": "a746621b3a618c1b",
+      "keyword": "keyerror"
+    },
+    {
+      "id": 88,
+      "error_hash": "368fffcf6104ab57",
+      "keyword": "top_regions"
+    },
+    {
+      "id": 89,
+      "error_hash": "368fffcf6104ab57",
+      "keyword": "runtimeerror"
+    },
+    {
+      "id": 90,
+      "error_hash": "368fffcf6104ab57",
+      "keyword": "name"
+    },
+    {
+      "id": 91,
+      "error_hash": "368fffcf6104ab57",
+      "keyword": "defined"
+    },
+    {
+      "id": 92,
+      "error_hash": "68cb8b0374df00eb",
+      "keyword": "keyerror"
+    },
+    {
+      "id": 93,
+      "error_hash": "68cb8b0374df00eb",
+      "keyword": "timestamp"
+    },
+    {
+      "id": 94,
+      "error_hash": "a7532b11178aea5d",
+      "keyword": "index"
+    },
+    {
+      "id": 95,
+      "error_hash": "a7532b11178aea5d",
+      "keyword": "typeerror"
+    },
+    {
+      "id": 96,
+      "error_hash": "a7532b11178aea5d",
+      "keyword": "multiindex"
+    }
+  ]
+}

@@ -23,7 +23,10 @@ from storage import storage
 from utils import (
     get_thread_workspace, prepare_vllm_messages, execute_code_safe,
     execute_code_safe_async, WorkspaceTracker,render_file_block,
-    generate_report_from_messages, extract_code_from_segment
+    generate_report_from_messages, extract_code_from_segment,
+    inject_analysis_runtime_hints, detect_execution_error,
+    remember_failed_execution, record_verified_yutu_solution,
+    build_execution_guidance,
 )
 
 Chinese_matplot_str = """
@@ -196,7 +199,17 @@ async def chat_completions(
                         code_str = extract_code_from_segment(cur_res)
                         if code_str:
                             code_str = Chinese_matplot_str + "\n" + code_str
+                            code_str = inject_analysis_runtime_hints(code_str, workspace_dir)
                             exe_output = await execute_code_safe_async(code_str, workspace_dir)
+                            try:
+                                error_info = detect_execution_error(exe_output)
+                                if error_info.get("has_error"):
+                                    remember_failed_execution(current_thread_id, error_info, code_str, workspace_dir, exe_output)
+                                    exe_output += build_execution_guidance(error_info)
+                                else:
+                                    record_verified_yutu_solution(current_thread_id, code_str, workspace_dir, exe_output)
+                            except Exception:
+                                pass
                             artifacts = tracker.diff_and_collect()
                             exe_str = f"\n<Execute>\n```\n{exe_output}\n```\n</Execute>\n"
                             file_block = render_file_block(
@@ -330,8 +343,18 @@ async def chat_completions(
                     code_str = extract_code_from_segment(cur_res)
                     if code_str:
                         code_str = Chinese_matplot_str + "\n" + code_str
+                        code_str = inject_analysis_runtime_hints(code_str, workspace_dir)
                         # Use async version of execute_code_safe to avoid blocking
                         exe_output = await execute_code_safe_async(code_str, workspace_dir)
+                        try:
+                            error_info = detect_execution_error(exe_output)
+                            if error_info.get("has_error"):
+                                remember_failed_execution(current_thread_id, error_info, code_str, workspace_dir, exe_output)
+                                exe_output += build_execution_guidance(error_info)
+                            else:
+                                record_verified_yutu_solution(current_thread_id, code_str, workspace_dir, exe_output)
+                        except Exception:
+                            pass
                         artifacts = tracker.diff_and_collect()
                         exe_str = f"\n<Execute>\n```\n{exe_output}\n```\n</Execute>\n"
                         file_block = render_file_block(
