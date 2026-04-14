@@ -598,6 +598,79 @@ def start_http_server():
 # Start HTTP server in a separate thread
 threading.Thread(target=start_http_server, daemon=True).start()
 
+
+# ---------- Settings & Hardware Detection ----------
+
+@app.get("/api/settings/hardware")
+async def settings_hardware():
+    """检测当前硬件加速能力"""
+    mlx_available = False
+    cuda_available = False
+    opencl_available = False
+    directml_available = False
+    gpu_info = "N/A"
+
+    try:
+        import mlx  # noqa: F401
+        mlx_available = True
+    except ImportError:
+        pass
+
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+        if cuda_available:
+            gpu_info = torch.cuda.get_device_name(0)
+    except ImportError:
+        pass
+
+    try:
+        import pyopencl  # noqa: F401
+        opencl_available = True
+    except ImportError:
+        pass
+
+    try:
+        import torch_directml  # noqa: F401
+        directml_available = True
+    except ImportError:
+        pass
+
+    if mlx_available:
+        recommended = "mlx"
+    elif cuda_available:
+        recommended = "gpu"
+    else:
+        recommended = "cpu"
+
+    return {
+        "mlx_available": mlx_available,
+        "cuda_available": cuda_available,
+        "opencl_available": opencl_available,
+        "directml_available": directml_available,
+        "gpu_info": gpu_info,
+        "recommended": recommended,
+    }
+
+
+@app.get("/api/settings/defaults")
+async def settings_defaults():
+    """返回前端默认设置"""
+    return {
+        "analysis_mode": "full_agent",
+        "analysis_strategy": "聚焦诉求",
+        "temperature": None,
+        "knowledge_base_enabled": True,
+        "model_version": "mlx",
+        "self_correction_enabled": True,
+        "short_test_enabled": True,
+        "task_decomposition_enabled": True,
+        "explainability_enabled": True,
+        "efficient_processing_enabled": True,
+        "dead_loop_detection_enabled": True,
+    }
+
+
 # ---------- Side Guidance Storage ----------
 # session_id -> guidance_text
 SESSION_GUIDANCE = {}
@@ -1769,13 +1842,84 @@ def get_system_prompt_with_fonts() -> str:
 3. **终止逻辑**：每一轮完整的分析任务**必须**以 `<Answer>` 标签包裹的最终结论结束。
 4. **禁止循环**：禁止在没有新进展的情况下重复生成相同的代码。如果上一次执行已成功或已确定某路径不可行，必须进入下一阶段或输出 `<Answer>`，不得重复相同代码。
 5. **一次完成**：每个 `<Code>` 块应尽量完成一个完整的阶段性任务，避免拆分成多个小块依次执行。
+
+**============================================
+第九部分：七大原则（极重要）
+============================================
+
+**原则一：自我纠错**
+- 对代码执行中出现的错误，自动识别错误类型（数据缺失、类型错误、维度不匹配、编码问题等），并立即生成修复方案重试。
+- 每次错误修复最多重试 3 次，若仍然失败则记录到雨途斩棘录并切换替代方案。
+- 自动修复策略：
+  - 缺失字段：尝试模糊匹配或相似列名
+  - 类型错误：自动推断并转换数据类型
+  - 维度不匹配：自动调整数据形状或选择兼容的操作
+  - 编码问题：自动检测并使用 chardet 修复
+
+**原则二：先短代码测试可行性**
+- 执行任何复杂分析前，先用 2-5 行代码验证关键假设（文件路径、字段名、数据类型、库可用性）。
+- 使用代表性小样本（如前 5 行数据）进行测试。
+- 确认可行后再执行完整代码。
+
+**原则三：大任务拆分为小任务**
+- 将复杂分析目标分解为结构化任务树。
+- 每个叶子节点为一个可独立执行的代码单元。
+- 按依赖关系编排执行顺序，支持并行处理无依赖任务。
+- 共性处理逻辑提取为公共函数，避免重复代码。
+
+**原则四：两种分析模式**
+- **交互式分析模式**：将任务树以结构化方式展示给用户，等待用户选择要执行的分析角度。
+- **全程代理分析模式**：自主执行全部任务树，不展示中间选择界面。
+- 根据当前设置的模式执行对应流程。
+
+**原则五：输出规范**
+- 所有输出使用简体中文。
+- 报告支持 PDF、DOCX、PPTX 三种格式。
+- 排版统一、美观，使用海关风格模板。
+- 图表统一使用 seaborn 暗色/亮色主题。
+
+**原则六：数据类型正确处理**
+- 分析前自动检测数据列类型（数值、类别、日期、文本）。
+- 执行类型转换与校验，对不一致或异常类型给出警告并自动修复。
+- 日期列使用 pd.to_datetime()，数值列使用 pd.to_numeric(errors='coerce')，类别列使用 .astype('category')。
+
+**原则七：高效处理**
+- 优先复用已有的中间结果、缓存数据或已训练模型。
+- 相同功能的代码在同一分析会话中不得重复生成超过一次。
+- 将多个任务中共同的处理逻辑提取为公共函数。
+- 按依赖关系编排任务，支持并行执行。
+- 输出的代码应避免冗余、精简高效。
+
+**============================================
+第十部分：可解释性与智能增强
+============================================
+
+**可解释性要求**：
+- 对机器学习模型的预测结果，必须输出特征重要性分析（使用 SHAP 或 feature_importances_）。
+- 对规则类判断（如虚假申报识别），必须输出判断依据的完整链条。
+- 所有结论必须附带数据支撑和推理过程。
+
+**性能与资源管理**：
+- 针对不同硬件自动调整批处理大小。
+- 大文件分析时使用分块读取（chunksize）和内存监控。
+- 数据量过小（<10条记录）或质量过差（>50%缺失值）时，给出明确提示而非强行分析。
+
+**知识库持续学习**：
+- 每次分析后，将新发现的规律、异常模式、成功经验总结记录。
+- 这些经验将积累为下次分析的参考依据。
+
+**异常情况处理**：
+- 当模型无法完成某类分析时，主动建议替代方法。
+- 当数据不足以支撑结论时，明确标注"证据不足"。
+- 遇到死胡同时立即中止，更换分析思路并通知用户。
+
 6. 请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
 
     # 替换字体目录占位符
     return system_prompt_template.replace("{FONTS_DIR_PLACEHOLDER}", fonts_dir)
 
 
-def bot_stream(messages, workspace, session_id="default", username="default", strategy="聚焦诉求", temperature=0.4):
+def bot_stream(messages, workspace, session_id="default", username="default", strategy="聚焦诉求", temperature=0.4, analysis_mode="full_agent"):
     # Strategy-specific prompts and default temperature
     strategy_temperatures = {
         "聚焦诉求": 0.2,
@@ -1792,6 +1936,13 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
     }
 
     selected_strategy_prompt = strategy_prompts.get(strategy, strategy_prompts["聚焦诉求"])
+
+    # Analysis mode prompt injection
+    mode_prompts = {
+        "interactive": "\n\n**当前分析模式：交互式分析**\n请将分析目标分解为任务树，并以如下格式展示给用户：\n```\n任务树：\n├─ 1. [任务名称]\n│  ├─ 1.1 [子任务名称]\n│  └─ 1.2 [子任务名称]\n├─ 2. [任务名称]\n│  ├─ 2.1 [子任务名称]\n│  └─ 2.2 [子任务名称]\n└─ 3. [任务名称]\n```\n展示任务树后，等待用户选择要执行的任务编号。仅分析用户选定的任务。",
+        "full_agent": "\n\n**当前分析模式：全程代理分析**\n请自主执行全部分析任务，不需要等待用户中间确认。按照任务依赖关系有序执行，确保覆盖所有必要的分析维度。"
+    }
+    selected_mode_prompt = mode_prompts.get(analysis_mode, mode_prompts["full_agent"])
 
     # 使用动态生成的 system prompt（已包含完整内容）
     system_prompt = get_system_prompt_with_fonts()
@@ -1812,6 +1963,10 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
             system_prompt += yutu_context
     except Exception as e:
         print(f"[雨途斩棘录] 启动注入失败: {e}")
+
+    # Append strategy and mode prompts
+    system_prompt += selected_strategy_prompt
+    system_prompt += selected_mode_prompt
 
     # Check if system prompt is already there, if not, insert it
     if not messages or messages[0]["role"] != "system":
@@ -2021,12 +2176,13 @@ async def chat(body: dict = Body(...)):
     username = body.get("username", "default")
     strategy = body.get("strategy", "聚焦诉求")
     temperature = body.get("temperature", None)  # Optional: user can override temperature
+    analysis_mode = body.get("analysis_mode", "full_agent")
 
     # 动态构建 workspace 目录，确保能正确识别当前 session 的文件
     actual_workspace_dir = get_session_workspace(session_id, username)
 
     def generate():
-        for delta_content in bot_stream(messages, workspace, session_id, username, strategy, temperature):
+        for delta_content in bot_stream(messages, workspace, session_id, username, strategy, temperature, analysis_mode):
             # print(delta_content)
             chunk = {
                 "id": "chatcmpl-stream",
@@ -2219,6 +2375,94 @@ def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
     # 降级到 reportlab
     return _save_pdf_with_reportlab(md_text, base_name, workspace_dir)
+
+
+def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
+    """使用 python-pptx 生成 PPTX 报告"""
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+        from pptx.dml.color import RGBColor
+        from pptx.enum.text import PP_ALIGN
+        import re as _re
+
+        Path(workspace_dir).mkdir(parents=True, exist_ok=True)
+        pptx_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pptx")
+
+        prs = Presentation()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
+
+        # Title slide
+        slide_layout = prs.slide_layouts[6]  # Blank layout
+        slide = prs.slides.add_slide(slide_layout)
+        left = Inches(1)
+        top = Inches(2.5)
+        width = Inches(11.333)
+        height = Inches(2)
+        txBox = slide.shapes.add_textbox(left, top, width, height)
+        tf = txBox.text_frame
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        p.text = base_name.replace("_", " ")
+        p.font.size = Pt(36)
+        p.font.bold = True
+        p.font.color.rgb = RGBColor(0, 51, 102)
+        p.alignment = PP_ALIGN.CENTER
+
+        # Split content into sections
+        sections = _re.split(r'\n#{1,3}\s+', md_text)
+        for section in sections:
+            if not section.strip():
+                continue
+            lines = section.strip().split('\n')
+            title = lines[0].strip().lstrip('#').strip() if lines else "分析内容"
+            body = '\n'.join(lines[1:]).strip() if len(lines) > 1 else ""
+
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            # Title
+            txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.333), Inches(1))
+            tf = txBox.text_frame
+            tf.word_wrap = True
+            p = tf.paragraphs[0]
+            p.text = title[:80]
+            p.font.size = Pt(28)
+            p.font.bold = True
+            p.font.color.rgb = RGBColor(0, 51, 102)
+
+            # Body
+            if body:
+                txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(12.333), Inches(5.5))
+                tf2 = txBox2.text_frame
+                tf2.word_wrap = True
+                clean_body = _re.sub(r'\*\*(.*?)\*\*', r'\1', body)
+                clean_body = _re.sub(r'\*(.*?)\*', r'\1', clean_body)
+                clean_body = _re.sub(r'`(.*?)`', r'\1', clean_body)
+                clean_body = _re.sub(r'!\[.*?\]\(.*?\)', '[图表]', clean_body)
+                clean_body = _re.sub(r'\[.*?\]\(.*?\)', '', clean_body)
+
+                max_chars = 1500
+                if len(clean_body) > max_chars:
+                    clean_body = clean_body[:max_chars] + "..."
+
+                p2 = tf2.paragraphs[0]
+                p2.text = clean_body
+                p2.font.size = Pt(14)
+                p2.font.color.rgb = RGBColor(51, 51, 51)
+
+        prs.save(str(pptx_path))
+
+        if pptx_path.exists() and pptx_path.stat().st_size > 0:
+            print(f"PPTX 生成成功: {pptx_path.name}")
+            return pptx_path
+        return None
+    except ImportError:
+        print("python-pptx 未安装，跳过 PPTX 生成")
+        return None
+    except Exception as e:
+        print(f"PPTX 生成失败: {e}")
+        traceback.print_exc()
+        return None
 
 
 def _save_pdf_with_r(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
@@ -2519,16 +2763,19 @@ async def export_report(body: dict = Body(...)):
         md_path = _save_md(md_text, base_name, export_dir)
         docx_path = _save_docx(md_text, base_name, export_dir)
         pdf_path = _save_pdf(md_text, base_name, export_dir)
+        pptx_path = _save_pptx(md_text, base_name, export_dir)
 
         result = {
             "message": "exported",
             "md": md_path.name,
             "pdf": pdf_path.name if pdf_path else None,
             "docx": docx_path.name if docx_path else None,
+            "pptx": pptx_path.name if pptx_path else None,
             "download_urls": {
                 "md": build_download_url(f"{username}/{session_id}/generated/{md_path.name}"),
                 "pdf": build_download_url(f"{username}/{session_id}/generated/{pdf_path.name}") if pdf_path else None,
                 "docx": build_download_url(f"{username}/{session_id}/generated/{docx_path.name}") if docx_path else None,
+                "pptx": build_download_url(f"{username}/{session_id}/generated/{pptx_path.name}") if pptx_path else None,
             },
         }
         return JSONResponse(result)
