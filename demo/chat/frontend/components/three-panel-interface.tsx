@@ -526,6 +526,9 @@ export function ThreePanelInterface() {
   const [pendingSaveData, setPendingSaveData] = useState<any>(null);
   // 退出登录确认弹窗状态
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
+  // 报告类型选择状态
+  const [reportTypes, setReportTypes] = useState<string[]>(["pdf"]);
+  const [showReportTypePicker, setShowReportTypePicker] = useState(false);
   // 雨途斩棘录面板状态
   const [showYutuPanel, setShowYutuPanel] = useState(false);
   const [yutuHtmlContent, setYutuHtmlContent] = useState<string>("");
@@ -1698,7 +1701,9 @@ ${analysisContent}
       });
 
       if (!res.ok) throw new Error("保存失败");
-      toast({ description: "项目已保存" });
+      const resData = await res.json();
+      const storageSize = resData?.storage_size || "";
+      toast({ description: `项目已保存${storageSize ? ` (${storageSize})` : ""}` });
       setShowSaveDialog(false);
       setProjectName("");
       setPendingSaveData(null);
@@ -1887,6 +1892,7 @@ ${analysisContent}
           messages: payloadMessages,
           title,
           session_id: sessionId,
+          report_types: reportTypes,
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -4013,6 +4019,16 @@ ${analysisContent}
     const baseMessageIndex = messages.length;
     const aiMessageIndex = baseMessageIndex + 1;
 
+    // 检测用户消息中是否指定了报告类型
+    const userInput = inputValue.toLowerCase();
+    const detectedTypes: string[] = [];
+    if (userInput.includes("pdf")) detectedTypes.push("pdf");
+    if (userInput.includes("docx") || userInput.includes("word")) detectedTypes.push("docx");
+    if (userInput.includes("pptx") || userInput.includes("ppt")) detectedTypes.push("pptx");
+    if (detectedTypes.length > 0) {
+      setReportTypes(detectedTypes);
+    }
+
     const newMessage: Message = {
       id: Date.now().toString(),
       content: inputValue,
@@ -4059,6 +4075,7 @@ ${analysisContent}
           session_id: sessionId,
           strategy: analysisStrategy,
           analysis_mode: analysisMode,
+          report_types: reportTypes,
           ...(temperature !== null && { temperature }),
         }),
       });
@@ -4593,6 +4610,47 @@ ${analysisContent}
                       <FolderOpen className="h-3 w-3" />
                       项目中心
                     </Button>
+                    {/* 报告类型选择 */}
+                    <div className="relative" onMouseLeave={() => setShowReportTypePicker(false)}>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-[11px] px-2 gap-1 border-green-200 text-green-600 hover:bg-green-50 dark:border-green-900 dark:text-green-400"
+                        onClick={() => setShowReportTypePicker(!showReportTypePicker)}
+                      >
+                        <FileText className="h-3 w-3" />
+                        报告类型
+                      </Button>
+                      {showReportTypePicker && (
+                        <div className="absolute top-8 left-0 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 min-w-[160px]">
+                          <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择报告输出格式</div>
+                          {["pdf", "docx", "pptx"].map((type) => (
+                            <label key={type} className="flex items-center gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={reportTypes.includes(type)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setReportTypes(prev => [...prev, type]);
+                                  } else {
+                                    const next = reportTypes.filter(t => t !== type);
+                                    // 至少保留一项
+                                    if (next.length > 0) {
+                                      setReportTypes(next);
+                                    }
+                                  }
+                                }}
+                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              <span className="text-xs text-gray-700 dark:text-gray-300 uppercase font-mono">{type}</span>
+                            </label>
+                          ))}
+                          <div className="text-[9px] text-gray-400 mt-2 pt-2 border-t border-gray-100 dark:border-gray-800">
+                            当前: {reportTypes.map(t => t.toUpperCase()).join(", ")}
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-1">
@@ -4909,39 +4967,7 @@ ${analysisContent}
                       <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
                         Code
                       </h2>
-                      {/* 分析模式 - 移至顶栏 */}
-                      <div className="flex items-center gap-1">
-                        <Select value={analysisMode} onValueChange={(val) => {
-                          setAnalysisMode(val);
-                          if (typeof window !== "undefined") {
-                            localStorage.setItem("analysisMode", val);
-                          }
-                        }}>
-                          <SelectTrigger className="h-6 w-[90px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
-                            <SelectValue placeholder="模式" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="full_agent" className="text-xs">全程代理</SelectItem>
-                            <SelectItem value="interactive" className="text-xs">交互式</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      {/* 分析策略 - 移至顶栏 */}
-                      <div className="flex items-center gap-1">
-                        <Select value={analysisStrategy} onValueChange={(val) => {
-                          setAnalysisStrategy(val);
-                        }}>
-                          <SelectTrigger className="h-6 w-[80px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
-                            <SelectValue placeholder="策略" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
-                            <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
-                            <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      {/* 热度滑块 - 移至顶栏 */}
+                      {/* 热度滑块 - 保留在顶栏 */}
                       <div className="flex items-center gap-1">
                         <Slider
                           value={[temperature ?? (analysisStrategy === "聚焦诉求" ? 0.2 : analysisStrategy === "适度扩展" ? 0.4 : 0.6)]}
@@ -4966,7 +4992,7 @@ ${analysisContent}
                           <span className="text-[10px] text-gray-300 dark:text-gray-600">↺</span>
                         )}
                       </div>
-                      {/* 分析设置齿轮 - 移至顶栏 */}
+                      {/* 分析设置齿轮 - 保留在顶栏 */}
                       <button
                         onClick={() => setShowSettingsDialog(true)}
                         className="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
@@ -5136,8 +5162,40 @@ ${analysisContent}
               <ResizablePanel defaultSize={60} minSize={20}>
                 <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
                   <div className="py-2 px-4 flex flex-col gap-1 border-b border-gray-100 dark:border-gray-900 bg-gray-50/50 dark:bg-gray-900/30">
-                    <div className="flex justify-center items-center">
+                    <div className="flex justify-center items-center gap-3">
+                      {/* 分析模式 - 左侧 */}
+                      <div className="flex items-center gap-1">
+                        <Select value={analysisMode} onValueChange={(val) => {
+                          setAnalysisMode(val);
+                          if (typeof window !== "undefined") {
+                            localStorage.setItem("analysisMode", val);
+                          }
+                        }}>
+                          <SelectTrigger className="h-7 w-[90px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
+                            <SelectValue placeholder="模式" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="full_agent" className="text-xs">全程代理</SelectItem>
+                            <SelectItem value="interactive" className="text-xs">交互式</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                       <span className="text-blue-600 dark:text-blue-400 font-bold text-base">请风控专家指示分析目标</span>
+                      {/* 分析策略 - 右侧 */}
+                      <div className="flex items-center gap-1">
+                        <Select value={analysisStrategy} onValueChange={(val) => {
+                          setAnalysisStrategy(val);
+                        }}>
+                          <SelectTrigger className="h-7 w-[90px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
+                            <SelectValue placeholder="策略" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
+                            <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
+                            <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
                   </div>
                   <div className="p-4 flex-1 flex flex-col min-h-0 pt-2">
@@ -5570,6 +5628,11 @@ ${analysisContent}
                       <div className="text-sm font-medium truncate">{proj.name}</div>
                       <div className="text-[10px] text-gray-500 mt-1">
                         保存时间：{new Date(proj.created_at).toLocaleString()}
+                        {proj.storage_size && (
+                          <span className="ml-2 px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[9px] font-mono">
+                            {proj.storage_size}
+                          </span>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 ml-4">

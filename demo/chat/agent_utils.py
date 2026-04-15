@@ -130,7 +130,7 @@ def generate_report_docx(md_text, output_path, title="Analysis Report"):
 def generate_report_pptx(md_text, output_path, title="Analysis Report"):
     """
     Generate a PPTX report from Markdown text.
-    Uses python-pptx with Chinese font support and image embedding.
+    Uses python-pptx with Chinese font support, multi-paragraph formatting, and image embedding.
     """
     try:
         from pptx import Presentation
@@ -138,6 +138,7 @@ def generate_report_pptx(md_text, output_path, title="Analysis Report"):
         from pptx.dml.color import RGBColor
         from pptx.enum.text import PP_ALIGN
         import re as _re
+        from datetime import datetime as _dt
 
         prs = Presentation()
         prs.slide_width = Inches(13.333)
@@ -147,9 +148,10 @@ def generate_report_pptx(md_text, output_path, title="Analysis Report"):
         _font_title = "SimHei"
         _font_body = "STFangSong"
 
-        def _set_run_font(run, font_name, size_pt, bold=False, color_rgb=None):
+        def _set_run_font(run, font_name, size_pt, bold=False, italic=False, color_rgb=None):
             run.font.size = Pt(size_pt)
             run.font.bold = bold
+            run.font.italic = italic
             run.font.name = font_name
             if color_rgb:
                 run.font.color.rgb = color_rgb
@@ -161,30 +163,83 @@ def generate_report_pptx(md_text, output_path, title="Analysis Report"):
             except Exception:
                 pass
 
-        # Title slide
+        def _add_formatted_text(text_frame, text, font_name, size_pt, color_rgb=None):
+            """Add multi-paragraph formatted text to a text frame"""
+            lines = text.split('\n')
+            first = True
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                if first:
+                    p = text_frame.paragraphs[0]
+                    first = False
+                else:
+                    p = text_frame.add_paragraph()
+                p.space_after = Pt(4)
+
+                is_bullet = line.startswith('- ') or line.startswith('* ') or line.startswith('• ')
+                if is_bullet:
+                    line = line.lstrip('-*• ').strip()
+                    r = p.add_run()
+                    r.text = "• "
+                    _set_run_font(r, font_name, size_pt, bold=True, color_rgb=RGBColor(0, 102, 204))
+                    r2 = p.add_run()
+                    r2.text = line
+                    _set_run_font(r2, font_name, size_pt, color_rgb=color_rgb or RGBColor(51, 51, 51))
+                elif line.startswith('**') and line.endswith('**'):
+                    r = p.add_run()
+                    r.text = line.strip('*')
+                    _set_run_font(r, font_name, size_pt + 1, bold=True, color_rgb=color_rgb or RGBColor(0, 51, 102))
+                else:
+                    clean = _re.sub(r'\*\*(.*?)\*\*', r'\1', line)
+                    clean = _re.sub(r'\*(.*?)\*', r'\1', clean)
+                    clean = _re.sub(r'`(.*?)`', r'\1', clean)
+                    clean = _re.sub(r'!\[.*?\]\(.*?\)', '', clean)
+                    clean = _re.sub(r'\[([^\]]*)\]\(.*?\)', r'\1', clean)
+                    if clean.strip():
+                        r = p.add_run()
+                        r.text = clean
+                        _set_run_font(r, font_name, size_pt, color_rgb=color_rgb or RGBColor(51, 51, 51))
+
+        # === Title slide with styled background ===
         slide = prs.slides.add_slide(prs.slide_layouts[6])
-        txBox = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(11.333), Inches(2))
+        bg = slide.shapes.add_shape(1, Inches(0), Inches(0), prs.slide_width, Inches(3.5))
+        bg.fill.solid()
+        bg.fill.fore_color.rgb = RGBColor(0, 51, 102)
+        bg.line.fill.background()
+
+        txBox = slide.shapes.add_textbox(Inches(1), Inches(1.0), Inches(11.333), Inches(2))
         tf = txBox.text_frame
         tf.word_wrap = True
         p = tf.paragraphs[0]
         p.alignment = PP_ALIGN.CENTER
         run = p.add_run()
         run.text = title
-        _set_run_font(run, _font_title, 36, bold=True, color_rgb=RGBColor(0, 51, 102))
+        _set_run_font(run, _font_title, 36, bold=True, color_rgb=RGBColor(255, 255, 255))
+
+        p2 = tf.add_paragraph()
+        p2.alignment = PP_ALIGN.CENTER
+        run2 = p2.add_run()
+        run2.text = f"DeepAnalyze 智能分析报告 | {_dt.now().strftime('%Y年%m月%d日')}"
+        _set_run_font(run2, _font_body, 16, color_rgb=RGBColor(200, 220, 255))
 
         # Content slides
-        sections = _re.split(r'\n#{1,3}\s+', md_text)
-        for section in sections:
+        raw_sections = _re.split(r'\n(?=#{1,3}\s+)', md_text)
+        output_dir = Path(output_path).parent if output_path else None
+
+        for section in raw_sections:
             if not section.strip():
                 continue
             lines = section.strip().split('\n')
             sec_title = lines[0].strip().lstrip('#').strip() if lines else "分析内容"
             body = '\n'.join(lines[1:]).strip() if len(lines) > 1 else ""
+            if not sec_title and not body:
+                continue
 
             # Extract and find image references
             img_refs = _re.findall(r'!\[.*?\]\((.*?)\)', body)
             embedded_imgs = []
-            output_dir = Path(output_path).parent if output_path else None
             for ref in img_refs:
                 img_name = os.path.basename(ref)
                 candidates = [Path(ref)]
@@ -195,41 +250,43 @@ def generate_report_pptx(md_text, output_path, title="Analysis Report"):
                         Path(ref),
                     ]
                 for candidate in candidates:
-                    if candidate.exists():
+                    if candidate.exists() and candidate.stat().st_size > 1024:
                         embedded_imgs.append(str(candidate))
                         break
 
             # Clean body text
-            clean_body = _re.sub(r'\*\*(.*?)\*\*', r'\1', body)
-            clean_body = _re.sub(r'\*(.*?)\*', r'\1', clean_body)
-            clean_body = _re.sub(r'`(.*?)`', r'\1', clean_body)
-            clean_body = _re.sub(r'!\[.*?\]\(.*?\)', '', clean_body)
-            clean_body = _re.sub(r'\[.*?\]\(.*?\)', '', clean_body)
+            clean_body = _re.sub(r'!\[.*?\]\(.*?\)', '', body)
+            clean_body = _re.sub(r'\[([^\]]*)\]\(.*?\)', r'\1', clean_body)
             clean_body = clean_body.strip()
 
+            if not clean_body and not embedded_imgs:
+                continue
+
             slide = prs.slides.add_slide(prs.slide_layouts[6])
-            # Title
-            txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.8))
+
+            # Title bar
+            title_bg = slide.shapes.add_shape(1, Inches(0), Inches(0), prs.slide_width, Inches(1.1))
+            title_bg.fill.solid()
+            title_bg.fill.fore_color.rgb = RGBColor(0, 51, 102)
+            title_bg.line.fill.background()
+
+            txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.15), Inches(12.333), Inches(0.8))
             tf = txBox.text_frame
             tf.word_wrap = True
             p = tf.paragraphs[0]
             run = p.add_run()
             run.text = sec_title[:80]
-            _set_run_font(run, _font_title, 28, bold=True, color_rgb=RGBColor(0, 51, 102))
+            _set_run_font(run, _font_title, 24, bold=True, color_rgb=RGBColor(255, 255, 255))
 
             # Body with optional image
             if embedded_imgs:
-                # Text left, image right
                 if clean_body:
-                    if len(clean_body) > 1200:
-                        clean_body = clean_body[:1200] + "..."
-                    txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), Inches(6.0), Inches(5.5))
+                    if len(clean_body) > 2000:
+                        clean_body = clean_body[:2000] + "\n...(内容已截断)"
+                    txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), Inches(6.0), Inches(5.8))
                     tf2 = txBox2.text_frame
                     tf2.word_wrap = True
-                    p2 = tf2.paragraphs[0]
-                    r2 = p2.add_run()
-                    r2.text = clean_body
-                    _set_run_font(r2, _font_body, 13, color_rgb=RGBColor(51, 51, 51))
+                    _add_formatted_text(tf2, clean_body, _font_body, 12)
 
                 for idx, img in enumerate(embedded_imgs[:2]):
                     try:
@@ -237,15 +294,12 @@ def generate_report_pptx(md_text, output_path, title="Analysis Report"):
                     except Exception:
                         pass
             elif clean_body:
-                if len(clean_body) > 1800:
-                    clean_body = clean_body[:1800] + "..."
-                txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), Inches(12.333), Inches(5.5))
+                if len(clean_body) > 2500:
+                    clean_body = clean_body[:2500] + "\n...(内容已截断)"
+                txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), Inches(12.333), Inches(5.8))
                 tf2 = txBox2.text_frame
                 tf2.word_wrap = True
-                p2 = tf2.paragraphs[0]
-                r2 = p2.add_run()
-                r2.text = clean_body
-                _set_run_font(r2, _font_body, 14, color_rgb=RGBColor(51, 51, 51))
+                _add_formatted_text(tf2, clean_body, _font_body, 13)
 
         prs.save(str(output_path))
         return True
