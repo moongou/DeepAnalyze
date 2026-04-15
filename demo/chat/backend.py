@@ -3017,8 +3017,8 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
                     clean = _re.sub(r'\*\*(.*?)\*\*', r'\1', line)
                     clean = _re.sub(r'\*(.*?)\*', r'\1', clean)
                     clean = _re.sub(r'`(.*?)`', r'\1', clean)
-                    clean = _re.sub(r'!\[.*?\]\(.*?\)', '', clean)
-                    clean = _re.sub(r'\[([^\]]*)\]\(.*?\)', r'\1', clean)
+                    clean = _re.sub(r'!\[[^\]]*\]\([^)]*\)', '', clean)
+                    clean = _re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', clean)
                     if clean.strip():
                         run = p.add_run()
                         run.text = clean
@@ -3083,7 +3083,7 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
             body_text = '\n'.join(lines[1:]).strip() if len(lines) > 1 else ""
 
             # Extract image references from markdown
-            img_refs = _re.findall(r'!\[.*?\]\((.*?)\)', body_text)
+            img_refs = _re.findall(r'!\[[^\]]*\]\(([^)]*)\)', body_text)
 
             # Find actual image files
             embedded_images = []
@@ -3096,20 +3096,22 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
                 elif img_stem in available_images_by_stem:
                     img_path = available_images_by_stem[img_stem]
                 else:
-                    candidate = ws_path / ref
-                    if candidate.exists():
+                    candidate = (ws_path / ref).resolve()
+                    # Ensure resolved path stays within workspace
+                    if str(candidate).startswith(str(ws_path)) and candidate.exists():
                         img_path = str(candidate)
                     elif generated_dir.exists():
-                        candidate = generated_dir / img_name
-                        if candidate.exists():
+                        candidate = (generated_dir / img_name).resolve()
+                        if str(candidate).startswith(str(ws_path)) and candidate.exists():
                             img_path = str(candidate)
-                # Verify image is not empty (> 1KB)
-                if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > 1024:
+                # Verify image is not empty (> 1KB minimum)
+                MIN_IMAGE_SIZE_BYTES = 1024
+                if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > MIN_IMAGE_SIZE_BYTES:
                     embedded_images.append(img_path)
 
             # Skip sections with no content
-            clean_body = _re.sub(r'!\[.*?\]\(.*?\)', '', body_text)
-            clean_body = _re.sub(r'\[([^\]]*)\]\(.*?\)', r'\1', clean_body)
+            clean_body = _re.sub(r'!\[[^\]]*\]\([^)]*\)', '', body_text)
+            clean_body = _re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', clean_body)
             clean_body = clean_body.strip()
             if not clean_body and not embedded_images:
                 continue
