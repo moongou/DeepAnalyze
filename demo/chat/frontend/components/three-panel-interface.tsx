@@ -4904,10 +4904,77 @@ ${analysisContent}
               {/* Upper: Code/Preview */}
               <ResizablePanel defaultSize={40} minSize={30}>
                 <div className="flex flex-col bg-gray-50 dark:bg-gray-900 min-h-0 h-full">
-                  <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0">
-                    <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
-                      Code
-                    </h2>
+                  <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-gray-800 shrink-0">
+                    <div className="flex items-center gap-3">
+                      <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                        Code
+                      </h2>
+                      {/* 分析模式 - 移至顶栏 */}
+                      <div className="flex items-center gap-1">
+                        <Select value={analysisMode} onValueChange={(val) => {
+                          setAnalysisMode(val);
+                          if (typeof window !== "undefined") {
+                            localStorage.setItem("analysisMode", val);
+                          }
+                        }}>
+                          <SelectTrigger className="h-6 w-[90px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
+                            <SelectValue placeholder="模式" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="full_agent" className="text-xs">全程代理</SelectItem>
+                            <SelectItem value="interactive" className="text-xs">交互式</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      {/* 分析策略 - 移至顶栏 */}
+                      <div className="flex items-center gap-1">
+                        <Select value={analysisStrategy} onValueChange={(val) => {
+                          setAnalysisStrategy(val);
+                        }}>
+                          <SelectTrigger className="h-6 w-[80px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
+                            <SelectValue placeholder="策略" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
+                            <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
+                            <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      {/* 热度滑块 - 移至顶栏 */}
+                      <div className="flex items-center gap-1">
+                        <Slider
+                          value={[temperature ?? (analysisStrategy === "聚焦诉求" ? 0.2 : analysisStrategy === "适度扩展" ? 0.4 : 0.6)]}
+                          min={0.0}
+                          max={1.0}
+                          step={0.05}
+                          onValueChange={(vals) => setTemperature(vals[0])}
+                          className="w-14 h-4"
+                        />
+                        <span className="text-[10px] text-gray-500 dark:text-gray-400 w-7">
+                          {temperature !== null ? temperature.toFixed(2) : "auto"}
+                        </span>
+                        {temperature !== null ? (
+                          <button
+                            onClick={() => setTemperature(null)}
+                            className="text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                            title="恢复自动"
+                          >
+                            ↺
+                          </button>
+                        ) : (
+                          <span className="text-[10px] text-gray-300 dark:text-gray-600">↺</span>
+                        )}
+                      </div>
+                      {/* 分析设置齿轮 - 移至顶栏 */}
+                      <button
+                        onClick={() => setShowSettingsDialog(true)}
+                        className="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                        title="分析设置"
+                      >
+                        <Settings className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                     <div className="flex items-center gap-2">
                       {/* 雨途斩棘录按钮 */}
                       <Button
@@ -5068,77 +5135,9 @@ ${analysisContent}
               {/* Lower: Chat Input */}
               <ResizablePanel defaultSize={60} minSize={20}>
                 <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
-                  <div className="py-2 px-4 flex flex-col gap-1.5 border-b border-gray-100 dark:border-gray-900 bg-gray-50/50 dark:bg-gray-900/30">
+                  <div className="py-2 px-4 flex flex-col gap-1 border-b border-gray-100 dark:border-gray-900 bg-gray-50/50 dark:bg-gray-900/30">
                     <div className="flex justify-center items-center">
                       <span className="text-blue-600 dark:text-blue-400 font-bold text-base">请风控专家指示分析目标</span>
-                    </div>
-                    <div className="flex justify-between items-center">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-gray-400 dark:text-gray-500">分析模式:</span>
-                        <Select value={analysisMode} onValueChange={(val) => {
-                          setAnalysisMode(val);
-                          if (typeof window !== "undefined") {
-                            localStorage.setItem("analysisMode", val);
-                          }
-                        }}>
-                          <SelectTrigger className="h-7 w-[110px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
-                            <SelectValue placeholder="模式" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="full_agent" className="text-xs">全程代理分析</SelectItem>
-                            <SelectItem value="interactive" className="text-xs">交互式分析</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-gray-400 dark:text-gray-500">分析策略:</span>
-                        <Select value={analysisStrategy} onValueChange={(val) => {
-                          setAnalysisStrategy(val);
-                          // When auto (null), slider position follows strategy default
-                          // When manual, keep user's choice
-                        }}>
-                          <SelectTrigger className="h-7 w-[100px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
-                            <SelectValue placeholder="策略" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
-                            <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
-                            <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-gray-400 dark:text-gray-500">热度:</span>
-                        <Slider
-                          value={[temperature ?? (analysisStrategy === "聚焦诉求" ? 0.2 : analysisStrategy === "适度扩展" ? 0.4 : 0.6)]}
-                          min={0.0}
-                          max={1.0}
-                          step={0.05}
-                          onValueChange={(vals) => setTemperature(vals[0])}
-                          className="w-20 h-4"
-                        />
-                        <span className="text-[10px] text-gray-500 dark:text-gray-400 w-8">
-                          {temperature !== null ? temperature.toFixed(2) : "auto"}
-                        </span>
-                        {temperature !== null ? (
-                          <button
-                            onClick={() => setTemperature(null)}
-                            className="text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                            title="恢复自动"
-                          >
-                            ↺
-                          </button>
-                        ) : (
-                          <span className="text-[10px] text-gray-300 dark:text-gray-600">↺</span>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => setShowSettingsDialog(true)}
-                        className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 px-1.5 py-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-                        title="系统设置"
-                      >
-                        <Settings className="h-3.5 w-3.5" />
-                      </button>
                     </div>
                   </div>
                   <div className="p-4 flex-1 flex flex-col min-h-0 pt-2">

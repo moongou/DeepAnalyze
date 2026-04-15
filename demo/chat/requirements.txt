@@ -9,6 +9,7 @@ chardet
 fpdf2
 python-docx
 reportlab
+python-pptx
 pandas
 matplotlib
 seaborn

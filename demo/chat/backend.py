@@ -1814,6 +1814,13 @@ def get_system_prompt_with_fonts() -> str:
 3. 通过伪报、瞒报、虚报等方式逃避监管证件管理的行为；
 4. 通过低报价格、伪报原产地、伪报HS编码归类逃避税税的行为。你的分析结果应明确指出可疑行为，并详细阐述推理原因。
 
+**数据客观性准则（极重要）**：
+你必须始终坚持以数据的客观性和用户指示要求为根本准则，严格遵循以下原则：
+1. **字段忠实原则**：分析过程中提及的所有概念、指标和维度，必须以数据中实际存在的字段为依据。如果数据中不包含某字段（如"通关""查验""放行"等），则分析过程中绝不能出现这些概念或基于这些概念的推理。
+2. **数据探测优先**：在正式分析之前，必须先执行数据探测代码（`df.columns.tolist()`、`df.head()`、`df.dtypes`），明确掌握数据中的所有字段名称和类型，后续分析严格围绕已探测到的字段展开。
+3. **合理发散但不偏离数据**：保持分析角度的合理发散广度，但所有发散方向必须能在给定数据中找到支撑。不得凭空引入数据中不存在的业务概念。
+4. **用户指示优先**：当用户提出具体分析需求时，首先核实相关字段是否存在于数据中。若不存在，应向用户明确说明数据中缺少相关字段，并建议可行的替代分析方向。
+
 **报告生成规范**：
 - **阶段性分析**：在分析过程中，请通过聊天回复或代码执行结果展示阶段性发现和图表。
 - **最终报告**：只有在**所有**分析维度（如：主体身份、价格风险、通关时效等）全部完成后，在任务的**最后阶段**，才调用 `generate_report_pdf` 或 `generate_report_docx` 将所有核心观点和可视化图形组织成一份完整的终期报告。
@@ -1843,13 +1850,14 @@ def get_system_prompt_with_fonts() -> str:
 ============================================
 为确保分析的高效与稳定，系统为你封装了专用工具库 `agent_utils`。在编写代码时，**务必优先导入并使用**以下功能：
 
-1. **PDF/DOCX 报告生成（一键式，支持中文）**：
+1. **PDF/DOCX/PPTX 报告生成（一键式，支持中文）**：
    ```python
-   from agent_utils import generate_report_pdf, generate_report_docx
+   from agent_utils import generate_report_pdf, generate_report_docx, generate_report_pptx
 
-   # 直接从 Markdown 文本生成 PDF 和 DOCX
+   # 直接从 Markdown 文本生成 PDF、DOCX 和 PPTX
    generate_report_pdf(report_md, "output.pdf", title="分析报告")
    generate_report_docx(report_md, "output.docx", title="分析报告")
+   generate_report_pptx(report_md, "output.pptx", title="分析报告")
    ```
 
 2. **FPDF 2.x 中文支持（解决 Undefined font 错误）**：
@@ -2065,7 +2073,7 @@ def get_system_prompt_with_fonts() -> str:
 - **UTF-8 编码优先**：系统已自动将上传的文本文件转换为 UTF-8 编码并保存到 `converted/` 子目录（文件名保持不变）。**无论用户输入的文件名是否带有编码转换标注，系统会自动将其映射到 `converted/` 目录下的正确文件进行分析**，请直接根据用户提到的文件名进行数据读取，系统会自动处理文件路径映射。
 - **中文字符与编码处理**：在处理任何数据文件前，应确认使用 UTF-8 编码。对于任何包含中文的内容，必须确保在所有输出文件（Png, Jpg, Pdf, Txt, Csv, Docx 等）中正确显示中文。
 - **可视化支持**：在 Python 绘图时，务必配置 `plt.rcParams['font.sans-serif']` 使用 `SimHei`, `PingFang SC` 或其他系统中文字体，防止出现乱码或方框。在 R 中使用 `showtext` 处理中文。
-- **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF 和 DOCX 格式**，这是你的标准交付物。
+- **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF、DOCX 和 PPTX 格式**，这是你的标准交付物。
   - **PDF 生成推荐方案（按优先级）**：
     1. **agent_utils 一键生成（首选）**：使用 `from agent_utils import generate_report_pdf, generate_report_docx`
     2. **reportlab + 中文字体**：使用 reportlab 库，注册 assets/fonts/ 下的纯 TTF 字体生成 PDF
@@ -2703,7 +2711,7 @@ def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
 
 def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
-    """使用 python-pptx 生成 PPTX 报告
+    """使用 python-pptx 生成 PPTX 报告，支持中文字体和图表嵌入
 
     Args:
         md_text: Markdown 格式的分析报告文本
@@ -2715,7 +2723,7 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
     """
     try:
         from pptx import Presentation
-        from pptx.util import Inches, Pt
+        from pptx.util import Inches, Pt, Emu
         from pptx.dml.color import RGBColor
         from pptx.enum.text import PP_ALIGN
         import re as _re
@@ -2730,6 +2738,47 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
         prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
 
+        # Resolve Chinese font path for PPTX
+        _pptx_font_name = "SimHei"
+        _pptx_body_font = "STFangSong"
+        _pptx_font_path = None
+        try:
+            font_path_candidate = os.path.join(_FONT_DIR, "simhei.ttf")
+            if os.path.exists(font_path_candidate):
+                _pptx_font_path = font_path_candidate
+        except Exception:
+            pass
+
+        def _set_font(run, font_name, size_pt, bold=False, color_rgb=None):
+            """Helper to set font properties on a run"""
+            run.font.size = Pt(size_pt)
+            run.font.bold = bold
+            if color_rgb:
+                run.font.color.rgb = color_rgb
+            # Set Chinese font name
+            run.font.name = font_name
+            # Also set East Asian font via XML for proper Chinese rendering
+            try:
+                from lxml import etree
+                rPr = run._r.get_or_add_rPr()
+                ea_font = etree.SubElement(
+                    rPr,
+                    '{http://schemas.openxmlformats.org/drawingml/2006/main}ea',
+                )
+                ea_font.set('typeface', font_name)
+            except Exception:
+                pass
+
+        # Collect image references from workspace/generated
+        generated_dir = ws_path / "generated"
+        available_images = {}
+        for img_dir in [generated_dir, ws_path]:
+            if img_dir.exists():
+                for f in img_dir.iterdir():
+                    if f.suffix.lower() in ('.png', '.jpg', '.jpeg', '.svg', '.gif'):
+                        available_images[f.name] = str(f)
+                        available_images[f.stem] = str(f)
+
         # Title slide
         slide_layout = prs.slide_layouts[6]  # Blank layout
         slide = prs.slides.add_slide(slide_layout)
@@ -2741,11 +2790,17 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
         tf = txBox.text_frame
         tf.word_wrap = True
         p = tf.paragraphs[0]
-        p.text = base_name.replace("_", " ")
-        p.font.size = Pt(36)
-        p.font.bold = True
-        p.font.color.rgb = RGBColor(0, 51, 102)
+        run = p.add_run()
+        run.text = base_name.replace("_", " ")
+        _set_font(run, _pptx_font_name, 36, bold=True, color_rgb=RGBColor(0, 51, 102))
         p.alignment = PP_ALIGN.CENTER
+
+        # Add subtitle with date
+        p2 = tf.add_paragraph()
+        p2.alignment = PP_ALIGN.CENTER
+        run2 = p2.add_run()
+        run2.text = f"生成日期: {datetime.now().strftime('%Y年%m月%d日')}"
+        _set_font(run2, _pptx_body_font, 16, color_rgb=RGBColor(102, 102, 102))
 
         # Split content into sections
         sections = _re.split(r'\n#{1,3}\s+', md_text)
@@ -2756,36 +2811,101 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
             title = lines[0].strip().lstrip('#').strip() if lines else "分析内容"
             body = '\n'.join(lines[1:]).strip() if len(lines) > 1 else ""
 
+            # Extract image references from markdown
+            img_refs = _re.findall(r'!\[.*?\]\((.*?)\)', body)
+
             slide = prs.slides.add_slide(prs.slide_layouts[6])
-            # Title
-            txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.333), Inches(1))
+
+            # Title textbox
+            txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.8))
             tf = txBox.text_frame
             tf.word_wrap = True
             p = tf.paragraphs[0]
-            p.text = title[:80]
-            p.font.size = Pt(28)
-            p.font.bold = True
-            p.font.color.rgb = RGBColor(0, 51, 102)
+            run = p.add_run()
+            run.text = title[:80]
+            _set_font(run, _pptx_font_name, 28, bold=True, color_rgb=RGBColor(0, 51, 102))
 
-            # Body
-            if body:
-                txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(12.333), Inches(5.5))
-                tf2 = txBox2.text_frame
-                tf2.word_wrap = True
-                clean_body = _re.sub(r'\*\*(.*?)\*\*', r'\1', body)
-                clean_body = _re.sub(r'\*(.*?)\*', r'\1', clean_body)
-                clean_body = _re.sub(r'`(.*?)`', r'\1', clean_body)
-                clean_body = _re.sub(r'!\[.*?\]\(.*?\)', '[图表]', clean_body)
-                clean_body = _re.sub(r'\[.*?\]\(.*?\)', '', clean_body)
+            # Add bottom border line for title
+            from pptx.util import Emu as _Emu
+            line_shape = slide.shapes.add_connector(
+                1, Inches(0.5), Inches(1.15), Inches(12.333), Inches(1.15)
+            )
+            line_shape.line.color.rgb = RGBColor(0, 102, 204)
+            line_shape.line.width = Pt(1.5)
 
-                MAX_PPTX_SLIDE_CHARS = 1500
-                if len(clean_body) > MAX_PPTX_SLIDE_CHARS:
-                    clean_body = clean_body[:MAX_PPTX_SLIDE_CHARS] + "..."
+            # Determine layout: with or without images
+            embedded_images = []
+            for ref in img_refs:
+                img_name = os.path.basename(ref)
+                img_stem = Path(img_name).stem
+                # Try to find image in workspace
+                img_path = None
+                if img_name in available_images:
+                    img_path = available_images[img_name]
+                elif img_stem in available_images:
+                    img_path = available_images[img_stem]
+                else:
+                    # Try direct path
+                    candidate = ws_path / ref
+                    if candidate.exists():
+                        img_path = str(candidate)
+                    else:
+                        candidate = generated_dir / img_name if generated_dir.exists() else None
+                        if candidate and candidate.exists():
+                            img_path = str(candidate)
+                if img_path and os.path.exists(img_path):
+                    embedded_images.append(img_path)
 
-                p2 = tf2.paragraphs[0]
-                p2.text = clean_body
-                p2.font.size = Pt(14)
-                p2.font.color.rgb = RGBColor(51, 51, 51)
+            # Clean body text
+            clean_body = _re.sub(r'\*\*(.*?)\*\*', r'\1', body)
+            clean_body = _re.sub(r'\*(.*?)\*', r'\1', clean_body)
+            clean_body = _re.sub(r'`(.*?)`', r'\1', clean_body)
+            clean_body = _re.sub(r'!\[.*?\]\(.*?\)', '', clean_body)
+            clean_body = _re.sub(r'\[.*?\]\(.*?\)', '', clean_body)
+            clean_body = clean_body.strip()
+
+            if embedded_images:
+                # Layout with image on right, text on left
+                text_width = Inches(6.0)
+                img_left = Inches(6.8)
+                img_width = Inches(5.8)
+                img_top = Inches(1.3)
+
+                # Text body on the left
+                if clean_body:
+                    MAX_CHARS = 1200
+                    if len(clean_body) > MAX_CHARS:
+                        clean_body = clean_body[:MAX_CHARS] + "..."
+                    txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), text_width, Inches(5.5))
+                    tf2 = txBox2.text_frame
+                    tf2.word_wrap = True
+                    p2 = tf2.paragraphs[0]
+                    run2 = p2.add_run()
+                    run2.text = clean_body
+                    _set_font(run2, _pptx_body_font, 13, color_rgb=RGBColor(51, 51, 51))
+
+                # Embed images on the right (up to 2 per slide)
+                for idx, img_path in enumerate(embedded_images[:2]):
+                    try:
+                        y_offset = img_top + Inches(idx * 3.0)
+                        slide.shapes.add_picture(
+                            img_path, img_left, y_offset, img_width, Inches(2.8)
+                        )
+                    except Exception as img_err:
+                        print(f"PPTX 图片嵌入失败: {img_err}")
+            else:
+                # Full-width text layout
+                if clean_body:
+                    MAX_PPTX_SLIDE_CHARS = 1800
+                    if len(clean_body) > MAX_PPTX_SLIDE_CHARS:
+                        clean_body = clean_body[:MAX_PPTX_SLIDE_CHARS] + "..."
+                    txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), Inches(12.333), Inches(5.5))
+                    tf2 = txBox2.text_frame
+                    tf2.word_wrap = True
+                    p2 = tf2.paragraphs[0]
+                    run2 = p2.add_run()
+                    run2.text = clean_body
+                    _set_font(run2, _pptx_body_font, 14, color_rgb=RGBColor(51, 51, 51))
 
         prs.save(str(pptx_path))
 
@@ -2794,7 +2914,7 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
             return pptx_path
         return None
     except ImportError:
-        print("python-pptx 未安装，跳过 PPTX 生成")
+        print("python-pptx 未安装，跳过 PPTX 生成。请运行: pip install python-pptx")
         return None
     except Exception as e:
         print(f"PPTX 生成失败: {e}")
