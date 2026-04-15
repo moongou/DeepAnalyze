@@ -19,3 +19,12 @@ fastapi
 openai
 pypandoc
 reportlab
+
+# Report Generation
+python-pptx
+python-docx
+fpdf2
+
+# Graph Analysis
+networkx
+neo4j

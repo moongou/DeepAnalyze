@@ -10,6 +10,8 @@ fpdf2
 python-docx
 reportlab
 python-pptx
+networkx
+neo4j
 pandas
 matplotlib
 seaborn
