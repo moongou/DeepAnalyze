@@ -598,6 +598,16 @@ def test_pdf_generation() -> str:
         return "测试失败，请查看日志了解详情"
 
 
+# ==================== 模块加载时自动注册字体（一次性） ====================
+# 在模块首次被导入时立即注册所有中文字体，后续调用 register_chinese_fonts()
+# 将直接返回缓存结果，避免在每次生成报告时重复执行注册操作。
+_startup_fonts = register_chinese_fonts(force=False)
+if _startup_fonts:
+    logger.info(f"[启动优化] 字体已在模块加载时预注册: {list(_startup_fonts.keys())}")
+else:
+    logger.warning("[启动优化] 模块加载时未能注册任何中文字体")
+
+
 if __name__ == "__main__":
     # 运行测试
     print("=" * 60)

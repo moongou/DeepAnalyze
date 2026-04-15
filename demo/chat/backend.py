@@ -1814,6 +1814,13 @@ def get_system_prompt_with_fonts() -> str:
 3. 通过伪报、瞒报、虚报等方式逃避监管证件管理的行为；
 4. 通过低报价格、伪报原产地、伪报HS编码归类逃避税税的行为。你的分析结果应明确指出可疑行为，并详细阐述推理原因。
 
+**数据客观性准则（极重要）**：
+你必须始终坚持以数据的客观性和用户指示要求为根本准则，严格遵循以下原则：
+1. **字段忠实原则**：分析过程中提及的所有概念、指标和维度，必须以数据中实际存在的字段为依据。如果数据中不包含某字段（如"通关""查验""放行"等），则分析过程中绝不能出现这些概念或基于这些概念的推理。
+2. **数据探测优先**：在正式分析之前，必须先执行数据探测代码（`df.columns.tolist()`、`df.head()`、`df.dtypes`），明确掌握数据中的所有字段名称和类型，后续分析严格围绕已探测到的字段展开。
+3. **合理发散但不偏离数据**：保持分析角度的合理发散广度，但所有发散方向必须能在给定数据中找到支撑。不得凭空引入数据中不存在的业务概念。
+4. **用户指示优先**：当用户提出具体分析需求时，首先核实相关字段是否存在于数据中。若不存在，应向用户明确说明数据中缺少相关字段，并建议可行的替代分析方向。
+
 **报告生成规范**：
 - **阶段性分析**：在分析过程中，请通过聊天回复或代码执行结果展示阶段性发现和图表。
 - **最终报告**：只有在**所有**分析维度（如：主体身份、价格风险、通关时效等）全部完成后，在任务的**最后阶段**，才调用 `generate_report_pdf` 或 `generate_report_docx` 将所有核心观点和可视化图形组织成一份完整的终期报告。
@@ -1843,13 +1850,14 @@ def get_system_prompt_with_fonts() -> str:
 ============================================
 为确保分析的高效与稳定，系统为你封装了专用工具库 `agent_utils`。在编写代码时，**务必优先导入并使用**以下功能：
 
-1. **PDF/DOCX 报告生成（一键式，支持中文）**：
+1. **PDF/DOCX/PPTX 报告生成（一键式，支持中文）**：
    ```python
-   from agent_utils import generate_report_pdf, generate_report_docx
+   from agent_utils import generate_report_pdf, generate_report_docx, generate_report_pptx
 
-   # 直接从 Markdown 文本生成 PDF 和 DOCX
+   # 直接从 Markdown 文本生成 PDF、DOCX 和 PPTX
    generate_report_pdf(report_md, "output.pdf", title="分析报告")
    generate_report_docx(report_md, "output.docx", title="分析报告")
+   generate_report_pptx(report_md, "output.pptx", title="分析报告")
    ```
 
 2. **FPDF 2.x 中文支持（解决 Undefined font 错误）**：
@@ -1935,7 +1943,7 @@ def get_system_prompt_with_fonts() -> str:
 ============================================
 每次分析完成后，生成的报告**必须**遵循以下结构，内容必须具有层次感，富含推理和推导过程。**报告内所有内容必须使用简体中文**：
 
-**报告整体结构（PDF/DOCX/聊天输出均适用）**：
+**报告整体结构（PDF/DOCX/PPTX/聊天输出均适用）**：
 1. **第一部分：分析思路**（必须放在报告开头）
    - 阐述分析的背景和原因。
    - 描述推理逻辑和将要采取的步骤。
@@ -1947,15 +1955,23 @@ def get_system_prompt_with_fonts() -> str:
      - **推理推导**（为什么会出现这种情况，基于数据的逻辑推理）
      - **阶段性结论**（基于前两点得出的初步发现）
      - **可视化图表**（图表标题置于图表下方，引用编号如"图1："）
+   - **图表与观点紧密结合（极重要）**：每个分析成果和观点所对应的数据图表必须紧跟在该观点的文字描述之后，而不是集中放在报告末尾。用户应能在阅读每个观点时立即看到支撑该观点的数据图表。
+   - **报告层次组织规范**：
+     - 每个分析维度作为独立章节
+     - 章节内按"观点陈述 → 数据图表 → 推理说明"的顺序组织
+     - 图表使用 Markdown 图片引用格式 `![图表描述](图表路径)` 嵌入
+     - 确保每个关键发现都有对应的可视化支撑
 
 3. **第三部分：分析小结**（必须放在报告结尾）
    - 总结核心发现。
    - 给出基于风险的针对性建议。
+   - 附一个汇总表格，列出所有关键发现和对应的风险等级。
 
 **重要提醒**：
 - 严禁"直接得结论"，必须体现"数据 -> 推理 -> 结论"的层次感。
-- 报告顺序：**分析思路** → **主体分析内容（推理+数据+图表）** → **分析小结**
-- PDF/DOCX排版要求：保持标题层级、使用正确的中文字体。
+- 报告顺序：**分析思路** → **主体分析内容（推理+数据+图表交织）** → **分析小结**
+- 严禁将图表集中堆放在报告某一处，必须将图表分散到各章节的对应观点位置。
+- PDF/DOCX/PPTX排版要求：保持标题层级、使用正确的中文字体。
 
 **============================================
 第五部分：排版与美学规范
@@ -1990,7 +2006,42 @@ def get_system_prompt_with_fonts() -> str:
 ============================================
 
 **执行流程**：
-1. 【数据理解】→ 2. 【预测推理与短代码测试】→ 3. 【正式分析思路】→ 4. 【完整分析代码执行】→ 5. 【结果解读与报告生成】
+1. 【数据探测（必须首步）】→ 2. 【预测推理与短代码测试】→ 3. 【正式分析思路】→ 4. 【完整分析代码执行】→ 5. 【结果解读与报告生成】
+
+**数据探测（强制首步，不可跳过）**：
+- 在任何分析开始前，**第一个 <Code> 块必须**执行以下数据探测代码：
+  ```python
+  import pandas as pd
+  import os
+  
+  # 1. 列出工作区文件
+  for f in os.listdir('.'):
+      print(f)
+  
+  # 2. 读取数据并探测结构
+  df = pd.read_csv('文件名.csv')  # 或 read_excel
+  print("形状:", df.shape)
+  print("列名:", df.columns.tolist())
+  print("数据类型:\\n", df.dtypes)
+  print("前5行:\\n", df.head())
+  print("缺失值:\\n", df.isnull().sum())
+  print("数值列统计:\\n", df.describe())
+  ```
+- 探测结果必须被保存在变量中，后续所有分析代码必须引用探测到的实际列名。
+- **绝不可在探测前就编写引用具体列名的分析代码**。
+
+**代码健壮性规范（极重要）**：
+- **所有代码块必须包含完整的 try/except 异常处理**，捕获后打印有意义的错误信息而非让程序崩溃。
+- **列名引用必须使用变量**：使用 `cols = df.columns.tolist()` 然后通过列表操作引用列名，而不是硬编码字符串。
+- **类型转换必须安全**：使用 `pd.to_numeric(errors='coerce')`、`pd.to_datetime(errors='coerce')` 等安全转换方法。
+- **文件路径必须验证**：使用 `os.path.exists()` 验证文件路径后再操作。
+- **避免常见错误模式**：
+  - ❌ `df['不存在的列']` → 会抛出 KeyError
+  - ✅ `if '列名' in df.columns: df['列名']` → 先检查再使用
+  - ❌ `pd.Timestamp - 30` → 整数减法不支持
+  - ✅ `pd.Timestamp - pd.Timedelta(days=30)` → 正确的时间运算
+  - ❌ 在代码中硬编码未验证的列名
+  - ✅ 先探测列名，再根据实际列名编写分析代码
 
 **预测推理与短代码测试（ mandatory ）**：
 - 在生成完整的复杂分析代码前，**必须**先进行预测推理和短代码测试。
@@ -2060,12 +2111,13 @@ def get_system_prompt_with_fonts() -> str:
 **============================================
 第六部分：环境就绪与字体规范（极重要）
 ============================================
-- **环境就绪**：系统已为你安装了充足的 Python 和 R 语言工具包，包括但不限于 `fpdf2`, `python-docx`, `pandas`, `matplotlib`, `seaborn`, `chardet`, `reportlab` 等。
+- **环境就绪**：系统已为你安装了充足的 Python 和 R 语言工具包，包括但不限于 `fpdf2`, `python-docx`, `python-pptx`, `pandas`, `matplotlib`, `seaborn`, `chardet`, `reportlab` 等。
+- **字体已预注册（极重要）**：系统在启动时已自动完成所有中文字体的注册工作（matplotlib、reportlab、fpdf2 均已预注册）。**在生成报告或绘图时，无需再次手动注册字体**。直接使用 `agent_utils` 中的 `generate_report_pdf`、`generate_report_docx`、`generate_report_pptx` 即可。matplotlib 绑定的字体也已在启动时通过 `font_manager.fontManager.addfont()` 完成注册。
 - **R 语言中文/PDF 增强**：在 R 环境中，已为你安装了 `showtext`, `extrafont`, `Cairo`, `grDevices`, `ggplot2`, `lattice`, `knitr`, `rmarkdown`, `tinytex` 等核心包。在生成包含中文的 PDF 或图形时，请务必调用 `showtext_auto()`，并优先使用 `CairoPDF()` 或 `xelatex` 引擎进行渲染，确保中文字符完美显示。
 - **UTF-8 编码优先**：系统已自动将上传的文本文件转换为 UTF-8 编码并保存到 `converted/` 子目录（文件名保持不变）。**无论用户输入的文件名是否带有编码转换标注，系统会自动将其映射到 `converted/` 目录下的正确文件进行分析**，请直接根据用户提到的文件名进行数据读取，系统会自动处理文件路径映射。
 - **中文字符与编码处理**：在处理任何数据文件前，应确认使用 UTF-8 编码。对于任何包含中文的内容，必须确保在所有输出文件（Png, Jpg, Pdf, Txt, Csv, Docx 等）中正确显示中文。
 - **可视化支持**：在 Python 绘图时，务必配置 `plt.rcParams['font.sans-serif']` 使用 `SimHei`, `PingFang SC` 或其他系统中文字体，防止出现乱码或方框。在 R 中使用 `showtext` 处理中文。
-- **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF 和 DOCX 格式**，这是你的标准交付物。
+- **报告生成**：分析完成后，必须生成详细的最终报告。**最终报告必须同时包含 PDF、DOCX 和 PPTX 格式**，这是你的标准交付物。
   - **PDF 生成推荐方案（按优先级）**：
     1. **agent_utils 一键生成（首选）**：使用 `from agent_utils import generate_report_pdf, generate_report_docx`
     2. **reportlab + 中文字体**：使用 reportlab 库，注册 assets/fonts/ 下的纯 TTF 字体生成 PDF
@@ -2237,6 +2289,76 @@ def get_system_prompt_with_fonts() -> str:
 - 当模型无法完成某类分析时，主动建议替代方法。
 - 当数据不足以支撑结论时，明确标注"证据不足"。
 - 遇到死胡同时立即中止，更换分析思路并通知用户。
+
+**============================================
+第十一部分：关系型图数据库分析能力（Neo4j）
+============================================
+
+**核心能力**：当用户要求分析实体（如企业、个人、申报单位、运输工具等）之间的关系时，你具备基于图论和关系型数据库思维的穿透式分析能力。
+
+**分析思路与方法**：
+1. **实体识别与建模**：
+   - 从数据中识别核心实体节点（如：企业、个人、申报单位、运输工具、货物、地址、银行账户等）
+   - 识别实体间的关系边（如：申报关系、股权关系、代理关系、运输关系、交易关系等）
+   - 使用 Python 的 `networkx` 库构建关系图谱
+
+2. **图谱构建代码示范**：
+   ```python
+   import networkx as nx
+   import matplotlib.pyplot as plt
+   
+   # 构建关系图
+   G = nx.Graph()  # 或 nx.DiGraph() 用于有向关系
+   
+   # 添加节点（带属性）
+   G.add_node("企业A", type="enterprise", risk_level="high")
+   G.add_node("个人B", type="person", role="法定代表人")
+   
+   # 添加关系边（带权重和属性）
+   G.add_edge("企业A", "个人B", relation="法定代表人", weight=1.0)
+   
+   # 分析指标
+   degree_centrality = nx.degree_centrality(G)  # 度中心性
+   betweenness = nx.betweenness_centrality(G)   # 介数中心性
+   communities = nx.community.greedy_modularity_communities(G)  # 社区发现
+   ```
+
+3. **穿透式分析策略**：
+   - **直接关系分析**：一度关联（直接交易、申报、代理关系）
+   - **间接关系分析**：二度及以上关联（通过中间节点连接的隐性关系）
+   - **路径分析**：计算任意两个实体间的最短路径和所有路径
+   - **社区发现**：识别紧密关联的实体群组（可能的利益共同体）
+   - **中心性分析**：找到关系网络中的核心节点（关键控制人/企业）
+   - **异常模式识别**：检测星形结构（一个核心控制多个壳公司）、链式结构（层层代理规避监管）
+
+4. **Neo4j 集成（当用户配置了 Neo4j 数据库时）**：
+   ```python
+   # 如果环境中安装了 neo4j 驱动
+   try:
+       from neo4j import GraphDatabase
+       driver = GraphDatabase.driver(uri, auth=(user, password))
+       with driver.session() as session:
+           result = session.run("MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 100")
+   except ImportError:
+       # 回退到 networkx 本地分析
+       import networkx as nx
+   ```
+
+5. **关系可视化要求**：
+   - 使用 `networkx` + `matplotlib` 绘制关系图谱
+   - 节点大小按中心性（重要性）设定
+   - 边的粗细按交易频次/金额设定
+   - 不同类型的实体用不同颜色区分
+   - 高风险节点用红色标注
+   - 图表必须包含中文标签和图例
+
+6. **实质性主体锁定**：
+   - 通过关系距离（路径长度）发现隐性关联
+   - 通过中心性指标锁定幕后控制人
+   - 通过社区划分识别利益集团
+   - 通过时序分析发现关系变化模式（如频繁更换代理的企业）
+
+**注意**：使用 networkx 进行图分析时无需安装 Neo4j。对于大多数数据集，纯 Python 的 networkx 已经足够。仅当用户明确要求连接外部 Neo4j 数据库时才使用 neo4j 驱动。
 
 6. 请始终以这种专业、敏锐且富有洞察力的风格与用户沟通。"""
 
@@ -2703,7 +2825,7 @@ def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
 
 def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
-    """使用 python-pptx 生成 PPTX 报告
+    """使用 python-pptx 生成 PPTX 报告，支持中文字体和图表嵌入
 
     Args:
         md_text: Markdown 格式的分析报告文本
@@ -2715,7 +2837,7 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
     """
     try:
         from pptx import Presentation
-        from pptx.util import Inches, Pt
+        from pptx.util import Inches, Pt, Emu
         from pptx.dml.color import RGBColor
         from pptx.enum.text import PP_ALIGN
         import re as _re
@@ -2730,6 +2852,50 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
         prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
 
+        # Resolve Chinese font path for PPTX
+        _pptx_font_name = "SimHei"
+        _pptx_body_font = "STFangSong"
+        _pptx_font_path = None
+        try:
+            font_path_candidate = os.path.join(_FONT_DIR, "simhei.ttf")
+            if os.path.exists(font_path_candidate):
+                _pptx_font_path = font_path_candidate
+        except Exception:
+            pass
+
+        def _set_font(run, font_name, size_pt, bold=False, color_rgb=None):
+            """Helper to set font properties on a run"""
+            run.font.size = Pt(size_pt)
+            run.font.bold = bold
+            if color_rgb:
+                run.font.color.rgb = color_rgb
+            # Set Chinese font name
+            run.font.name = font_name
+            # Also set East Asian font via XML for proper Chinese rendering
+            try:
+                from lxml import etree
+                rPr = run._r.get_or_add_rPr()
+                ea_font = etree.SubElement(
+                    rPr,
+                    '{http://schemas.openxmlformats.org/drawingml/2006/main}ea',
+                )
+                ea_font.set('typeface', font_name)
+            except Exception:
+                pass
+
+        # Collect image references from workspace/generated
+        generated_dir = ws_path / "generated"
+        available_images_by_name = {}
+        available_images_by_stem = {}
+        for img_dir in [generated_dir, ws_path]:
+            if img_dir.exists():
+                for f in img_dir.iterdir():
+                    if f.suffix.lower() in ('.png', '.jpg', '.jpeg', '.svg', '.gif'):
+                        available_images_by_name[f.name] = str(f)
+                        # Only use stem if not already taken by a filename
+                        if f.stem not in available_images_by_name:
+                            available_images_by_stem[f.stem] = str(f)
+
         # Title slide
         slide_layout = prs.slide_layouts[6]  # Blank layout
         slide = prs.slides.add_slide(slide_layout)
@@ -2741,11 +2907,17 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
         tf = txBox.text_frame
         tf.word_wrap = True
         p = tf.paragraphs[0]
-        p.text = base_name.replace("_", " ")
-        p.font.size = Pt(36)
-        p.font.bold = True
-        p.font.color.rgb = RGBColor(0, 51, 102)
+        run = p.add_run()
+        run.text = base_name.replace("_", " ")
+        _set_font(run, _pptx_font_name, 36, bold=True, color_rgb=RGBColor(0, 51, 102))
         p.alignment = PP_ALIGN.CENTER
+
+        # Add subtitle with date
+        p2 = tf.add_paragraph()
+        p2.alignment = PP_ALIGN.CENTER
+        run2 = p2.add_run()
+        run2.text = f"生成日期: {datetime.now().strftime('%Y年%m月%d日')}"
+        _set_font(run2, _pptx_body_font, 16, color_rgb=RGBColor(102, 102, 102))
 
         # Split content into sections
         sections = _re.split(r'\n#{1,3}\s+', md_text)
@@ -2756,36 +2928,100 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
             title = lines[0].strip().lstrip('#').strip() if lines else "分析内容"
             body = '\n'.join(lines[1:]).strip() if len(lines) > 1 else ""
 
+            # Extract image references from markdown
+            img_refs = _re.findall(r'!\[.*?\]\((.*?)\)', body)
+
             slide = prs.slides.add_slide(prs.slide_layouts[6])
-            # Title
-            txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.333), Inches(1))
+
+            # Title textbox
+            txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.8))
             tf = txBox.text_frame
             tf.word_wrap = True
             p = tf.paragraphs[0]
-            p.text = title[:80]
-            p.font.size = Pt(28)
-            p.font.bold = True
-            p.font.color.rgb = RGBColor(0, 51, 102)
+            run = p.add_run()
+            run.text = title[:80]
+            _set_font(run, _pptx_font_name, 28, bold=True, color_rgb=RGBColor(0, 51, 102))
 
-            # Body
-            if body:
-                txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(12.333), Inches(5.5))
-                tf2 = txBox2.text_frame
-                tf2.word_wrap = True
-                clean_body = _re.sub(r'\*\*(.*?)\*\*', r'\1', body)
-                clean_body = _re.sub(r'\*(.*?)\*', r'\1', clean_body)
-                clean_body = _re.sub(r'`(.*?)`', r'\1', clean_body)
-                clean_body = _re.sub(r'!\[.*?\]\(.*?\)', '[图表]', clean_body)
-                clean_body = _re.sub(r'\[.*?\]\(.*?\)', '', clean_body)
+            # Add bottom border line for title
+            line_shape = slide.shapes.add_connector(
+                1, Inches(0.5), Inches(1.15), Inches(12.333), Inches(1.15)
+            )
+            line_shape.line.color.rgb = RGBColor(0, 102, 204)
+            line_shape.line.width = Pt(1.5)
 
-                MAX_PPTX_SLIDE_CHARS = 1500
-                if len(clean_body) > MAX_PPTX_SLIDE_CHARS:
-                    clean_body = clean_body[:MAX_PPTX_SLIDE_CHARS] + "..."
+            # Determine layout: with or without images
+            embedded_images = []
+            for ref in img_refs:
+                img_name = os.path.basename(ref)
+                img_stem = Path(img_name).stem
+                # Try to find image in workspace (prefer exact filename match)
+                img_path = None
+                if img_name in available_images_by_name:
+                    img_path = available_images_by_name[img_name]
+                elif img_stem in available_images_by_stem:
+                    img_path = available_images_by_stem[img_stem]
+                else:
+                    # Try direct path
+                    candidate = ws_path / ref
+                    if candidate.exists():
+                        img_path = str(candidate)
+                    else:
+                        candidate = generated_dir / img_name if generated_dir.exists() else None
+                        if candidate and candidate.exists():
+                            img_path = str(candidate)
+                if img_path and os.path.exists(img_path):
+                    embedded_images.append(img_path)
 
-                p2 = tf2.paragraphs[0]
-                p2.text = clean_body
-                p2.font.size = Pt(14)
-                p2.font.color.rgb = RGBColor(51, 51, 51)
+            # Clean body text
+            clean_body = _re.sub(r'\*\*(.*?)\*\*', r'\1', body)
+            clean_body = _re.sub(r'\*(.*?)\*', r'\1', clean_body)
+            clean_body = _re.sub(r'`(.*?)`', r'\1', clean_body)
+            clean_body = _re.sub(r'!\[.*?\]\(.*?\)', '', clean_body)
+            clean_body = _re.sub(r'\[.*?\]\(.*?\)', '', clean_body)
+            clean_body = clean_body.strip()
+
+            if embedded_images:
+                # Layout with image on right, text on left
+                text_width = Inches(6.0)
+                img_left = Inches(6.8)
+                img_width = Inches(5.8)
+                img_top = Inches(1.3)
+
+                # Text body on the left
+                if clean_body:
+                    MAX_CHARS = 1200
+                    if len(clean_body) > MAX_CHARS:
+                        clean_body = clean_body[:MAX_CHARS] + "..."
+                    txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), text_width, Inches(5.5))
+                    tf2 = txBox2.text_frame
+                    tf2.word_wrap = True
+                    p2 = tf2.paragraphs[0]
+                    run2 = p2.add_run()
+                    run2.text = clean_body
+                    _set_font(run2, _pptx_body_font, 13, color_rgb=RGBColor(51, 51, 51))
+
+                # Embed images on the right (up to 2 per slide)
+                for idx, img_path in enumerate(embedded_images[:2]):
+                    try:
+                        y_offset = img_top + Inches(idx * 3.0)
+                        slide.shapes.add_picture(
+                            img_path, img_left, y_offset, img_width, Inches(2.8)
+                        )
+                    except Exception as img_err:
+                        print(f"PPTX 图片嵌入失败: {img_err}")
+            else:
+                # Full-width text layout
+                if clean_body:
+                    MAX_PPTX_SLIDE_CHARS = 1800
+                    if len(clean_body) > MAX_PPTX_SLIDE_CHARS:
+                        clean_body = clean_body[:MAX_PPTX_SLIDE_CHARS] + "..."
+                    txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), Inches(12.333), Inches(5.5))
+                    tf2 = txBox2.text_frame
+                    tf2.word_wrap = True
+                    p2 = tf2.paragraphs[0]
+                    run2 = p2.add_run()
+                    run2.text = clean_body
+                    _set_font(run2, _pptx_body_font, 14, color_rgb=RGBColor(51, 51, 51))
 
         prs.save(str(pptx_path))
 
@@ -2794,7 +3030,7 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
             return pptx_path
         return None
     except ImportError:
-        print("python-pptx 未安装，跳过 PPTX 生成")
+        print("python-pptx 未安装，跳过 PPTX 生成。请运行: pip install python-pptx")
         return None
     except Exception as e:
         print(f"PPTX 生成失败: {e}")
