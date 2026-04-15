@@ -223,6 +223,11 @@ const collectSelectedInteractiveTasks = (
     ...collectSelectedInteractiveTasks(task.children, selectedIds),
   ]);
 
+const createClientId = () =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
 type CodeBlockViewProps = {
   language: string;
   code: string;
@@ -4332,7 +4337,7 @@ ${analysisContent}
     }
 
     const newMessage: Message = {
-      id: Date.now().toString(),
+      id: createClientId(),
       content: messageContent,
       sender: "user",
       timestamp: new Date(),
@@ -4396,17 +4401,18 @@ ${analysisContent}
       if (contentType.includes("application/json")) {
         const data = await response.json();
         const content = data?.choices?.[0]?.message?.content || "";
+        const fallbackAiId = createClientId();
         setMessages((prev) => [
           ...prev,
           {
-            id: `${Date.now()}-${Math.random()}`,
+            id: fallbackAiId,
             sender: "ai",
             content,
             timestamp: new Date(),
           },
         ]);
         autoCollapseForContent(content, aiMessageIndex);
-        applyInteractiveChecklistFromContent(content, `${Date.now()}-${aiMessageIndex}`);
+        applyInteractiveChecklistFromContent(content, fallbackAiId);
         if (content.includes("<File>")) {
           await loadWorkspaceTree();
           await loadWorkspaceFiles();
@@ -4426,7 +4432,7 @@ ${analysisContent}
       }
 
       // 预先插入 AI 消息占位
-      const aiMsgId = `${Date.now()}-${Math.random()}`;
+      const aiMsgId = createClientId();
       setStreamingMessageId(aiMsgId);
       setMessages((prev) => [
         ...prev,
