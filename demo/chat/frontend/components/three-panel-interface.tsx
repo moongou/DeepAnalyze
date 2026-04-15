@@ -139,6 +139,90 @@ interface AnalysisSection {
   color: string;
 }
 
+interface InteractiveAnalysisTask {
+  id: string;
+  title: string;
+  level: number;
+  children: InteractiveAnalysisTask[];
+}
+
+const INTERACTIVE_TASK_LINE_REGEX = /^\s*[├└│─\-\s]*((?:\d+\.)*\d+)\.?\s+(.+?)\s*$/;
+
+const cleanInteractiveTaskTitle = (value: string) =>
+  value
+    .replace(/^\[(.*)\]$/, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const parseInteractiveTaskTree = (content: string): InteractiveAnalysisTask[] => {
+  const tasks: InteractiveAnalysisTask[] = [];
+  const stack: InteractiveAnalysisTask[] = [];
+  const normalizedContent = content.replace(/```[\w-]*\n?/g, "").replace(/```/g, "");
+
+  normalizedContent.split("\n").forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line || /^任务树[:：]?$/.test(line)) return;
+    const match =
+      rawLine.match(INTERACTIVE_TASK_LINE_REGEX) ||
+      line.match(/^((?:\d+\.)*\d+)\.?\s+(.+?)\s*$/);
+    if (!match) return;
+
+    const id = match[1].replace(/\.$/, "");
+    const title = cleanInteractiveTaskTitle(match[2]);
+    if (!id || !title) return;
+
+    const level = id.split(".").length;
+    const task: InteractiveAnalysisTask = {
+      id,
+      title,
+      level,
+      children: [],
+    };
+
+    while (stack.length > 0 && stack[stack.length - 1].level >= level) {
+      stack.pop();
+    }
+
+    if (stack.length > 0) {
+      stack[stack.length - 1].children.push(task);
+    } else {
+      tasks.push(task);
+    }
+
+    stack.push(task);
+  });
+
+  return tasks;
+};
+
+const flattenInteractiveTaskIds = (tasks: InteractiveAnalysisTask[]): string[] =>
+  tasks.flatMap((task) => [task.id, ...flattenInteractiveTaskIds(task.children)]);
+
+const findInteractiveTaskById = (
+  tasks: InteractiveAnalysisTask[],
+  targetId: string
+): InteractiveAnalysisTask | null => {
+  for (const task of tasks) {
+    if (task.id === targetId) return task;
+    const nested = findInteractiveTaskById(task.children, targetId);
+    if (nested) return nested;
+  }
+  return null;
+};
+
+const collectInteractiveTaskBranchIds = (
+  task: InteractiveAnalysisTask
+): string[] => [task.id, ...task.children.flatMap((child) => collectInteractiveTaskBranchIds(child))];
+
+const collectSelectedInteractiveTasks = (
+  tasks: InteractiveAnalysisTask[],
+  selectedIds: Set<string>
+): Array<{ id: string; title: string }> =>
+  tasks.flatMap((task) => [
+    ...(selectedIds.has(task.id) ? [{ id: task.id, title: task.title }] : []),
+    ...collectSelectedInteractiveTasks(task.children, selectedIds),
+  ]);
+
 type CodeBlockViewProps = {
   language: string;
   code: string;
@@ -490,6 +574,17 @@ export function ThreePanelInterface() {
   );
   const [modelHeadersInput, setModelHeadersInput] = useState("");
   const [showRawModelHeaders, setShowRawModelHeaders] = useState(false);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [isFetchingModelList, setIsFetchingModelList] = useState(false);
+  const [modelTestStatus, setModelTestStatus] = useState<{
+    status: string;
+    message: string;
+    testedAt: string | null;
+  }>({
+    status: "never_tested",
+    message: "尚未获取模型列表",
+    testedAt: null,
+  });
   const [dbType, setDbType] = useState("mysql");
   const [dbConfig, setDbConfig] = useState({
     host: "localhost",
@@ -529,6 +624,11 @@ export function ThreePanelInterface() {
   // 报告类型选择状态
   const [reportTypes, setReportTypes] = useState<string[]>(["pdf"]);
   const [showReportTypePicker, setShowReportTypePicker] = useState(false);
+  const [pendingReportTypes, setPendingReportTypes] = useState<string[]>(["pdf"]);
+  const [interactiveTasks, setInteractiveTasks] = useState<InteractiveAnalysisTask[]>([]);
+  const [selectedInteractiveTaskIds, setSelectedInteractiveTaskIds] = useState<string[]>([]);
+  const [interactiveTaskSelectionPending, setInteractiveTaskSelectionPending] = useState(false);
+  const [interactiveTaskSourceMessageId, setInteractiveTaskSourceMessageId] = useState<string | null>(null);
   // 雨途斩棘录面板状态
   const [showYutuPanel, setShowYutuPanel] = useState(false);
   const [yutuHtmlContent, setYutuHtmlContent] = useState<string>("");
@@ -579,6 +679,71 @@ export function ThreePanelInterface() {
     );
     setModelProviderConfig(preset);
     setModelHeadersInput(stringifyModelHeaders(preset.headers));
+  };
+
+  const handleFetchModelList = async () => {
+    setIsFetchingModelList(true);
+    try {
+      const response = await fetch(API_URLS.MODEL_LIST, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: modelProviderConfig }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        const models = Array.isArray(data.models) ? data.models.filter(Boolean) : [];
+        setAvailableModels(models);
+        if (data.selected_model && !models.includes(data.selected_model)) {
+          setAvailableModels((prev) => [data.selected_model, ...prev]);
+        }
+        setModelTestStatus({
+          status: "success",
+          message: data.message || "模型列表获取成功",
+          testedAt: data.tested_at || new Date().toISOString(),
+        });
+        if (data.selected_model) {
+          setModelProviderConfig((prev) => ({ ...prev, model: data.selected_model }));
+        }
+        toast({ description: data.message || "模型列表获取成功" });
+      } else {
+        setModelTestStatus({
+          status: "failed",
+          message: data.message || "模型列表获取失败",
+          testedAt: new Date().toISOString(),
+        });
+        toast({ description: data.message || "模型列表获取失败", variant: "destructive" });
+      }
+    } catch (error) {
+      console.error("Fetch model list error:", error);
+      setModelTestStatus({
+        status: "failed",
+        message: "模型列表请求失败",
+        testedAt: new Date().toISOString(),
+      });
+      toast({ description: "模型列表请求失败", variant: "destructive" });
+    } finally {
+      setIsFetchingModelList(false);
+    }
+  };
+
+  const handleSaveModelConfig = () => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("modelProviderConfig", JSON.stringify(modelProviderConfig));
+    }
+    toast({ description: `当前分析模型已设置为 ${modelProviderConfig.model}` });
+  };
+
+  const handleSaveDatabaseConfig = () => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(
+        "systemDbSettings",
+        JSON.stringify({
+          dbType,
+          dbConfig,
+        })
+      );
+    }
+    toast({ description: "数据库配置已保存到当前浏览器" });
   };
 
   // 智能体介绍面板状态
@@ -1386,6 +1551,10 @@ ${analysisContent}
     setProjectName("");
     setShowSaveDialog(false);
     setShowProjectManager(false);
+    setInteractiveTasks([]);
+    setSelectedInteractiveTaskIds([]);
+    setInteractiveTaskSelectionPending(false);
+    setInteractiveTaskSourceMessageId(null);
 
     // 重新加载已注册用户列表
     try {
@@ -1445,6 +1614,7 @@ ${analysisContent}
           db_type: dbType,
           prompt: dbPrompt,
           schema_info: "", // 可以在此注入已获取的表结构
+          model_provider: modelProviderConfig,
         }),
       });
       const data = await response.json();
@@ -2088,6 +2258,10 @@ ${analysisContent}
       localOnly: true,
     };
     setMessages([welcome]);
+    setInteractiveTasks([]);
+    setSelectedInteractiveTaskIds([]);
+    setInteractiveTaskSelectionPending(false);
+    setInteractiveTaskSourceMessageId(null);
     try {
       if (typeof window !== "undefined") {
         localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify([welcome]));
@@ -2124,6 +2298,10 @@ ${analysisContent}
     setManualLocks({});
     setProjectName("");
     setSideGuidanceHistory([]);
+    setInteractiveTasks([]);
+    setSelectedInteractiveTaskIds([]);
+    setInteractiveTaskSelectionPending(false);
+    setInteractiveTaskSourceMessageId(null);
     // 清空聊天区域、输入框、代码编辑器
     setMessages([
       {
@@ -2190,6 +2368,34 @@ ${analysisContent}
       }
     }
 
+    const savedReportTypes = localStorage.getItem("reportTypes");
+    if (savedReportTypes) {
+      try {
+        const parsed = JSON.parse(savedReportTypes);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setReportTypes(parsed.filter((item) => typeof item === "string"));
+          setPendingReportTypes(parsed.filter((item) => typeof item === "string"));
+        }
+      } catch {
+        // ignore invalid report types cache
+      }
+    }
+
+    const savedDbSettings = localStorage.getItem("systemDbSettings");
+    if (savedDbSettings) {
+      try {
+        const parsed = JSON.parse(savedDbSettings);
+        if (typeof parsed?.dbType === "string") {
+          setDbType(parsed.dbType);
+        }
+        if (parsed?.dbConfig && typeof parsed.dbConfig === "object") {
+          setDbConfig((prev) => ({ ...prev, ...parsed.dbConfig }));
+        }
+      } catch {
+        // ignore invalid db settings cache
+      }
+    }
+
     const savedModelProvider = localStorage.getItem("modelProviderConfig");
     if (savedModelProvider) {
       try {
@@ -2231,6 +2437,39 @@ ${analysisContent}
       })
     );
   }, [knowledgePreferredView, showKnowledgeHints, autoOpenYutuAfterAnalysis]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem("modelProviderConfig", JSON.stringify(modelProviderConfig));
+  }, [modelProviderConfig]);
+
+  useEffect(() => {
+    setAvailableModels([]);
+    setModelTestStatus({
+      status: "never_tested",
+      message: "模型配置已变更，请重新获取模型名称",
+      testedAt: null,
+    });
+  }, [
+    modelProviderConfig.providerType,
+    modelProviderConfig.baseUrl,
+    modelProviderConfig.apiKey,
+    modelProviderConfig.headers,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem("reportTypes", JSON.stringify(reportTypes));
+  }, [reportTypes]);
+
+  useEffect(() => {
+    if (analysisMode !== "interactive") {
+      setInteractiveTasks([]);
+      setSelectedInteractiveTaskIds([]);
+      setInteractiveTaskSelectionPending(false);
+      setInteractiveTaskSourceMessageId(null);
+    }
+  }, [analysisMode]);
 
   useEffect(() => {
     const loadRegisteredUsers = async () => {
@@ -3985,6 +4224,60 @@ ${analysisContent}
     [autoCollapseEnabled, manualLocks]
   );
 
+  const applyInteractiveChecklistFromContent = useCallback(
+    (content: string, messageId: string) => {
+      if (analysisMode !== "interactive" || interactiveTaskSourceMessageId === messageId) {
+        return;
+      }
+      const parsedTasks = parseInteractiveTaskTree(content);
+      if (parsedTasks.length === 0) return;
+
+      const defaultSelection = flattenInteractiveTaskIds(parsedTasks);
+      setInteractiveTasks(parsedTasks);
+      setSelectedInteractiveTaskIds(defaultSelection);
+      setInteractiveTaskSelectionPending(true);
+      setInteractiveTaskSourceMessageId(messageId);
+      toast({ description: "已生成交互任务清单，请勾选后开始分析" });
+    },
+    [analysisMode, interactiveTaskSourceMessageId, toast]
+  );
+
+  const toggleInteractiveTaskSelection = (taskId: string, checked: boolean) => {
+    const targetTask = findInteractiveTaskById(interactiveTasks, taskId);
+    const branchIds = targetTask ? collectInteractiveTaskBranchIds(targetTask) : [taskId];
+    setSelectedInteractiveTaskIds((prev) => {
+      const next = new Set(prev);
+      branchIds.forEach((id) => {
+        if (checked) {
+          next.add(id);
+        } else {
+          next.delete(id);
+        }
+      });
+      return Array.from(next);
+    });
+  };
+
+  const openReportTypePicker = () => {
+    setPendingReportTypes(reportTypes);
+    setShowReportTypePicker(true);
+  };
+
+  const cancelReportTypePicker = () => {
+    setPendingReportTypes(reportTypes);
+    setShowReportTypePicker(false);
+  };
+
+  const confirmReportTypePicker = () => {
+    if (pendingReportTypes.length === 0) {
+      toast({ description: "请至少选择一种报告类型", variant: "destructive" });
+      return;
+    }
+    setReportTypes(pendingReportTypes);
+    setShowReportTypePicker(false);
+    toast({ description: `报告类型已更新为 ${pendingReportTypes.map((item) => item.toUpperCase()).join(", ")}` });
+  };
+
   const handleSendGuidance = async () => {
     if (!sideGuidanceText.trim()) return;
     setIsSubmittingGuidance(true);
@@ -4013,37 +4306,48 @@ ${analysisContent}
     }
   };
 
-  const handleSendMessage = async () => {
-    if (!inputValue.trim() && attachments.length === 0) return;
+  const sendMessageContent = async (
+    messageContent: string,
+    options?: {
+      attachments?: FileAttachment[];
+      resetComposer?: boolean;
+      addToHistory?: boolean;
+    }
+  ) => {
+    const outgoingAttachments = options?.attachments || [];
+    if (!messageContent.trim() && outgoingAttachments.length === 0) return;
     setIsAnalyzing(true);
     const baseMessageIndex = messages.length;
     const aiMessageIndex = baseMessageIndex + 1;
 
     // 检测用户消息中是否指定了报告类型
-    const userInput = inputValue.toLowerCase();
+    const userInput = messageContent.toLowerCase();
     const detectedTypes: string[] = [];
     if (userInput.includes("pdf")) detectedTypes.push("pdf");
     if (userInput.includes("docx") || userInput.includes("word")) detectedTypes.push("docx");
     if (userInput.includes("pptx") || userInput.includes("ppt")) detectedTypes.push("pptx");
+    const effectiveReportTypes = detectedTypes.length > 0 ? detectedTypes : reportTypes;
     if (detectedTypes.length > 0) {
       setReportTypes(detectedTypes);
     }
 
     const newMessage: Message = {
       id: Date.now().toString(),
-      content: inputValue,
+      content: messageContent,
       sender: "user",
       timestamp: new Date(),
-      attachments: attachments.length > 0 ? [...attachments] : undefined,
+      attachments: outgoingAttachments.length > 0 ? [...outgoingAttachments] : undefined,
     };
 
-    if (inputValue.trim()) {
-      setHistoryInputs((prev) => [...prev, inputValue.trim()]);
+    if (options?.addToHistory !== false && messageContent.trim()) {
+      setHistoryInputs((prev) => [...prev, messageContent.trim()]);
     }
 
     setMessages((prev) => [...prev, newMessage]);
-    setInputValue("");
-    setAttachments([]);
+    if (options?.resetComposer !== false) {
+      setInputValue("");
+      setAttachments([]);
+    }
     setIsTyping(true);
 
     const controller = new AbortController();
@@ -4068,14 +4372,15 @@ ${analysisContent}
               })),
             {
               role: "user",
-              content: inputValue,
+              content: messageContent,
             },
           ],
           stream: true, // [修改] 明确开启流式模式
           session_id: sessionId,
           strategy: analysisStrategy,
           analysis_mode: analysisMode,
-          report_types: reportTypes,
+          report_types: effectiveReportTypes,
+          model_provider: modelProviderConfig,
           ...(temperature !== null && { temperature }),
         }),
       });
@@ -4094,18 +4399,20 @@ ${analysisContent}
         setMessages((prev) => [
           ...prev,
           {
-            id: Date.now().toString(),
+            id: `${Date.now()}-${Math.random()}`,
             sender: "ai",
             content,
             timestamp: new Date(),
           },
         ]);
         autoCollapseForContent(content, aiMessageIndex);
+        applyInteractiveChecklistFromContent(content, `${Date.now()}-${aiMessageIndex}`);
         if (content.includes("<File>")) {
           await loadWorkspaceTree();
           await loadWorkspaceFiles();
         }
         setIsTyping(false);
+        setIsAnalyzing(false);
         return;
       }
 
@@ -4246,6 +4553,7 @@ ${analysisContent}
       // 强制同步最后状态
       flushAiMessage(accumulatedMessage);
       autoCollapseForContent(accumulatedMessage, aiMessageIndex);
+      applyInteractiveChecklistFromContent(accumulatedMessage, aiMsgId);
 
       // 结束后刷新一次文件列表确保无遗漏
       await loadWorkspaceFiles();
@@ -4261,6 +4569,71 @@ ${analysisContent}
       setStreamingMessageId(null);
     }
   };
+
+  const handleSendMessage = async () => {
+    if (!inputValue.trim() && attachments.length === 0) return;
+    if (interactiveTaskSelectionPending) {
+      toast({ description: "请先确认交互任务清单，再开始执行分析", variant: "destructive" });
+      return;
+    }
+    await sendMessageContent(inputValue, {
+      attachments,
+      resetComposer: true,
+      addToHistory: true,
+    });
+  };
+
+  const handleConfirmInteractiveTasks = async () => {
+    const selected = collectSelectedInteractiveTasks(
+      interactiveTasks,
+      new Set(selectedInteractiveTaskIds)
+    );
+    if (selected.length === 0) {
+      toast({ description: "请至少勾选一个分析任务", variant: "destructive" });
+      return;
+    }
+
+    const taskLines = selected.map((task) => `- ${task.id} ${task.title}`).join("\n");
+    const selectionPrompt = `【交互模式任务确认】请仅执行以下已勾选的分析任务，并在这些任务全部完成后结束本次分析，不要扩展到未勾选任务：\n${taskLines}\n\n请严格以以上任务范围为准继续分析。`;
+
+    setInteractiveTaskSelectionPending(false);
+    await sendMessageContent(selectionPrompt, {
+      attachments: [],
+      resetComposer: false,
+      addToHistory: false,
+    });
+  };
+
+  const renderInteractiveTaskChecklist = (
+    tasks: InteractiveAnalysisTask[],
+    depth = 0
+  ): React.ReactNode =>
+    tasks.map((task) => (
+      <div key={task.id} className="space-y-2">
+        <label
+          className="flex items-start gap-2 rounded-md border bg-white dark:bg-black px-3 py-2"
+          style={{ marginLeft: `${depth * 16}px` }}
+        >
+          <input
+            type="checkbox"
+            checked={selectedInteractiveTaskIds.includes(task.id)}
+            onChange={(event) => toggleInteractiveTaskSelection(task.id, event.target.checked)}
+            className="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-gray-800 dark:text-gray-100">
+              {task.id} {task.title}
+            </div>
+            {task.children.length > 0 ? (
+              <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                勾选父任务时将同时勾选其下级任务
+              </div>
+            ) : null}
+          </div>
+        </label>
+        {task.children.length > 0 ? renderInteractiveTaskChecklist(task.children, depth + 1) : null}
+      </div>
+    ));
 
   const handleFileUpload = async (
     event: React.ChangeEvent<HTMLInputElement>
@@ -4611,33 +4984,39 @@ ${analysisContent}
                       项目中心
                     </Button>
                     {/* 报告类型选择 */}
-                    <div className="relative" onMouseLeave={() => setShowReportTypePicker(false)}>
+                    <div className="relative">
                       <Button
                         variant="outline"
                         size="sm"
                         className="h-7 text-[11px] px-2 gap-1 border-green-200 text-green-600 hover:bg-green-50 dark:border-green-900 dark:text-green-400"
-                        onClick={() => setShowReportTypePicker(!showReportTypePicker)}
+                        onClick={() => {
+                          if (showReportTypePicker) {
+                            cancelReportTypePicker();
+                          } else {
+                            openReportTypePicker();
+                          }
+                        }}
                       >
                         <FileText className="h-3 w-3" />
                         报告类型
                       </Button>
                       {showReportTypePicker && (
-                        <div className="absolute top-8 left-0 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 min-w-[160px]">
+                        <div className="absolute top-8 left-0 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 min-w-[220px] space-y-3">
                           <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择报告输出格式</div>
                           {["pdf", "docx", "pptx"].map((type) => (
                             <label key={type} className="flex items-center gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer">
                               <input
                                 type="checkbox"
-                                checked={reportTypes.includes(type)}
+                                checked={pendingReportTypes.includes(type)}
                                 onChange={(e) => {
                                   if (e.target.checked) {
-                                    setReportTypes(prev => [...prev, type]);
+                                    setPendingReportTypes((prev) =>
+                                      prev.includes(type) ? prev : [...prev, type]
+                                    );
                                   } else {
-                                    const next = reportTypes.filter(t => t !== type);
-                                    // 至少保留一项
-                                    if (next.length > 0) {
-                                      setReportTypes(next);
-                                    }
+                                    setPendingReportTypes((prev) =>
+                                      prev.filter((item) => item !== type)
+                                    );
                                   }
                                 }}
                                 className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
@@ -4645,8 +5024,16 @@ ${analysisContent}
                               <span className="text-xs text-gray-700 dark:text-gray-300 uppercase font-mono">{type}</span>
                             </label>
                           ))}
-                          <div className="text-[9px] text-gray-400 mt-2 pt-2 border-t border-gray-100 dark:border-gray-800">
-                            当前: {reportTypes.map(t => t.toUpperCase()).join(", ")}
+                          <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
+                            当前: {pendingReportTypes.map(t => t.toUpperCase()).join(", ") || "未选择"}
+                          </div>
+                          <div className="flex justify-end gap-2">
+                            <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelReportTypePicker}>
+                              取消
+                            </Button>
+                            <Button size="sm" className="h-7 text-[11px]" onClick={confirmReportTypePicker}>
+                              确定
+                            </Button>
                           </div>
                         </div>
                       )}
@@ -4936,6 +5323,41 @@ ${analysisContent}
                 }}
                 className="flex-1 min-h-0 min-w-0 overflow-y-scroll overflow-x-hidden px-4 py-4 pr-5 space-y-6 scrollbar-auto"
               >
+                {interactiveTaskSelectionPending && interactiveTasks.length > 0 ? (
+                  <Card className="border-orange-200 bg-orange-50/70 dark:border-orange-900/40 dark:bg-orange-950/20 p-4 space-y-4">
+                    <div className="space-y-1">
+                      <div className="text-sm font-semibold text-orange-700 dark:text-orange-300">
+                        交互模式任务清单
+                      </div>
+                      <div className="text-xs text-gray-600 dark:text-gray-300">
+                        请确认要执行的分析任务。智能体只会继续完成您勾选的内容。
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      {renderInteractiveTaskChecklist(interactiveTasks)}
+                    </div>
+                    <div className="flex items-center justify-between gap-3 pt-2 border-t border-orange-200 dark:border-orange-900/40">
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        已勾选 {selectedInteractiveTaskIds.length} 项
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            const allIds = flattenInteractiveTaskIds(interactiveTasks);
+                            setSelectedInteractiveTaskIds(allIds);
+                          }}
+                        >
+                          全选
+                        </Button>
+                        <Button size="sm" onClick={handleConfirmInteractiveTasks}>
+                          开始分析已勾选任务
+                        </Button>
+                      </div>
+                    </div>
+                  </Card>
+                ) : null}
                 {messages.map((message, msgIdx) => (
                   <ChatMessageItem
                     key={message.id}
@@ -5176,11 +5598,11 @@ ${analysisContent}
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="full_agent" className="text-xs">全程代理</SelectItem>
-                            <SelectItem value="interactive" className="text-xs">交互式</SelectItem>
+                            <SelectItem value="interactive" className="text-xs">交互模式</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
-                      <span className="text-blue-600 dark:text-blue-400 font-bold text-base">请风控专家指示分析目标</span>
+                      <span className="text-blue-600 dark:text-blue-400 font-bold text-base">分析要求</span>
                       {/* 分析策略 - 右侧 */}
                       <div className="flex items-center gap-1">
                         <Select value={analysisStrategy} onValueChange={(val) => {
@@ -5212,15 +5634,18 @@ ${analysisContent}
                         <Textarea
                           value={inputValue}
                           onChange={(e) => setInputValue(e.target.value)}
-                          placeholder="在此输入分析指令或提问..."
+                          placeholder={interactiveTaskSelectionPending ? "请先确认交互任务清单，再继续分析..." : "在此输入分析指令或提问..."}
                           onKeyDown={(e) => {
                             if (e.key === "Enter" && !e.shiftKey) {
                               e.preventDefault();
-                              handleSendMessage();
+                              if (!interactiveTaskSelectionPending) {
+                                handleSendMessage();
+                              }
                             }
                           }}
                           rows={8}
                           className="flex-1 resize-none border-gray-200 dark:border-gray-700 bg-white dark:bg-black rounded-lg focus-visible:ring-1"
+                          disabled={interactiveTaskSelectionPending}
                         />
                       </div>
                     </div>
@@ -5290,7 +5715,7 @@ ${analysisContent}
                           <Button
                             onClick={handleSendMessage}
                             size="sm"
-                            disabled={!inputValue.trim()}
+                            disabled={!inputValue.trim() || interactiveTaskSelectionPending}
                             className="h-9 px-4 bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
                           >
                             <Send className="h-4 w-4 mr-2" />
@@ -6114,7 +6539,7 @@ ${analysisContent}
                       : "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
                   )}
                 >
-                  <span className="font-medium">全程代理分析</span>
+                  <span className="font-medium">全程代理</span>
                   <span className="text-[10px] text-gray-500 text-left">智能体自主完成全部分析流程，无需人工干预</span>
                 </button>
                 <button
@@ -6126,7 +6551,7 @@ ${analysisContent}
                       : "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
                   )}
                 >
-                  <span className="font-medium">交互式分析</span>
+                  <span className="font-medium">交互模式</span>
                   <span className="text-[10px] text-gray-500 text-left">用户参与任务拆分与分析角度选择</span>
                 </button>
               </div>
@@ -6543,6 +6968,25 @@ ${analysisContent}
                           setModelProviderConfig((prev) => ({ ...prev, model: e.target.value }))
                         }
                       />
+                      {availableModels.length > 0 ? (
+                        <Select
+                          value={modelProviderConfig.model}
+                          onValueChange={(value) =>
+                            setModelProviderConfig((prev) => ({ ...prev, model: value }))
+                          }
+                        >
+                          <SelectTrigger className="mt-2">
+                            <SelectValue placeholder="从已获取模型列表中选择" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {availableModels.map((modelName) => (
+                              <SelectItem key={modelName} value={modelName}>
+                                {modelName}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : null}
                     </div>
                     <div className="col-span-2 space-y-1.5">
                       <Label htmlFor="model-description">描述</Label>
@@ -6606,9 +7050,41 @@ ${analysisContent}
                     ) : null}
                   </div>
 
+                  <div className="rounded-lg border p-4 space-y-4 bg-white dark:bg-gray-950">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="text-sm font-medium">模型配置测试</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          获取当前提供商可用模型名称，并从列表中确认实际使用的模型。
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleFetchModelList}
+                          disabled={isFetchingModelList}
+                        >
+                          {isFetchingModelList ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                          获取模型名称
+                        </Button>
+                        <Button size="sm" onClick={handleSaveModelConfig}>
+                          保存模型配置
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="rounded-md border bg-gray-50 dark:bg-gray-900/30 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
+                      <div>状态：{modelTestStatus.status}</div>
+                      <div>结果：{modelTestStatus.message}</div>
+                      <div>时间：{modelTestStatus.testedAt || "-"}</div>
+                      <div>当前生效模型：{modelProviderConfig.model || "-"}</div>
+                    </div>
+                  </div>
+
                   <div className="rounded-lg border p-4 space-y-2 bg-blue-50 dark:bg-blue-950/20 text-sm">
                     <div className="font-medium text-blue-700 dark:text-blue-300">当前分析参数</div>
                     <div className="text-xs text-blue-700 dark:text-blue-300">分析策略与温度仍保留在聊天输入区，不从那里移除，避免影响现有分析流程。</div>
+                    <div className="text-xs text-gray-600 dark:text-gray-300">当前模型：{modelProviderConfig.model}</div>
                     <div className="text-xs text-gray-600 dark:text-gray-300">当前分析策略：{analysisStrategy}</div>
                     <div className="text-xs text-gray-600 dark:text-gray-300">当前温度：{temperature ?? "自动"}</div>
                   </div>
@@ -6924,17 +7400,27 @@ ${analysisContent}
           </div>
           <DialogFooter className="px-6 py-4 border-t justify-between">
             <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              {knowledgeSettingsLoaded ? "配置已加载" : "尚未加载配置"}
+              {systemSettingsTab === "model"
+                ? `当前模型：${modelProviderConfig.model || "-"}`
+                : systemSettingsTab === "database"
+                  ? `数据库测试状态：${isDbTested ? "已通过" : "未测试"}`
+                  : knowledgeSettingsLoaded
+                    ? "配置已加载"
+                    : "尚未加载配置"}
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={() => handleTestKnowledgeProvider("all")} disabled={knowledgeTestTarget !== null || isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
-                {knowledgeTestTarget === "all" ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
-                测试全部
-              </Button>
-              <Button onClick={handleSaveKnowledgeConfig} disabled={isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
-                {isSavingKnowledgeConfig ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
-                保存配置
-              </Button>
+              {systemSettingsTab === "model" ? (
+                <Button onClick={handleSaveModelConfig}>保存模型配置</Button>
+              ) : null}
+              {systemSettingsTab === "database" ? (
+                <Button onClick={handleSaveDatabaseConfig}>保存数据库配置</Button>
+              ) : null}
+              {systemSettingsTab === "knowledge" ? (
+                <Button onClick={handleSaveKnowledgeConfig} disabled={isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
+                  {isSavingKnowledgeConfig ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  保存知识库配置
+                </Button>
+              ) : null}
               <Button variant="outline" onClick={() => setShowSystemSettings(false)}>关闭</Button>
             </div>
           </DialogFooter>

@@ -250,6 +250,12 @@ def detect_and_record_error(exe_output: str, code_str: str, workspace_dir: str) 
 
 def generate_solution_suggestion(error_type: str, error_message: str, code_str: str) -> str:
     """根据错误类型和消息生成解决方案建议"""
+    if error_type == "TypeError" and re.search(
+        r"(missing\s+\d+\s+required positional argument|unexpected keyword argument|takes\s+\d+\s+positional argument)",
+        error_message,
+        re.IGNORECASE,
+    ):
+        return "检查函数/方法定义与调用签名是否一致，确认位置参数数量、关键字参数名称、默认值以及所用库版本下的 API 写法完全匹配。对于自定义函数，先统一定义再调用；对于 pandas / matplotlib / report 相关方法，务必按当前版本文档传参。"
     suggestions = {
         "ImportError": "检查是否已安装所需的Python包，可能需要使用 pip install 安装缺失的模块。",
         "ValueError": "检查输入数据的类型和格式，确保参数值在有效范围内。",
@@ -268,6 +274,22 @@ def generate_solution_suggestion(error_type: str, error_message: str, code_str: 
 
 def generate_fix_code(error_type: str, error_message: str, code_str: str) -> str:
     """生成修复代码的示例"""
+    if error_type == "TypeError" and re.search(
+        r"(missing\s+\d+\s+required positional argument|unexpected keyword argument|takes\s+\d+\s+positional argument)",
+        error_message,
+        re.IGNORECASE,
+    ):
+        return '''# 解决方案：先统一函数定义与调用签名，再执行
+def build_summary(df, metrics, top_n=10):
+    # 函数定义里的参数名、顺序、默认值要与调用处保持一致
+    return {"rows": len(df), "metrics": metrics[:top_n]}
+
+# 正确调用：参数数量与名称必须完全匹配
+summary = build_summary(df, metrics, top_n=5)
+
+# 如果是第三方库方法报错，请先确认当前版本文档中的参数签名
+# 例如：不要给不支持的参数名，不要遗漏必填位置参数
+'''
     fix_examples = {
         "ImportError": '''# 解决方案：确保所有依赖已安装
 import subprocess
@@ -479,6 +501,17 @@ MODEL_PATH = "DeepAnalyze-8B"  # replace to your path to DeepAnalyze-8B
 
 # Initialize OpenAI client
 client = openai.OpenAI(base_url=API_BASE, api_key="dummy")
+DEFAULT_MODEL_PROVIDER_CONFIG = {
+    "id": "deepanalyze-default",
+    "providerType": "deepanalyze",
+    "label": "DeepAnalyze 默认",
+    "description": "项目默认本地 vLLM 服务",
+    "baseUrl": API_BASE,
+    "model": MODEL_PATH,
+    "apiKey": "",
+    "headers": {},
+    "supportsOpenAICompatible": True,
+}
 
 # Workspace directory
 WORKSPACE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace")
@@ -616,6 +649,79 @@ def redact_provider(provider: Dict[str, Any]) -> Dict[str, Any]:
     masked["has_api_key"] = bool(api_key)
     masked["api_key"] = mask_secret(api_key)
     return masked
+
+
+def normalize_model_provider_config(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    incoming = payload if isinstance(payload, dict) else {}
+    merged = deep_merge_dict(DEFAULT_MODEL_PROVIDER_CONFIG, incoming)
+    merged["baseUrl"] = normalize_base_url(merged.get("baseUrl") or API_BASE)
+    merged["model"] = (merged.get("model") or MODEL_PATH).strip() or MODEL_PATH
+    merged["apiKey"] = (merged.get("apiKey") or "").strip()
+    raw_headers = merged.get("headers") or {}
+    normalized_headers: Dict[str, str] = {}
+    if isinstance(raw_headers, dict):
+        for key, value in raw_headers.items():
+            if key is None or value is None:
+                continue
+            key_text = str(key).strip()
+            value_text = str(value).strip()
+            if key_text and value_text:
+                normalized_headers[key_text] = value_text
+    merged["headers"] = normalized_headers
+    return merged
+
+
+def build_model_provider_headers(config: Dict[str, Any]) -> Dict[str, str]:
+    headers = {**(config.get("headers") or {})}
+    api_key = config.get("apiKey", "")
+    has_auth_header = any(key.lower() in {"authorization", "x-api-key", "api-key"} for key in headers)
+    if api_key and not has_auth_header:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def get_runtime_llm(model_provider: Optional[Dict[str, Any]] = None) -> Tuple[openai.OpenAI, str, Dict[str, Any]]:
+    normalized = normalize_model_provider_config(model_provider)
+    extra_headers = {
+        key: value
+        for key, value in (normalized.get("headers") or {}).items()
+        if key.lower() != "authorization"
+    }
+    runtime_client = openai.OpenAI(
+        base_url=normalized["baseUrl"],
+        api_key=normalized.get("apiKey") or "dummy",
+        default_headers=extra_headers or None,
+    )
+    return runtime_client, normalized["model"], normalized
+
+
+def fetch_model_names(model_provider: Optional[Dict[str, Any]] = None) -> List[str]:
+    config = normalize_model_provider_config(model_provider)
+    response = httpx.get(
+        f"{config['baseUrl']}/models",
+        headers=build_model_provider_headers(config),
+        timeout=20.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    models: List[str] = []
+    if isinstance(payload, dict):
+        data = payload.get("data", [])
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    model_name = (item.get("id") or item.get("name") or "").strip()
+                    if model_name:
+                        models.append(model_name)
+    if config["model"] and config["model"] not in models:
+        models.insert(0, config["model"])
+    deduped: List[str] = []
+    seen = set()
+    for model_name in models:
+        if model_name not in seen:
+            seen.add(model_name)
+            deduped.append(model_name)
+    return deduped
 
 
 def build_kb_settings_response(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -994,6 +1100,27 @@ async def settings_defaults():
         "efficient_processing_enabled": True,
         "dead_loop_detection_enabled": True,
     }
+
+
+@app.post("/api/model/models")
+async def list_model_names(body: dict = Body(...)):
+    try:
+        config = body.get("config") or body.get("model_provider") or {}
+        normalized = normalize_model_provider_config(config)
+        models = fetch_model_names(normalized)
+        return {
+            "success": True,
+            "models": models,
+            "selected_model": normalized["model"],
+            "message": f"已获取 {len(models)} 个模型名称",
+            "tested_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    except httpx.HTTPStatusError as e:
+        detail = (e.response.text or str(e))[:300] if e.response is not None else str(e)
+        return {"success": False, "message": f"模型列表获取失败: {detail}"}
+    except Exception as e:
+        print(f"List model names error: {e}")
+        return {"success": False, "message": str(e)}
 
 
 # ---------- Side Guidance Storage ----------
@@ -2305,8 +2432,8 @@ def get_system_prompt_with_fonts() -> str:
 - 共性处理逻辑提取为公共函数，避免重复代码。
 
 **原则四：两种分析模式**
-- **交互式分析模式**：将任务树以结构化方式展示给用户，等待用户选择要执行的分析角度。
-- **全程代理分析模式**：自主执行全部任务树，不展示中间选择界面。
+- **交互模式**：将任务树以结构化方式展示给用户，等待用户勾选并确认要执行的分析任务，仅执行已确认任务。
+- **全程代理模式**：自主执行全部任务树，不展示中间选择界面。
 - 根据当前设置的模式执行对应流程。
 
 **原则五：输出规范**
@@ -2426,7 +2553,17 @@ def get_system_prompt_with_fonts() -> str:
     return system_prompt_template.replace("{FONTS_DIR_PLACEHOLDER}", fonts_dir)
 
 
-def bot_stream(messages, workspace, session_id="default", username="default", strategy="聚焦诉求", temperature=0.4, analysis_mode="full_agent"):
+def bot_stream(
+    messages,
+    workspace,
+    session_id="default",
+    username="default",
+    strategy="聚焦诉求",
+    temperature=0.4,
+    analysis_mode="full_agent",
+    report_types=None,
+    model_provider=None,
+):
     # Strategy-specific prompts and default temperature
     strategy_temperatures = {
         "聚焦诉求": 0.2,
@@ -2446,10 +2583,30 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 
     # Analysis mode prompt injection
     mode_prompts = {
-        "interactive": "\n\n**当前分析模式：交互式分析**\n请将分析目标分解为任务树，并以如下格式展示给用户：\n```\n任务树：\n├─ 1. [任务名称]\n│  ├─ 1.1 [子任务名称]\n│  └─ 1.2 [子任务名称]\n├─ 2. [任务名称]\n│  ├─ 2.1 [子任务名称]\n│  └─ 2.2 [子任务名称]\n└─ 3. [任务名称]\n```\n展示任务树后，等待用户选择要执行的任务编号。仅分析用户选定的任务。",
+        "interactive": "\n\n**当前分析模式：交互模式**\n在正式展开分析前，请先基于用户目标与数据情况形成一份有层次的分析任务清单，并以如下格式展示给用户：\n```\n任务树：\n├─ 1. [任务名称]\n│  ├─ 1.1 [子任务名称]\n│  └─ 1.2 [子任务名称]\n├─ 2. [任务名称]\n│  ├─ 2.1 [子任务名称]\n│  └─ 2.2 [子任务名称]\n└─ 3. [任务名称]\n```\n展示任务树后立即停止，等待用户勾选并确认任务。只有在收到用户确认后的任务范围时，才继续分析；未被勾选的任务不得执行。完成用户勾选的任务后，即视为本次分析完成。",
         "full_agent": "\n\n**当前分析模式：全程代理分析**\n请自主执行全部分析任务，不需要等待用户中间确认。按照任务依赖关系有序执行，确保覆盖所有必要的分析维度。\n\n**高效完成原则（极重要）**：\n- 分析任务应在完成所有必要维度后及时终结，不要无限制地扩展分析。\n- 完成数据探测、核心分析、风险识别后，立即进入报告生成阶段。\n- 生成报告时，必须将前面所有分析步骤中产生的具体数据、结论、图表路径全部整合到报告中，不得遗漏或使用占位符。\n- 报告中每个章节都必须包含实质性的分析内容（具体数值、比例、排名、趋势描述等），而非仅写章节标题。"
     }
     selected_mode_prompt = mode_prompts.get(analysis_mode, mode_prompts["full_agent"])
+    requested_report_types = [
+        item.strip().lower()
+        for item in (report_types or ["pdf"])
+        if isinstance(item, str) and item.strip()
+    ]
+    if not requested_report_types:
+        requested_report_types = ["pdf"]
+    report_prompt = (
+        "\n\n**报告输出要求（必须遵守）**："
+        f"\n- 用户选定的最终报告类型为：{', '.join(requested_report_types).upper()}。"
+        "\n- 如果进入报告生成阶段，必须输出以上全部选定格式，不得只生成其中一部分。"
+        "\n- 生成报告前请记住该要求，并在完成分析后产出对应成果文件。"
+    )
+    signature_safety_prompt = (
+        "\n\n**函数与方法调用安全规则（必须遵守）**："
+        "\n- 定义自定义函数后，调用时必须逐一核对参数数量、参数名称、默认值和返回值。"
+        "\n- 遇到 pandas、matplotlib、reportlab、docx、pptx 等库方法时，必须按当前版本支持的签名调用，不得臆造参数。"
+        "\n- 执行前先自查一遍：是否存在 missing positional argument、unexpected keyword argument、takes N positional arguments 等风险。"
+        "\n- 如需复用辅助函数，先统一函数定义，再统一所有调用点，避免同名函数签名不一致。"
+    )
 
     # 使用动态生成的 system prompt（已包含完整内容）
     system_prompt = get_system_prompt_with_fonts()
@@ -2474,6 +2631,8 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
     # Append strategy and mode prompts
     system_prompt += selected_strategy_prompt
     system_prompt += selected_mode_prompt
+    system_prompt += report_prompt
+    system_prompt += signature_safety_prompt
 
     # Check if system prompt is already there, if not, insert it
     if not messages or messages[0]["role"] != "system":
@@ -2510,6 +2669,7 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
     assistant_reply = ""
     finished = False
     exe_output = None
+    llm_client, llm_model, _ = get_runtime_llm(model_provider)
     while not finished:
         # 在每次 LLM 生成前，检查是否有用户提交的“过程指导/Side Task”
         guidance = SESSION_GUIDANCE.pop(session_id, None)
@@ -2521,8 +2681,8 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
             messages.append(guidance_msg)
             print(f"[Side Guidance] Injecting guidance into session {session_id}")
 
-        response = client.chat.completions.create(
-            model=MODEL_PATH,
+        response = llm_client.chat.completions.create(
+            model=llm_model,
             messages=messages,
             temperature=effective_temperature,
             stream=True,
@@ -2684,18 +2844,33 @@ async def chat(body: dict = Body(...)):
     strategy = body.get("strategy", "聚焦诉求")
     temperature = body.get("temperature", None)  # Optional: user can override temperature
     analysis_mode = body.get("analysis_mode", "full_agent")
+    report_types = body.get("report_types", ["pdf"])
+    model_provider = body.get("model_provider")
+    model_name = MODEL_PATH
+    if isinstance(model_provider, dict):
+        model_name = (model_provider.get("model") or MODEL_PATH)
 
     # 动态构建 workspace 目录，确保能正确识别当前 session 的文件
     actual_workspace_dir = get_session_workspace(session_id, username)
 
     def generate():
-        for delta_content in bot_stream(messages, workspace, session_id, username, strategy, temperature, analysis_mode):
+        for delta_content in bot_stream(
+            messages,
+            workspace,
+            session_id,
+            username,
+            strategy,
+            temperature,
+            analysis_mode,
+            report_types,
+            model_provider,
+        ):
             # print(delta_content)
             chunk = {
                 "id": "chatcmpl-stream",
                 "object": "chat.completion.chunk",  # 标识为流式块
                 "created": 1677652288,
-                "model": MODEL_PATH,
+                "model": model_name,
                 "choices": [
                     {
                         "index": 0,
@@ -2714,7 +2889,7 @@ async def chat(body: dict = Body(...)):
             "id": "chatcmpl-stream",
             "object": "chat.completion.chunk",
             "created": 1677652288,
-            "model": MODEL_PATH,
+            "model": model_name,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
         }
         yield json.dumps(end_chunk) + "\n"
@@ -4339,6 +4514,7 @@ async def generate_sql(body: dict = Body(...)):
         db_type = body.get("db_type", "mysql")
         prompt = body.get("prompt", "")
         schema_info = body.get("schema_info", "") # 可选：由前端提供或后端自动获取
+        model_provider = body.get("model_provider")
 
         if not prompt:
             return {"success": False, "message": "Prompt is required"}
@@ -4352,8 +4528,9 @@ SELECT ...
 ```"""
         user_msg = f"需求：{prompt}\n表结构信息：{schema_info}"
 
-        response = client.chat.completions.create(
-            model=MODEL_PATH,
+        llm_client, llm_model, _ = get_runtime_llm(model_provider)
+        response = llm_client.chat.completions.create(
+            model=llm_model,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg}

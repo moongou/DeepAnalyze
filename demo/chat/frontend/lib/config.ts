@@ -275,6 +275,7 @@ export const API_CONFIG = {
     DB_EXECUTE: "/api/db/execute",
 
     // 系统设置
+    MODEL_LIST: "/api/model/models",
     SETTINGS_HARDWARE: "/api/settings/hardware",
     SETTINGS_DEFAULTS: "/api/settings/defaults",
   },
@@ -326,6 +327,7 @@ export const API_URLS = {
   DB_EXECUTE: buildApiUrl(API_CONFIG.ENDPOINTS.DB_EXECUTE),
 
   // 系统设置
+  MODEL_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.MODEL_LIST),
   SETTINGS_HARDWARE: buildApiUrl(API_CONFIG.ENDPOINTS.SETTINGS_HARDWARE),
   SETTINGS_DEFAULTS: buildApiUrl(API_CONFIG.ENDPOINTS.SETTINGS_DEFAULTS),
 
