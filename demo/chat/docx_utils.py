@@ -156,7 +156,7 @@ def clean_md_text_for_docx(md_text: str) -> str:
 
 def extract_markdown_blocks(md_text: str) -> list[dict]:
     """
-    从 Markdown 文本中提取块结构
+    从 Markdown 文本中提取块结构（包括表格）
 
     Args:
         md_text: Markdown 格式的文本
@@ -189,6 +189,45 @@ def extract_markdown_blocks(md_text: str) -> list[dict]:
                 "alt": img_match.group(1),
             })
             i += 1
+            continue
+
+        # 表格检测 (Markdown 表格: | col1 | col2 | ...)
+        if '|' in stripped and stripped.startswith('|'):
+            table_lines = []
+            while i < len(lines):
+                tline = lines[i].strip()
+                if tline.startswith('|') and '|' in tline[1:]:
+                    table_lines.append(tline)
+                    i += 1
+                elif not tline:
+                    i += 1
+                    break
+                else:
+                    break
+
+            if len(table_lines) >= 2:
+                header_cells = [c.strip() for c in table_lines[0].split('|') if c.strip()]
+                data_rows = []
+                for tl in table_lines[1:]:
+                    if re.match(r'^[\|\s\-:]+$', tl):
+                        continue
+                    row_cells = [c.strip() for c in tl.split('|') if c.strip()]
+                    if row_cells:
+                        data_rows.append(row_cells)
+
+                if header_cells and data_rows:
+                    blocks.append({
+                        "type": "table",
+                        "content": {
+                            "headers": header_cells,
+                            "rows": data_rows
+                        },
+                    })
+                else:
+                    blocks.append({
+                        "type": "paragraph",
+                        "content": '\n'.join(table_lines),
+                    })
             continue
 
         # 一级标题
@@ -248,6 +287,9 @@ def extract_markdown_blocks(md_text: str) -> list[dict]:
             line = lines[i]
             stripped = line.strip()
             if not stripped or stripped.startswith(('# ', '## ', '### ', '- ', '* ')) or re.match(r'^\d+\.\s', stripped):
+                break
+            # Also break on table start
+            if stripped.startswith('|') and '|' in stripped[1:]:
                 break
             paragraph_lines.append(line)
             i += 1
@@ -326,6 +368,50 @@ def add_block_to_docx(doc: Document, block: dict, font_name: Optional[str] = Non
             for run in p.runs:
                 run.font.name = font_name
                 run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), font_name)
+
+    elif block_type == "table":
+        # 使用 python-docx 的原生表格功能渲染 Markdown 表格
+        try:
+            from docx.shared import Inches, RGBColor
+            table_data = content
+            headers = table_data.get("headers", [])
+            rows = table_data.get("rows", [])
+
+            if headers and rows:
+                max_cols = max(len(headers), max(len(r) for r in rows))
+                # Normalize
+                headers_padded = list(headers) + [''] * (max_cols - len(headers))
+                rows_padded = [list(r) + [''] * (max_cols - len(r)) for r in rows]
+
+                table = doc.add_table(rows=1 + len(rows_padded), cols=max_cols)
+                table.style = 'Table Grid'
+
+                # Header row
+                for j, cell_text in enumerate(headers_padded[:max_cols]):
+                    cell = table.rows[0].cells[j]
+                    cell.text = cell_text
+                    if font_name:
+                        for run in cell.paragraphs[0].runs:
+                            run.font.name = font_name
+                            run.font.bold = True
+                            run.font.size = Pt(10)
+                            run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), font_name)
+
+                # Data rows
+                for i_row, row_data in enumerate(rows_padded):
+                    for j, cell_text in enumerate(row_data[:max_cols]):
+                        cell = table.rows[i_row + 1].cells[j]
+                        cell.text = cell_text
+                        if font_name:
+                            for run in cell.paragraphs[0].runs:
+                                run.font.name = font_name
+                                run.font.size = Pt(9)
+                                run._element.get_or_add_rPr().get_or_add_rFonts().set(qn("w:eastAsia"), font_name)
+
+                doc.add_paragraph("")  # spacing after table
+        except Exception as e:
+            logger.error(f"DOCX 表格渲染失败: {e}")
+            p = doc.add_paragraph(str(content))
 
     elif block_type == "list":
         for item in content:

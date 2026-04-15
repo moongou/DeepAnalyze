@@ -1825,6 +1825,9 @@ def get_system_prompt_with_fonts() -> str:
 - **阶段性分析**：在分析过程中，请通过聊天回复或代码执行结果展示阶段性发现和图表。
 - **最终报告**：只有在**所有**分析维度（如：主体身份、价格风险、通关时效等）全部完成后，在任务的**最后阶段**，才调用 `generate_report_pdf` 或 `generate_report_docx` 将所有核心观点和可视化图形组织成一份完整的终期报告。
 - **避免重复**：禁止在分析过程中反复生成阶段性报告，确保用户在文件列表中只看到最终的、高质量的分析成果。
+- **上下文积累（极重要）**：在整个分析过程中，你必须在内存中持续积累所有已完成的分析成果、关键发现、数据统计结果和图表文件路径。每完成一个分析维度后，必须在 <Answer> 标签中完整记录该维度的**全部详细内容**（包括具体数据数值、百分比、排名、图表引用路径等），而非仅写标题或占位符。
+- **禁止空壳报告（极重要）**：生成最终报告时，报告内容**必须包含完整的分析结论、具体数据、推理过程和图表引用**。严禁生成仅包含报告结构框架而缺少实质内容的报告（如"[详细方法描述...]"、"[详细结果描述...]"这类占位文本）。如果某个章节的分析尚未完成，应明确标注"此部分尚未完成分析"而非使用占位符。
+- **报告不得包含水印、版权声明或数据安全说明**：生成的报告中不需要添加任何水印、版权声明、免责声明或数据安全说明文字。报告不需要以压缩包方式打包输出。
 
 **============================================
 第一部分：可视化与美学规范（极重要）
@@ -1844,6 +1847,37 @@ def get_system_prompt_with_fonts() -> str:
 2. **图表内容**：
    - 每个图表必须有清晰的中文标题、坐标轴标签和图例。
    - 对于趋势分析，使用折线图；对于分布分析，使用直方图或小提琴图；对于关系分析，使用散点图或热力图。
+
+3. **空白图表检测（极重要）**：
+   - 生成图表后，**必须**验证图表不是空白的。在 `plt.savefig()` 之前，检查数据是否有效。
+   - 对于时间序列图表，必须先确认时间列已正确解析为 datetime 类型，使用 `pd.to_datetime(errors='coerce')` 进行转换，并检查转换后是否存在 NaT 值。
+   - 验证方法：在保存图表前添加检查代码：
+     ```python
+     # 验证图表数据是否有效
+     fig = plt.gcf()
+     has_data = False
+     for ax in fig.axes:
+         for line in ax.get_lines():
+             if len(line.get_xdata()) > 0:
+                 has_data = True
+                 break
+         for container in ax.containers:
+             if len(container) > 0:
+                 has_data = True
+                 break
+         for collection in ax.collections:
+             if len(collection.get_offsets()) > 0:
+                 has_data = True
+                 break
+     if not has_data:
+         print("警告：图表为空白，跳过保存")
+         plt.close()
+     else:
+         plt.savefig(output_path, dpi=150, bbox_inches='tight')
+         plt.close()
+         print(f"图表已保存: {output_path}")
+     ```
+   - 如果图表为空白，不要将其包含在最终报告中。
 
 **============================================
 第二部分：工具库与增强组件（极重要）
@@ -2001,6 +2035,26 @@ def get_system_prompt_with_fonts() -> str:
 - 表格标题置于表格上方，编号如"表1："
 - 确保中文显示正常，使用支持中文的字体
 
+**表格数据输出规范（极重要）**：
+- 在报告中输出表格数据时，**禁止使用 Markdown 表格语法**（即 `| 列1 | 列2 |` 格式），因为 PDF 渲染引擎无法正确对齐 Markdown 表格。
+- **正确做法**：使用代码将表格数据导出为格式化的文本或图片。推荐方案：
+  1. **使用 matplotlib 渲染表格为图片（首选）**：
+     ```python
+     import matplotlib.pyplot as plt
+     import pandas as pd
+     
+     fig, ax = plt.subplots(figsize=(10, len(df)*0.4 + 1))
+     ax.axis('off')
+     table = ax.table(cellText=df.values, colLabels=df.columns, cellLoc='center', loc='center')
+     table.auto_set_font_size(False)
+     table.set_fontsize(10)
+     table.scale(1.2, 1.5)
+     plt.savefig('table_output.png', dpi=150, bbox_inches='tight', pad_inches=0.1)
+     plt.close()
+     ```
+  2. **使用 `df.to_string()` 输出格式化文本**（备选）。
+- 这确保表格在 PDF、DOCX、PPTX 中都能正确显示且列对齐。
+
 **============================================
 第六部分：任务执行与输出规范（极重要）
 ============================================
@@ -2042,6 +2096,12 @@ def get_system_prompt_with_fonts() -> str:
   - ✅ `pd.Timestamp - pd.Timedelta(days=30)` → 正确的时间运算
   - ❌ 在代码中硬编码未验证的列名
   - ✅ 先探测列名，再根据实际列名编写分析代码
+  - ❌ 在临时文件中使用硬编码路径或未关闭的文件句柄
+  - ✅ 使用 `with` 语句管理文件和使用 `os.path.join()` 构建路径
+  - ❌ 忘记 `import` 所需的库
+  - ✅ 每个 `<Code>` 块都必须包含完整的 import 语句，不要假设其他代码块已导入
+  - ❌ 使用 `plt.show()` 在无显示器环境中
+  - ✅ 使用 `plt.savefig()` 保存图表后调用 `plt.close()`
 
 **预测推理与短代码测试（ mandatory ）**：
 - 在生成完整的复杂分析代码前，**必须**先进行预测推理和短代码测试。
@@ -2387,7 +2447,7 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
     # Analysis mode prompt injection
     mode_prompts = {
         "interactive": "\n\n**当前分析模式：交互式分析**\n请将分析目标分解为任务树，并以如下格式展示给用户：\n```\n任务树：\n├─ 1. [任务名称]\n│  ├─ 1.1 [子任务名称]\n│  └─ 1.2 [子任务名称]\n├─ 2. [任务名称]\n│  ├─ 2.1 [子任务名称]\n│  └─ 2.2 [子任务名称]\n└─ 3. [任务名称]\n```\n展示任务树后，等待用户选择要执行的任务编号。仅分析用户选定的任务。",
-        "full_agent": "\n\n**当前分析模式：全程代理分析**\n请自主执行全部分析任务，不需要等待用户中间确认。按照任务依赖关系有序执行，确保覆盖所有必要的分析维度。"
+        "full_agent": "\n\n**当前分析模式：全程代理分析**\n请自主执行全部分析任务，不需要等待用户中间确认。按照任务依赖关系有序执行，确保覆盖所有必要的分析维度。\n\n**高效完成原则（极重要）**：\n- 分析任务应在完成所有必要维度后及时终结，不要无限制地扩展分析。\n- 完成数据探测、核心分析、风险识别后，立即进入报告生成阶段。\n- 生成报告时，必须将前面所有分析步骤中产生的具体数据、结论、图表路径全部整合到报告中，不得遗漏或使用占位符。\n- 报告中每个章节都必须包含实质性的分析内容（具体数值、比例、排名、趋势描述等），而非仅写章节标题。"
     }
     selected_mode_prompt = mode_prompts.get(analysis_mode, mode_prompts["full_agent"])
 
@@ -2667,17 +2727,20 @@ from datetime import datetime
 
 
 def _extract_sections_from_messages(messages: list[dict]) -> str:
-    """从历史消息中抽取 <Answer>..</Answer> 作为报告主体，其余部分按原始顺序作为 Appendix 拼成 Markdown。"""
+    """从历史消息中抽取报告内容。
+    
+    优先使用 <Answer> 标签中的内容作为报告主体。
+    同时从 <Analyze> 标签中提取分析过程的实质内容作为补充。
+    从 <Execute> 标签中提取执行结果中的关键数据。
+    最终组装成一份完整的、有实质内容的分析报告。
+    """
     if not isinstance(messages, list):
         return ""
     import re as _re
 
-    parts: list[str] = []
-    appendix: list[str] = []
-
     tag_pattern = r"<(Analyze|Understand|Code|Execute|File|Answer)>([\s\S]*?)</\1>"
 
-    # 尝试提取报告结构化的层次感
+    # 收集所有助手消息内容
     all_content = ""
     for idx, m in enumerate(messages, start=1):
         role = (m or {}).get("role")
@@ -2685,33 +2748,75 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
             continue
         all_content += str((m or {}).get("content") or "") + "\n"
 
-    # 提取所有 Analyze 和 Answer，并尝试保持逻辑顺序
-    sections = []
+    # 分类提取各类标签内容
+    answer_sections = []
+    analyze_sections = []
+    execute_data = []
+
     for match in _re.finditer(tag_pattern, all_content, _re.DOTALL):
         tag, seg = match.groups()
         seg = seg.strip()
-        if tag in ["Analyze", "Answer"]:
-            # 去掉 Analyze 中的标签头（如果存在）
-            clean_seg = _re.sub(r"#( 预测推理| 短代码测试与结果| 正式分析思路)\n.*?\n", "", seg, flags=_re.DOTALL).strip()
-            sections.append(clean_seg)
-        appendix.append(f"\n### Step {len(appendix)+1}: {tag}\n\n{seg}\n")
+        if not seg:
+            continue
+        if tag == "Answer":
+            answer_sections.append(seg)
+        elif tag == "Analyze":
+            # 去掉预测推理和短代码测试部分，只保留正式分析内容
+            clean_seg = _re.sub(r"#\s*(预测推理|短代码测试与结果)\s*\n[\s\S]*?(?=\n#\s*正式分析|$)", "", seg, flags=_re.DOTALL).strip()
+            if clean_seg and len(clean_seg) > 50:  # 只保留有实质内容的分析
+                analyze_sections.append(clean_seg)
+        elif tag == "Execute":
+            # 提取执行结果中的有用数据（排除纯错误信息）
+            if seg and "Traceback" not in seg and "Error" not in seg and len(seg) > 20:
+                # 截断过长的执行输出
+                if len(seg) > 2000:
+                    seg = seg[:2000] + "\n...(输出已截断)"
+                execute_data.append(seg)
 
-    final_text = "\n\n".join(sections).strip()
-    if not final_text: # Fallback
-        parts = []
-        for match in _re.finditer(tag_pattern, all_content, _re.DOTALL):
-            tag, seg = match.groups()
-            if tag == "Answer":
-                parts.append(seg.strip())
-        final_text = "\n\n".join(parts).strip()
+    # 构建最终报告文本
+    final_text = ""
 
-    if appendix:
-        final_text += (
-            "\n\n\\newpage\n\n# Appendix: Detailed Process\n"
-            + "".join(appendix).strip()
-        )
+    # 1. 主要使用 Answer 标签的内容
+    if answer_sections:
+        final_text = "\n\n".join(answer_sections).strip()
 
-    return final_text
+    # 2. 如果 Answer 内容过短或为空，用 Analyze 内容补充
+    if not final_text or len(final_text) < 200:
+        if analyze_sections:
+            analyze_text = "\n\n".join(analyze_sections).strip()
+            if final_text:
+                final_text = analyze_text + "\n\n" + final_text
+            else:
+                final_text = analyze_text
+
+    # 3. 检测占位符模式并尝试替换
+    placeholder_pattern = r'\[详细.*?(?:描述|分析|评估|建议)\.{0,3}\]'
+    if _re.search(placeholder_pattern, final_text):
+        # 存在占位符，尝试从分析过程中提取实际内容填充
+        if analyze_sections or execute_data:
+            supplementary = "\n\n## 补充分析数据\n\n"
+            if analyze_sections:
+                for i, section in enumerate(analyze_sections[:5], 1):
+                    supplementary += f"### 分析维度 {i}\n\n{section}\n\n"
+            if execute_data:
+                supplementary += "### 关键数据摘要\n\n"
+                for data in execute_data[:3]:
+                    supplementary += f"```\n{data}\n```\n\n"
+            final_text += supplementary
+
+    # 4. 如果仍然没有内容，从整体对话中提取
+    if not final_text:
+        # 最后兜底：取所有助手消息中有实质内容的部分
+        for m in messages:
+            role = (m or {}).get("role")
+            if role == "assistant":
+                content = str((m or {}).get("content") or "")
+                # 移除标签
+                clean = _re.sub(r'</?(?:Analyze|Understand|Code|Execute|File|Answer)>', '', content).strip()
+                if clean and len(clean) > 100:
+                    final_text += clean + "\n\n"
+
+    return final_text.strip()
 
 
 def _save_md(md_text: str, base_name: str, workspace_dir: str) -> Path:
@@ -2825,7 +2930,7 @@ def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
 
 def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
-    """使用 python-pptx 生成 PPTX 报告，支持中文字体和图表嵌入
+    """使用 python-pptx 生成 PPTX 报告，支持中文字体、图表嵌入和丰富排版
 
     Args:
         md_text: Markdown 格式的分析报告文本
@@ -2839,7 +2944,7 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
         from pptx import Presentation
         from pptx.util import Inches, Pt, Emu
         from pptx.dml.color import RGBColor
-        from pptx.enum.text import PP_ALIGN
+        from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
         import re as _re
 
         # Sanitize base_name to prevent path traversal
@@ -2855,23 +2960,15 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
         # Resolve Chinese font path for PPTX
         _pptx_font_name = "SimHei"
         _pptx_body_font = "STFangSong"
-        _pptx_font_path = None
-        try:
-            font_path_candidate = os.path.join(_FONT_DIR, "simhei.ttf")
-            if os.path.exists(font_path_candidate):
-                _pptx_font_path = font_path_candidate
-        except Exception:
-            pass
 
-        def _set_font(run, font_name, size_pt, bold=False, color_rgb=None):
+        def _set_font(run, font_name, size_pt, bold=False, italic=False, color_rgb=None):
             """Helper to set font properties on a run"""
             run.font.size = Pt(size_pt)
             run.font.bold = bold
+            run.font.italic = italic
             if color_rgb:
                 run.font.color.rgb = color_rgb
-            # Set Chinese font name
             run.font.name = font_name
-            # Also set East Asian font via XML for proper Chinese rendering
             try:
                 from lxml import etree
                 rPr = run._r.get_or_add_rPr()
@@ -2883,6 +2980,50 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
             except Exception:
                 pass
 
+        def _add_text_with_formatting(text_frame, text, font_name, size_pt, bold=False, color_rgb=None, line_spacing=1.2):
+            """Add multi-paragraph text with proper formatting to a text frame"""
+            lines = text.split('\n')
+            first = True
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                if first:
+                    p = text_frame.paragraphs[0]
+                    first = False
+                else:
+                    p = text_frame.add_paragraph()
+
+                p.space_after = Pt(4)
+                p.space_before = Pt(2)
+
+                # Check if it's a bullet point
+                is_bullet = line.startswith('- ') or line.startswith('* ') or line.startswith('• ')
+                if is_bullet:
+                    line = line.lstrip('-*• ').strip()
+                    run = p.add_run()
+                    run.text = "• "
+                    _set_font(run, font_name, size_pt, bold=True, color_rgb=RGBColor(0, 102, 204))
+                    run2 = p.add_run()
+                    run2.text = line
+                    _set_font(run2, font_name, size_pt, color_rgb=color_rgb or RGBColor(51, 51, 51))
+                elif line.startswith('**') and line.endswith('**'):
+                    # Bold text
+                    run = p.add_run()
+                    run.text = line.strip('*')
+                    _set_font(run, font_name, size_pt + 1, bold=True, color_rgb=color_rgb or RGBColor(0, 51, 102))
+                else:
+                    # Clean markdown formatting
+                    clean = _re.sub(r'\*\*(.*?)\*\*', r'\1', line)
+                    clean = _re.sub(r'\*(.*?)\*', r'\1', clean)
+                    clean = _re.sub(r'`(.*?)`', r'\1', clean)
+                    clean = _re.sub(r'!\[[^\]]*\]\([^)]*\)', '', clean)
+                    clean = _re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', clean)
+                    if clean.strip():
+                        run = p.add_run()
+                        run.text = clean
+                        _set_font(run, font_name, size_pt, color_rgb=color_rgb or RGBColor(51, 51, 51))
+
         # Collect image references from workspace/generated
         generated_dir = ws_path / "generated"
         available_images_by_name = {}
@@ -2892,94 +3033,110 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
                 for f in img_dir.iterdir():
                     if f.suffix.lower() in ('.png', '.jpg', '.jpeg', '.svg', '.gif'):
                         available_images_by_name[f.name] = str(f)
-                        # Only use stem if not already taken by a filename
                         if f.stem not in available_images_by_name:
                             available_images_by_stem[f.stem] = str(f)
 
-        # Title slide
+        # === Title Slide ===
         slide_layout = prs.slide_layouts[6]  # Blank layout
         slide = prs.slides.add_slide(slide_layout)
-        left = Inches(1)
-        top = Inches(2.5)
-        width = Inches(11.333)
-        height = Inches(2)
-        txBox = slide.shapes.add_textbox(left, top, width, height)
+
+        # Background gradient effect via a colored shape
+        bg_shape = slide.shapes.add_shape(
+            1, Inches(0), Inches(0), prs.slide_width, Inches(3.5)
+        )
+        bg_shape.fill.solid()
+        bg_shape.fill.fore_color.rgb = RGBColor(0, 51, 102)
+        bg_shape.line.fill.background()
+
+        # Title text
+        txBox = slide.shapes.add_textbox(Inches(1), Inches(1.0), Inches(11.333), Inches(2))
         tf = txBox.text_frame
         tf.word_wrap = True
         p = tf.paragraphs[0]
         run = p.add_run()
         run.text = base_name.replace("_", " ")
-        _set_font(run, _pptx_font_name, 36, bold=True, color_rgb=RGBColor(0, 51, 102))
+        _set_font(run, _pptx_font_name, 36, bold=True, color_rgb=RGBColor(255, 255, 255))
         p.alignment = PP_ALIGN.CENTER
 
-        # Add subtitle with date
+        # Subtitle with date
         p2 = tf.add_paragraph()
         p2.alignment = PP_ALIGN.CENTER
         run2 = p2.add_run()
-        run2.text = f"生成日期: {datetime.now().strftime('%Y年%m月%d日')}"
-        _set_font(run2, _pptx_body_font, 16, color_rgb=RGBColor(102, 102, 102))
+        run2.text = f"DeepAnalyze 智能分析报告 | {datetime.now().strftime('%Y年%m月%d日')}"
+        _set_font(run2, _pptx_body_font, 16, color_rgb=RGBColor(200, 220, 255))
 
-        # Split content into sections
-        sections = _re.split(r'\n#{1,3}\s+', md_text)
-        for section in sections:
-            if not section.strip():
+        # === Content Slides ===
+        # Parse markdown into sections by headers
+        # Split by any level header
+        raw_sections = _re.split(r'\n(?=#{1,3}\s+)', md_text)
+
+        for section_text in raw_sections:
+            if not section_text.strip():
                 continue
-            lines = section.strip().split('\n')
-            title = lines[0].strip().lstrip('#').strip() if lines else "分析内容"
-            body = '\n'.join(lines[1:]).strip() if len(lines) > 1 else ""
+
+            lines = section_text.strip().split('\n')
+            # Extract title from first line
+            title_line = lines[0].strip()
+            title = title_line.lstrip('#').strip() if title_line.startswith('#') else title_line
+            if not title:
+                title = "分析内容"
+            body_text = '\n'.join(lines[1:]).strip() if len(lines) > 1 else ""
 
             # Extract image references from markdown
-            img_refs = _re.findall(r'!\[.*?\]\((.*?)\)', body)
+            img_refs = _re.findall(r'!\[[^\]]*\]\(([^)]*)\)', body_text)
 
-            slide = prs.slides.add_slide(prs.slide_layouts[6])
-
-            # Title textbox
-            txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.3), Inches(12.333), Inches(0.8))
-            tf = txBox.text_frame
-            tf.word_wrap = True
-            p = tf.paragraphs[0]
-            run = p.add_run()
-            run.text = title[:80]
-            _set_font(run, _pptx_font_name, 28, bold=True, color_rgb=RGBColor(0, 51, 102))
-
-            # Add bottom border line for title
-            line_shape = slide.shapes.add_connector(
-                1, Inches(0.5), Inches(1.15), Inches(12.333), Inches(1.15)
-            )
-            line_shape.line.color.rgb = RGBColor(0, 102, 204)
-            line_shape.line.width = Pt(1.5)
-
-            # Determine layout: with or without images
+            # Find actual image files
             embedded_images = []
             for ref in img_refs:
                 img_name = os.path.basename(ref)
                 img_stem = Path(img_name).stem
-                # Try to find image in workspace (prefer exact filename match)
                 img_path = None
                 if img_name in available_images_by_name:
                     img_path = available_images_by_name[img_name]
                 elif img_stem in available_images_by_stem:
                     img_path = available_images_by_stem[img_stem]
                 else:
-                    # Try direct path
-                    candidate = ws_path / ref
-                    if candidate.exists():
+                    candidate = (ws_path / ref).resolve()
+                    # Ensure resolved path stays within workspace
+                    if str(candidate).startswith(str(ws_path)) and candidate.exists():
                         img_path = str(candidate)
-                    else:
-                        candidate = generated_dir / img_name if generated_dir.exists() else None
-                        if candidate and candidate.exists():
+                    elif generated_dir.exists():
+                        candidate = (generated_dir / img_name).resolve()
+                        if str(candidate).startswith(str(ws_path)) and candidate.exists():
                             img_path = str(candidate)
-                if img_path and os.path.exists(img_path):
+                # Verify image is not empty (> 1KB minimum)
+                MIN_IMAGE_SIZE_BYTES = 1024
+                if img_path and os.path.exists(img_path) and os.path.getsize(img_path) > MIN_IMAGE_SIZE_BYTES:
                     embedded_images.append(img_path)
 
-            # Clean body text
-            clean_body = _re.sub(r'\*\*(.*?)\*\*', r'\1', body)
-            clean_body = _re.sub(r'\*(.*?)\*', r'\1', clean_body)
-            clean_body = _re.sub(r'`(.*?)`', r'\1', clean_body)
-            clean_body = _re.sub(r'!\[.*?\]\(.*?\)', '', clean_body)
-            clean_body = _re.sub(r'\[.*?\]\(.*?\)', '', clean_body)
+            # Skip sections with no content
+            clean_body = _re.sub(r'!\[[^\]]*\]\([^)]*\)', '', body_text)
+            clean_body = _re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', clean_body)
             clean_body = clean_body.strip()
+            if not clean_body and not embedded_images:
+                continue
 
+            # Create slide
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+            # Title bar background
+            title_bg = slide.shapes.add_shape(
+                1, Inches(0), Inches(0), prs.slide_width, Inches(1.1)
+            )
+            title_bg.fill.solid()
+            title_bg.fill.fore_color.rgb = RGBColor(0, 51, 102)
+            title_bg.line.fill.background()
+
+            # Title textbox
+            txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.15), Inches(12.333), Inches(0.8))
+            tf = txBox.text_frame
+            tf.word_wrap = True
+            p = tf.paragraphs[0]
+            run = p.add_run()
+            run.text = title[:80]
+            _set_font(run, _pptx_font_name, 24, bold=True, color_rgb=RGBColor(255, 255, 255))
+
+            # Content area
             if embedded_images:
                 # Layout with image on right, text on left
                 text_width = Inches(6.0)
@@ -2987,18 +3144,15 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
                 img_width = Inches(5.8)
                 img_top = Inches(1.3)
 
-                # Text body on the left
+                # Text body on the left - with multi-paragraph support
                 if clean_body:
-                    MAX_CHARS = 1200
+                    MAX_CHARS = 2000
                     if len(clean_body) > MAX_CHARS:
-                        clean_body = clean_body[:MAX_CHARS] + "..."
-                    txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), text_width, Inches(5.5))
+                        clean_body = clean_body[:MAX_CHARS] + "\n...(内容已截断)"
+                    txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), text_width, Inches(5.8))
                     tf2 = txBox2.text_frame
                     tf2.word_wrap = True
-                    p2 = tf2.paragraphs[0]
-                    run2 = p2.add_run()
-                    run2.text = clean_body
-                    _set_font(run2, _pptx_body_font, 13, color_rgb=RGBColor(51, 51, 51))
+                    _add_text_with_formatting(tf2, clean_body, _pptx_body_font, 12)
 
                 # Embed images on the right (up to 2 per slide)
                 for idx, img_path in enumerate(embedded_images[:2]):
@@ -3010,18 +3164,38 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
                     except Exception as img_err:
                         print(f"PPTX 图片嵌入失败: {img_err}")
             else:
-                # Full-width text layout
+                # Full-width text layout with multi-paragraph support
                 if clean_body:
-                    MAX_PPTX_SLIDE_CHARS = 1800
+                    MAX_PPTX_SLIDE_CHARS = 2500
                     if len(clean_body) > MAX_PPTX_SLIDE_CHARS:
-                        clean_body = clean_body[:MAX_PPTX_SLIDE_CHARS] + "..."
-                    txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), Inches(12.333), Inches(5.5))
-                    tf2 = txBox2.text_frame
-                    tf2.word_wrap = True
-                    p2 = tf2.paragraphs[0]
-                    run2 = p2.add_run()
-                    run2.text = clean_body
-                    _set_font(run2, _pptx_body_font, 14, color_rgb=RGBColor(51, 51, 51))
+                        # Split into multiple slides
+                        chunks = [clean_body[i:i+MAX_PPTX_SLIDE_CHARS] for i in range(0, len(clean_body), MAX_PPTX_SLIDE_CHARS)]
+                        for chunk_idx, chunk in enumerate(chunks):
+                            if chunk_idx > 0:
+                                # Additional slide for overflow content
+                                slide = prs.slides.add_slide(prs.slide_layouts[6])
+                                title_bg2 = slide.shapes.add_shape(
+                                    1, Inches(0), Inches(0), prs.slide_width, Inches(1.1)
+                                )
+                                title_bg2.fill.solid()
+                                title_bg2.fill.fore_color.rgb = RGBColor(0, 51, 102)
+                                title_bg2.line.fill.background()
+                                txB = slide.shapes.add_textbox(Inches(0.5), Inches(0.15), Inches(12.333), Inches(0.8))
+                                tfB = txB.text_frame
+                                pB = tfB.paragraphs[0]
+                                rB = pB.add_run()
+                                rB.text = f"{title[:60]}（续）"
+                                _set_font(rB, _pptx_font_name, 24, bold=True, color_rgb=RGBColor(255, 255, 255))
+
+                            txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), Inches(12.333), Inches(5.8))
+                            tf2 = txBox2.text_frame
+                            tf2.word_wrap = True
+                            _add_text_with_formatting(tf2, chunk, _pptx_body_font, 13)
+                    else:
+                        txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(1.3), Inches(12.333), Inches(5.8))
+                        tf2 = txBox2.text_frame
+                        tf2.word_wrap = True
+                        _add_text_with_formatting(tf2, clean_body, _pptx_body_font, 13)
 
         prs.save(str(pptx_path))
 
@@ -3280,6 +3454,50 @@ def _save_pdf_with_reportlab(md_text: str, base_name: str, workspace_dir: str) -
                 story.append(Paragraph(content, style))
                 story.append(Spacer(1, 8))
 
+            elif block_type == "table":
+                # 使用 reportlab Table 渲染
+                try:
+                    from reportlab.platypus import Table, TableStyle
+                    from reportlab.lib import colors as rl_colors
+
+                    table_data = content
+                    headers = table_data.get("headers", [])
+                    rows = table_data.get("rows", [])
+                    font_name = get_chinese_font_name()
+
+                    all_rows = [headers] + rows
+                    max_cols = max(len(r) for r in all_rows) if all_rows else 0
+                    normalized = []
+                    for row in all_rows:
+                        padded = list(row) + [''] * (max_cols - len(row))
+                        normalized.append(padded[:max_cols])
+
+                    if normalized and max_cols > 0:
+                        available_width = A4[0] - 100
+                        col_width = available_width / max_cols
+                        table = Table(normalized, colWidths=[col_width] * max_cols)
+                        table.setStyle(TableStyle([
+                            ('FONTNAME', (0, 0), (-1, -1), font_name),
+                            ('FONTSIZE', (0, 0), (-1, -1), 9),
+                            ('FONTNAME', (0, 0), (-1, 0), font_name),
+                            ('FONTSIZE', (0, 0), (-1, 0), 10),
+                            ('BACKGROUND', (0, 0), (-1, 0), rl_colors.HexColor('#003366')),
+                            ('TEXTCOLOR', (0, 0), (-1, 0), rl_colors.white),
+                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                            ('GRID', (0, 0), (-1, -1), 0.5, rl_colors.grey),
+                            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor('#F0F4F8')]),
+                            ('TOPPADDING', (0, 0), (-1, -1), 4),
+                            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                        ]))
+                        story.append(table)
+                        story.append(Spacer(1, 12))
+                except Exception as table_err:
+                    print(f"表格渲染失败: {table_err}")
+                    style = get_chinese_style("normal")
+                    raw_text = block.get("raw", str(content))
+                    story.append(Paragraph(raw_text.replace('\n', '<br/>'), style))
+
             elif block_type == "list":
                 style = get_chinese_style("list")
                 for item in content:
@@ -3334,9 +3552,15 @@ async def export_report(body: dict = Body(...)):
         os.makedirs(export_dir, exist_ok=True)
 
         md_path = _save_md(md_text, base_name, export_dir)
-        docx_path = _save_docx(md_text, base_name, export_dir)
-        pdf_path = _save_pdf(md_text, base_name, export_dir)
-        pptx_path = _save_pptx(md_text, base_name, export_dir)
+
+        # 根据请求的报告类型生成文件
+        report_types = body.get("report_types", ["pdf"])
+        if not report_types:
+            report_types = ["pdf"]
+
+        docx_path = _save_docx(md_text, base_name, export_dir) if "docx" in report_types else None
+        pdf_path = _save_pdf(md_text, base_name, export_dir) if "pdf" in report_types else None
+        pptx_path = _save_pptx(md_text, base_name, export_dir) if "pptx" in report_types else None
 
         result = {
             "message": "exported",
@@ -3375,6 +3599,34 @@ async def list_users():
         print(f"List users error: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+def _get_dir_size(dir_path: str) -> int:
+    """计算目录的总大小（字节）"""
+    total_size = 0
+    try:
+        for root, dirs, files in os.walk(dir_path):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                try:
+                    total_size += os.path.getsize(fpath)
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    return total_size
+
+
+def _format_file_size(size_bytes: int) -> str:
+    """格式化文件大小为人类可读的格式"""
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}K"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f}M"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f}G"
+
 
 @app.post("/api/projects/save")
 async def save_project(
@@ -3456,7 +3708,12 @@ async def save_project(
 
         conn.commit()
         conn.close()
-        return {"message": "Project saved successfully", "project_id": project_id}
+
+        # Calculate storage size
+        storage_size = _get_dir_size(project_dir) if project_dir else 0
+        storage_display = _format_file_size(storage_size)
+
+        return {"message": "Project saved successfully", "project_id": project_id, "storage_size": storage_display}
     except Exception as e:
         print(f"Save project error: {e}")
         traceback.print_exc()
@@ -3473,7 +3730,14 @@ async def list_projects(username: str = Query(...)):
             (username,)
         )
         rows = cursor.fetchall()
-        projects = [dict(row) for row in rows]
+        projects = []
+        for row in rows:
+            proj = dict(row)
+            # Calculate storage size for each project
+            project_dir = os.path.join(PROJECTS_BASE_DIR, str(proj["id"]))
+            storage_size = _get_dir_size(project_dir)
+            proj["storage_size"] = _format_file_size(storage_size)
+            projects.append(proj)
         conn.close()
         return {"projects": projects}
     except Exception as e:
