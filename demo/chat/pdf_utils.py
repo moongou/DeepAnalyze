@@ -18,8 +18,9 @@ from typing import Optional, List, Dict, Any
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Image, Table, TableStyle
 from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
 
 # 配置日志
 logging.basicConfig(
@@ -263,7 +264,7 @@ def get_chinese_style(style_type: str = "normal") -> ParagraphStyle:
 
 def extract_markdown_sections(md_text: str) -> List[Dict[str, Any]]:
     """
-    从 Markdown 文本中提取标题和段落块
+    从 Markdown 文本中提取标题、段落块和表格
 
     Args:
         md_text: Markdown 格式的文本
@@ -299,6 +300,50 @@ def extract_markdown_sections(md_text: str) -> List[Dict[str, Any]]:
                 "raw": line
             })
             i += 1
+            continue
+
+        # 表格检测 (Markdown 表格: | col1 | col2 | ...)
+        if '|' in stripped and stripped.startswith('|'):
+            table_lines = []
+            while i < len(lines):
+                tline = lines[i].strip()
+                if tline.startswith('|') and '|' in tline[1:]:
+                    table_lines.append(tline)
+                    i += 1
+                elif not tline:
+                    i += 1
+                    break
+                else:
+                    break
+
+            if len(table_lines) >= 2:
+                # Parse table
+                header_cells = [c.strip() for c in table_lines[0].split('|') if c.strip()]
+                data_rows = []
+                for tl in table_lines[1:]:
+                    # Skip separator line (|---|---|)
+                    if re.match(r'^[\|\s\-:]+$', tl):
+                        continue
+                    row_cells = [c.strip() for c in tl.split('|') if c.strip()]
+                    if row_cells:
+                        data_rows.append(row_cells)
+
+                if header_cells and data_rows:
+                    blocks.append({
+                        "type": "table",
+                        "content": {
+                            "headers": header_cells,
+                            "rows": data_rows
+                        },
+                        "raw": '\n'.join(table_lines)
+                    })
+                else:
+                    # Fallback: treat as paragraph
+                    blocks.append({
+                        "type": "paragraph",
+                        "content": '\n'.join(table_lines),
+                        "raw": '\n'.join(table_lines)
+                    })
             continue
 
         # 一级标题
@@ -359,6 +404,9 @@ def extract_markdown_sections(md_text: str) -> List[Dict[str, Any]]:
             line = lines[i]
             stripped = line.strip()
             if not stripped or stripped.startswith(('# ', '## ', '### ', '- ', '* ', '1. ')):
+                break
+            # Also break on table start
+            if stripped.startswith('|') and '|' in stripped[1:]:
                 break
             paragraph_lines.append(line)
             i += 1
@@ -509,6 +557,57 @@ def generate_pdf(
                 style = get_chinese_style("normal")
                 story.append(Paragraph(content, style))
                 story.append(Spacer(1, 8))
+
+            elif block_type == "table":
+                # 使用 reportlab Table 渲染 Markdown 表格
+                try:
+                    table_data = content
+                    headers = table_data.get("headers", [])
+                    rows = table_data.get("rows", [])
+
+                    font_name = get_chinese_font_name()
+
+                    # Build table data (header + rows)
+                    all_rows = [headers] + rows
+
+                    # Normalize row lengths
+                    max_cols = max(len(r) for r in all_rows) if all_rows else 0
+                    normalized = []
+                    for row in all_rows:
+                        padded = list(row) + [''] * (max_cols - len(row))
+                        normalized.append(padded[:max_cols])
+
+                    if normalized and max_cols > 0:
+                        # Calculate column widths (proportional to page width)
+                        available_width = A4[0] - 100  # page width minus margins
+                        col_width = available_width / max_cols
+
+                        table = Table(normalized, colWidths=[col_width] * max_cols)
+                        table.setStyle(TableStyle([
+                            ('FONTNAME', (0, 0), (-1, -1), font_name),
+                            ('FONTSIZE', (0, 0), (-1, -1), 9),
+                            ('FONTNAME', (0, 0), (-1, 0), font_name),
+                            ('FONTSIZE', (0, 0), (-1, 0), 10),
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#003366')),
+                            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F0F4F8')]),
+                            ('TOPPADDING', (0, 0), (-1, -1), 4),
+                            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                        ]))
+                        story.append(table)
+                        story.append(Spacer(1, 12))
+                except Exception as table_err:
+                    logger.error(f"表格渲染失败: {table_err}")
+                    # Fallback: render as text
+                    style = get_chinese_style("normal")
+                    raw_text = block.get("raw", str(content))
+                    story.append(Paragraph(raw_text.replace('\n', '<br/>'), style))
+                    story.append(Spacer(1, 8))
 
             elif block_type == "list":
                 style = get_chinese_style("list")
