@@ -2885,13 +2885,16 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
         # Collect image references from workspace/generated
         generated_dir = ws_path / "generated"
-        available_images = {}
+        available_images_by_name = {}
+        available_images_by_stem = {}
         for img_dir in [generated_dir, ws_path]:
             if img_dir.exists():
                 for f in img_dir.iterdir():
                     if f.suffix.lower() in ('.png', '.jpg', '.jpeg', '.svg', '.gif'):
-                        available_images[f.name] = str(f)
-                        available_images[f.stem] = str(f)
+                        available_images_by_name[f.name] = str(f)
+                        # Only use stem if not already taken by a filename
+                        if f.stem not in available_images_by_name:
+                            available_images_by_stem[f.stem] = str(f)
 
         # Title slide
         slide_layout = prs.slide_layouts[6]  # Blank layout
@@ -2940,7 +2943,6 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
             _set_font(run, _pptx_font_name, 28, bold=True, color_rgb=RGBColor(0, 51, 102))
 
             # Add bottom border line for title
-            from pptx.util import Emu as _Emu
             line_shape = slide.shapes.add_connector(
                 1, Inches(0.5), Inches(1.15), Inches(12.333), Inches(1.15)
             )
@@ -2952,12 +2954,12 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
             for ref in img_refs:
                 img_name = os.path.basename(ref)
                 img_stem = Path(img_name).stem
-                # Try to find image in workspace
+                # Try to find image in workspace (prefer exact filename match)
                 img_path = None
-                if img_name in available_images:
-                    img_path = available_images[img_name]
-                elif img_stem in available_images:
-                    img_path = available_images[img_stem]
+                if img_name in available_images_by_name:
+                    img_path = available_images_by_name[img_name]
+                elif img_stem in available_images_by_stem:
+                    img_path = available_images_by_stem[img_stem]
                 else:
                     # Try direct path
                     candidate = ws_path / ref

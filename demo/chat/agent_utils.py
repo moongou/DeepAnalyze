@@ -184,10 +184,17 @@ def generate_report_pptx(md_text, output_path, title="Analysis Report"):
             # Extract and find image references
             img_refs = _re.findall(r'!\[.*?\]\((.*?)\)', body)
             embedded_imgs = []
-            output_dir = Path(output_path).parent if output_path else Path('.')
+            output_dir = Path(output_path).parent if output_path else None
             for ref in img_refs:
                 img_name = os.path.basename(ref)
-                for candidate in [output_dir / img_name, output_dir / "generated" / img_name, Path(ref)]:
+                candidates = [Path(ref)]
+                if output_dir:
+                    candidates = [
+                        output_dir / img_name,
+                        output_dir / "generated" / img_name,
+                        Path(ref),
+                    ]
+                for candidate in candidates:
                     if candidate.exists():
                         embedded_imgs.append(str(candidate))
                         break
