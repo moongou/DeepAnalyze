@@ -1767,7 +1767,7 @@ def fix_tags_and_codeblock(s: str) -> str:
     修复未闭合的tags，并确保</Code>后代码块闭合。
     """
     pattern = re.compile(
-        r"<(Analyze|Understand|Code|Execute|Answer)>(.*?)(?:</\1>|(?=$))", re.DOTALL
+        r"<(Analyze|Understand|Code|Execute|Answer|TaskTree)>(.*?)(?:</\1>|(?=$))", re.DOTALL
     )
 
     # 找所有匹配
@@ -2446,7 +2446,7 @@ def bot_stream(messages, workspace, session_id="default", username="default", st
 
     # Analysis mode prompt injection
     mode_prompts = {
-        "interactive": "\n\n**当前分析模式：交互式分析**\n请将分析目标分解为任务树，并以如下格式展示给用户：\n```\n任务树：\n├─ 1. [任务名称]\n│  ├─ 1.1 [子任务名称]\n│  └─ 1.2 [子任务名称]\n├─ 2. [任务名称]\n│  ├─ 2.1 [子任务名称]\n│  └─ 2.2 [子任务名称]\n└─ 3. [任务名称]\n```\n展示任务树后，等待用户选择要执行的任务编号。仅分析用户选定的任务。",
+        "interactive": "\n\n**当前分析模式：交互式分析**\n请将分析目标分解为任务树，并使用 <TaskTree> 标签以 JSON 格式输出，格式如下：\n<TaskTree>\n{\"tasks\":[{\"id\":\"1\",\"name\":\"任务名称\",\"description\":\"任务描述\",\"children\":[{\"id\":\"1.1\",\"name\":\"子任务名称\",\"description\":\"子任务描述\"},{\"id\":\"1.2\",\"name\":\"子任务名称\",\"description\":\"子任务描述\"}]},{\"id\":\"2\",\"name\":\"任务名称\",\"description\":\"任务描述\",\"children\":[{\"id\":\"2.1\",\"name\":\"子任务名称\",\"description\":\"子任务描述\"}]}]}\n</TaskTree>\n输出任务树后，立即停止输出，等待用户选择要执行的任务。用户将以如下格式回复：\"用户选择了以下分析任务：[1] xxx, [1.1] xxx\"。仅分析用户选定的任务，未选中的任务跳过。",
         "full_agent": "\n\n**当前分析模式：全程代理分析**\n请自主执行全部分析任务，不需要等待用户中间确认。按照任务依赖关系有序执行，确保覆盖所有必要的分析维度。\n\n**高效完成原则（极重要）**：\n- 分析任务应在完成所有必要维度后及时终结，不要无限制地扩展分析。\n- 完成数据探测、核心分析、风险识别后，立即进入报告生成阶段。\n- 生成报告时，必须将前面所有分析步骤中产生的具体数据、结论、图表路径全部整合到报告中，不得遗漏或使用占位符。\n- 报告中每个章节都必须包含实质性的分析内容（具体数值、比例、排名、趋势描述等），而非仅写章节标题。"
     }
     selected_mode_prompt = mode_prompts.get(analysis_mode, mode_prompts["full_agent"])
@@ -2738,7 +2738,7 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
         return ""
     import re as _re
 
-    tag_pattern = r"<(Analyze|Understand|Code|Execute|File|Answer)>([\s\S]*?)</\1>"
+    tag_pattern = r"<(Analyze|Understand|Code|Execute|File|Answer|TaskTree)>([\s\S]*?)</\1>"
 
     # 收集所有助手消息内容
     all_content = ""
@@ -2812,7 +2812,7 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
             if role == "assistant":
                 content = str((m or {}).get("content") or "")
                 # 移除标签
-                clean = _re.sub(r'</?(?:Analyze|Understand|Code|Execute|File|Answer)>', '', content).strip()
+                clean = _re.sub(r'</?(?:Analyze|Understand|Code|Execute|File|Answer|TaskTree)>', '', content).strip()
                 if clean and len(clean) > 100:
                     final_text += clean + "\n\n"
 

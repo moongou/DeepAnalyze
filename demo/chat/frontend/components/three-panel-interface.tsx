@@ -66,10 +66,12 @@ import {
   Cpu,
   Zap,
   Monitor,
+  ListTree,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tree, NodeApi } from "react-arborist";
 import { useToast } from "@/hooks/use-toast";
 import { FileIcon, defaultStyles } from "react-file-icon";
@@ -108,6 +110,13 @@ interface FileAttachment {
   size: number;
   type: string;
   url: string;
+}
+
+interface TaskTreeNode {
+  id: string;
+  name: string;
+  description: string;
+  children?: TaskTreeNode[];
 }
 
 interface WorkspaceFile {
@@ -323,7 +332,8 @@ type StructuredSectionType =
   | "Code"
   | "Execute"
   | "Answer"
-  | "File";
+  | "File"
+  | "TaskTree";
 
 const StreamingMarkdownBlock = memo(
   function StreamingMarkdownBlock({
@@ -358,6 +368,13 @@ const StreamingSectionBody = memo(
   }) {
     if (!content.trim()) return null;
     if (!isComplete) {
+      if (type === "TaskTree") {
+        return (
+          <div className="p-3 text-sm text-amber-600 dark:text-amber-400 animate-pulse">
+            正在生成分析任务树...
+          </div>
+        );
+      }
       if (type === "Code" || type === "Execute") {
         return (
           <pre className="m-0 text-xs overflow-x-auto whitespace-pre-wrap font-mono">
@@ -377,6 +394,57 @@ const StreamingSectionBody = memo(
     prev.isComplete === next.isComplete &&
     prev.renderSectionContent === next.renderSectionContent
 );
+
+// TaskTree 任务节点组件
+const TaskTreeItem = memo(function TaskTreeItem({
+  node,
+  selectedTasks,
+  toggleTask,
+  depth,
+}: {
+  node: TaskTreeNode;
+  selectedTasks: Set<string>;
+  toggleTask: (id: string, node: TaskTreeNode) => void;
+  depth: number;
+}) {
+  const isChecked = selectedTasks.has(node.id);
+  const hasChildren = node.children && node.children.length > 0;
+  const allChildrenChecked = hasChildren && node.children!.every(c => selectedTasks.has(c.id));
+
+  return (
+    <div style={{ paddingLeft: depth * 20 }}>
+      <div className="flex items-center gap-2 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2">
+        <Checkbox
+          checked={hasChildren ? allChildrenChecked : isChecked}
+          onCheckedChange={() => toggleTask(node.id, node)}
+          className="data-[state=checked]:bg-amber-600 data-[state=checked]:border-amber-600"
+        />
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium text-gray-800 dark:text-gray-200">
+            <span className="text-amber-600 dark:text-amber-400 mr-1 font-mono">[{node.id}]</span>
+            {node.name}
+          </div>
+          {node.description && (
+            <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">{node.description}</div>
+          )}
+        </div>
+      </div>
+      {hasChildren && (
+        <div>
+          {node.children!.map(child => (
+            <TaskTreeItem
+              key={child.id}
+              node={child}
+              selectedTasks={selectedTasks}
+              toggleTask={toggleTask}
+              depth={depth + 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
 
 // 智能体行为原则配置
 const ANALYSIS_PRINCIPLES = [
@@ -521,6 +589,10 @@ export function ThreePanelInterface() {
   const [projectName, setProjectName] = useState("");
   const [showProjectManager, setShowProjectManager] = useState(false);
   const [userProjects, setUserProjects] = useState<any[]>([]);
+  // TaskTree 交互式任务选择对话框状态
+  const [showTaskTreeDialog, setShowTaskTreeDialog] = useState(false);
+  const [taskTreeData, setTaskTreeData] = useState<TaskTreeNode[] | null>(null);
+  const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
   // 保存确认弹窗状态（同名项目覆盖确认）
   const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
   const [pendingSaveData, setPendingSaveData] = useState<any>(null);
@@ -529,6 +601,18 @@ export function ThreePanelInterface() {
   // 报告类型选择状态
   const [reportTypes, setReportTypes] = useState<string[]>(["pdf"]);
   const [showReportTypePicker, setShowReportTypePicker] = useState(false);
+  // 点击外部关闭报告类型选择器
+  useEffect(() => {
+    if (!showReportTypePicker) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-report-type-picker]')) {
+        setShowReportTypePicker(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showReportTypePicker]);
   // 雨途斩棘录面板状态
   const [showYutuPanel, setShowYutuPanel] = useState(false);
   const [yutuHtmlContent, setYutuHtmlContent] = useState<string>("");
@@ -610,6 +694,7 @@ export function ThreePanelInterface() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const singleClickTimerRef = useRef<number | null>(null);
+  const savingProjectRef = useRef(false);
   const [contextPos, setContextPos] = useState<{ x: number; y: number } | null>(
     null
   );
@@ -1663,21 +1748,25 @@ ${analysisContent}
       setShowAuthModal(true);
       return;
     }
-    if (!projectName) {
+    if (savingProjectRef.current) return; // 防止重复触发
+    if (!projectName.trim()) {
       toast({ description: "请输入项目名称", variant: "destructive" });
       return;
     }
+    const saveName = projectName.trim();
+    savingProjectRef.current = true;
 
     // 如果未确认且不是新建项目，先检查是否存在同名项目
     if (!confirmed) {
       try {
         const checkRes = await fetch(
-          `${API_URLS.PROJECTS_CHECK_NAME}?username=${encodeURIComponent(currentUser!)}&name=${encodeURIComponent(projectName)}`
+          `${API_URLS.PROJECTS_CHECK_NAME}?username=${encodeURIComponent(currentUser!)}&name=${encodeURIComponent(saveName)}`
         );
         if (checkRes.ok) {
           const checkData = await checkRes.json();
           if (checkData.exists) {
             // 存在同名项目，弹出确认覆盖对话框
+            savingProjectRef.current = false;
             setPendingSaveData({ confirmed: true });
             setSaveConfirmOpen(true);
             return;
@@ -1692,7 +1781,7 @@ ${analysisContent}
       const formData = new FormData();
       formData.append("username", currentUser!);
       formData.append("session_id", sessionId);
-      formData.append("name", projectName);
+      formData.append("name", saveName);
       formData.append("messages", JSON.stringify(messages));
       formData.append("side_tasks", JSON.stringify(sideGuidanceHistory));
       const res = await fetch(API_URLS.PROJECTS_SAVE, {
@@ -1705,9 +1794,14 @@ ${analysisContent}
       const storageSize = resData?.storage_size || "";
       toast({ description: `项目已保存${storageSize ? ` (${storageSize})` : ""}` });
       setShowSaveDialog(false);
-      setProjectName("");
       setPendingSaveData(null);
+      // 延迟清空项目名称，避免 Dialog 关闭动画期间触发空名验证
+      setTimeout(() => {
+        setProjectName("");
+        savingProjectRef.current = false;
+      }, 300);
     } catch (e) {
+      savingProjectRef.current = false;
       toast({ description: "保存失败", variant: "destructive" });
     }
   };
@@ -3278,7 +3372,8 @@ ${analysisContent}
       Code: { icon: "💻", color: "bg-gray-500" },
       Execute: { icon: "⚡", color: "bg-orange-500" },
       Answer: { icon: "✅", color: "bg-green-500" },
-      File: { icon: "📎", color: "bg-purple-500" }, // 添加 File 类型
+      File: { icon: "📎", color: "bg-purple-500" },
+      TaskTree: { icon: "🌲", color: "bg-amber-500" },
     };
 
     const allMatches: Array<{
@@ -3454,6 +3549,7 @@ ${analysisContent}
         "Execute",
         "Answer",
         "File",
+        "TaskTree",
       ] as const;
       const sectionConfigs: Record<
         (typeof sectionTypes)[number],
@@ -3489,6 +3585,11 @@ ${analysisContent}
           color:
             "bg-purple-50 border-purple-200 dark:bg-purple-950/30 dark:border-purple-800",
         },
+        TaskTree: {
+          icon: "🌲",
+          color:
+            "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
+        },
       };
 
       // 没有结构化标签时，保持最轻量文本渲染（避免每个 chunk 都触发 Markdown/高亮重解析）
@@ -3501,7 +3602,7 @@ ${analysisContent}
       }
 
       const parts: React.ReactNode[] = [];
-      const openRe = /<(Analyze|Understand|Code|Execute|Answer|File)>/g;
+      const openRe = /<(Analyze|Understand|Code|Execute|Answer|File|TaskTree)>/g;
       let cursor = 0;
       let sectionIndex = 0;
       let m: RegExpExecArray | null;
@@ -3659,6 +3760,11 @@ ${analysisContent}
         icon: "📎",
         color:
           "bg-purple-50 border-purple-200 dark:bg-purple-950/30 dark:border-purple-800",
+      },
+      TaskTree: {
+        icon: "🌲",
+        color:
+          "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
       },
     };
 
@@ -3910,13 +4016,60 @@ ${analysisContent}
                   </Button>
                 </>
               )}
+              {match.type === "TaskTree" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    try {
+                      const parsed = JSON.parse(match.content.trim());
+                      if (parsed.tasks) {
+                        setTaskTreeData(parsed.tasks);
+                        setSelectedTasks(new Set());
+                        setShowTaskTreeDialog(true);
+                      }
+                    } catch (e) {
+                      toast({ description: "任务树数据解析失败", variant: "destructive" });
+                    }
+                  }}
+                  className="h-5 px-2 text-xs text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+                  title="选择分析任务"
+                >
+                  <ListTree className="h-3 w-3 mr-1" />
+                  选择任务
+                </Button>
+              )}
             </div>
           </div>
           {!isCollapsed && (
             <div
               className={`p-3 ${match.type === "Answer" ? "answer-body" : ""}`}
             >
-              {renderSectionContent(sectionBody)}
+              {match.type === "TaskTree" ? (() => {
+                try {
+                  const parsed = JSON.parse(match.content.trim());
+                  const tasks = parsed.tasks || [];
+                  const countAll = (nodes: TaskTreeNode[]): number => nodes.reduce((s, n) => s + 1 + (n.children ? countAll(n.children) : 0), 0);
+                  return (
+                    <div className="text-sm text-amber-700 dark:text-amber-300">
+                      <div className="mb-2 font-medium">已生成 {tasks.length} 个主任务，共 {countAll(tasks)} 个分析步骤</div>
+                      <div className="space-y-1">
+                        {tasks.map(t => (
+                          <div key={t.id} className="flex items-start gap-2">
+                            <span className="text-amber-500 font-mono shrink-0">[{t.id}]</span>
+                            <span>{t.name}</span>
+                            {t.description && <span className="text-gray-400 text-xs ml-1">— {t.description}</span>}
+                            {t.children && <span className="text-xs text-gray-400">(+{t.children.length} 子任务)</span>}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-3 text-xs text-gray-500">点击上方「选择任务」按钮来选择要执行的分析步骤</div>
+                    </div>
+                  );
+                } catch {
+                  return <div className="text-sm text-gray-500">任务树数据格式异常</div>;
+                }
+              })() : renderSectionContent(sectionBody)}
               {fileGallery}
             </div>
           )}
@@ -3952,6 +4105,7 @@ ${analysisContent}
         "Execute",
         "File",
         "Answer",
+        "TaskTree",
       ] as const;
       const matches: Array<{ type: string; index: number; pos: number }> = [];
       sectionTypes.forEach((t) => {
@@ -4013,14 +4167,42 @@ ${analysisContent}
     }
   };
 
-  const handleSendMessage = async () => {
-    if (!inputValue.trim() && attachments.length === 0) return;
+  // === TaskTree 交互式任务选择相关函数 ===
+  const toggleTask = useCallback((id: string, node: TaskTreeNode) => {
+    setSelectedTasks(prev => {
+      const next = new Set(prev);
+      if (prev.has(id)) {
+        next.delete(id);
+        const removeDescendants = (n: TaskTreeNode) => { next.delete(n.id); n.children?.forEach(removeDescendants); };
+        node.children?.forEach(removeDescendants);
+      } else {
+        next.add(id);
+        const addDescendants = (n: TaskTreeNode) => { next.add(n.id); n.children?.forEach(addDescendants); };
+        node.children?.forEach(addDescendants);
+      }
+      return next;
+    });
+  }, []);
+
+  const selectAllTasks = useCallback(() => {
+    if (!taskTreeData) return;
+    const all = new Set<string>();
+    const collect = (nodes: TaskTreeNode[]) => nodes.forEach(n => { all.add(n.id); if (n.children) collect(n.children); });
+    collect(taskTreeData);
+    setSelectedTasks(all);
+  }, [taskTreeData]);
+
+  const deselectAllTasks = useCallback(() => setSelectedTasks(new Set()), []);
+
+  const handleSendMessage = async (overrideMessage?: string) => {
+    const messageText = overrideMessage ?? inputValue;
+    if (!messageText.trim() && attachments.length === 0) return;
     setIsAnalyzing(true);
     const baseMessageIndex = messages.length;
     const aiMessageIndex = baseMessageIndex + 1;
 
     // 检测用户消息中是否指定了报告类型
-    const userInput = inputValue.toLowerCase();
+    const userInput = messageText.toLowerCase();
     const detectedTypes: string[] = [];
     if (userInput.includes("pdf")) detectedTypes.push("pdf");
     if (userInput.includes("docx") || userInput.includes("word")) detectedTypes.push("docx");
@@ -4031,18 +4213,18 @@ ${analysisContent}
 
     const newMessage: Message = {
       id: Date.now().toString(),
-      content: inputValue,
+      content: messageText,
       sender: "user",
       timestamp: new Date(),
       attachments: attachments.length > 0 ? [...attachments] : undefined,
     };
 
-    if (inputValue.trim()) {
-      setHistoryInputs((prev) => [...prev, inputValue.trim()]);
+    if (messageText.trim()) {
+      setHistoryInputs((prev) => [...prev, messageText.trim()]);
     }
 
     setMessages((prev) => [...prev, newMessage]);
-    setInputValue("");
+    if (!overrideMessage) setInputValue("");
     setAttachments([]);
     setIsTyping(true);
 
@@ -4247,6 +4429,23 @@ ${analysisContent}
       flushAiMessage(accumulatedMessage);
       autoCollapseForContent(accumulatedMessage, aiMessageIndex);
 
+      // 检测 <TaskTree> 并自动弹出交互式任务选择对话框
+      if (accumulatedMessage.includes("<TaskTree>")) {
+        const taskTreeMatch = accumulatedMessage.match(/<TaskTree>([\s\S]*?)<\/TaskTree>/);
+        if (taskTreeMatch) {
+          try {
+            const parsed = JSON.parse(taskTreeMatch[1].trim());
+            if (parsed.tasks && Array.isArray(parsed.tasks)) {
+              setTaskTreeData(parsed.tasks);
+              setSelectedTasks(new Set());
+              setTimeout(() => setShowTaskTreeDialog(true), 300);
+            }
+          } catch (e) {
+            console.warn("[TaskTree] JSON 解析失败:", e);
+          }
+        }
+      }
+
       // 结束后刷新一次文件列表确保无遗漏
       await loadWorkspaceFiles();
       await loadWorkspaceTree();
@@ -4261,6 +4460,18 @@ ${analysisContent}
       setStreamingMessageId(null);
     }
   };
+
+  const handleConfirmTaskSelection = useCallback(() => {
+    if (!taskTreeData || selectedTasks.size === 0) return;
+    const items: string[] = [];
+    const collect = (nodes: TaskTreeNode[]) => nodes.forEach(n => { if (selectedTasks.has(n.id)) items.push(`[${n.id}] ${n.name}`); if (n.children) collect(n.children); });
+    collect(taskTreeData);
+    const msg = `用户选择了以下分析任务：${items.join("，")}`;
+    setShowTaskTreeDialog(false);
+    setSelectedTasks(new Set());
+    setTaskTreeData(null);
+    handleSendMessage(msg);
+  }, [taskTreeData, selectedTasks]);
 
   const handleFileUpload = async (
     event: React.ChangeEvent<HTMLInputElement>
@@ -4611,7 +4822,7 @@ ${analysisContent}
                       项目中心
                     </Button>
                     {/* 报告类型选择 */}
-                    <div className="relative" onMouseLeave={() => setShowReportTypePicker(false)}>
+                    <div className="relative" data-report-type-picker>
                       <Button
                         variant="outline"
                         size="sm"
@@ -5288,7 +5499,7 @@ ${analysisContent}
                           </Button>
                         ) : (
                           <Button
-                            onClick={handleSendMessage}
+                            onClick={() => handleSendMessage()}
                             size="sm"
                             disabled={!inputValue.trim()}
                             className="h-9 px-4 bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
@@ -5534,6 +5745,58 @@ ${analysisContent}
         </DialogContent>
       </Dialog>
 
+
+      {/* 交互式任务选择对话框 */}
+      <Dialog open={showTaskTreeDialog} onOpenChange={setShowTaskTreeDialog}>
+        <DialogContent className="sm:max-w-[600px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ListTree className="h-5 w-5 text-amber-600" />
+              选择分析任务
+            </DialogTitle>
+            <DialogDescription>
+              请选择您希望智能体执行的分析任务，确认后智能体将仅分析选定的任务
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex items-center gap-2 py-2 border-b border-gray-100 dark:border-gray-800">
+            <Button variant="outline" size="sm" onClick={selectAllTasks} className="text-xs h-7">
+              全选
+            </Button>
+            <Button variant="outline" size="sm" onClick={deselectAllTasks} className="text-xs h-7">
+              取消全选
+            </Button>
+            <span className="ml-auto text-xs text-gray-500 dark:text-gray-400">
+              已选 {selectedTasks.size} 项
+            </span>
+          </div>
+
+          <div className="py-2 overflow-y-auto max-h-[50vh]">
+            {taskTreeData?.map(node => (
+              <TaskTreeItem
+                key={node.id}
+                node={node}
+                selectedTasks={selectedTasks}
+                toggleTask={toggleTask}
+                depth={0}
+              />
+            ))}
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setShowTaskTreeDialog(false)}>
+              取消
+            </Button>
+            <Button
+              onClick={handleConfirmTaskSelection}
+              disabled={selectedTasks.size === 0}
+              className="bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50"
+            >
+              确认选择
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 保存项目弹窗 */}
       <Dialog open={showSaveDialog} onOpenChange={setShowSaveDialog}>
