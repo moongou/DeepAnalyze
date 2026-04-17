@@ -6313,7 +6313,7 @@ ${analysisContent}
 
       {/* 系统设置弹窗 */}
       <Dialog open={showSettingsDialog} onOpenChange={setShowSettingsDialog}>
-        <DialogContent className="sm:max-w-[550px] max-h-[85vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-[550px] max-h-[75vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Settings className="h-5 w-5" />
@@ -7206,7 +7206,7 @@ ${analysisContent}
 
       {/* 数据库连接对话框 */}
       <Dialog open={showDatabaseDialog} onOpenChange={setShowDatabaseDialog}>
-        <DialogContent className="max-w-[95vw] w-[1400px] h-[85vh] p-0 overflow-hidden flex flex-col">
+        <DialogContent className="max-w-[95vw] w-[1400px] h-[75vh] p-0 overflow-hidden flex flex-col">
           <DialogHeader className="px-6 py-4 border-b">
             <DialogTitle className="flex items-center gap-2">
               <Database className="h-5 w-5 text-blue-600" />

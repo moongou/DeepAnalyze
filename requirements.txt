@@ -1,30 +1,81 @@
-# vllm>=0.8.5
+# ==============================================================================
+# DeepAnalyze - Core Dependencies
+# ==============================================================================
+# Install: pip install -r requirements.txt
+# For pinned versions (reproducible builds): pip install -r requirements_python.txt
+# ==============================================================================
+
+# --- Model Inference ---
+# vllm>=0.8.5           # GPU (CUDA) backend - uncomment for GPU mode
+mlx>=0.22.0              # Apple Silicon backend
+mlx-lm>=0.10.0           # MLX language model serving
+transformers>=4.40.0
+safetensors
+sentencepiece
+huggingface_hub
+
+# --- Data Science & ML ---
 numpy
 pandas
 openpyxl
 scikit-learn
 seaborn
-torch
-transformers
 matplotlib
 plotly
 statsmodels
+scipy
+xgboost
+lightgbm
+catboost
 
-# Web UI
+# --- Web UI & API ---
 requests
 websockets
 python-multipart
 uvicorn
 fastapi
 openai
-pypandoc
-reportlab
+httpx
 
-# Report Generation
+# --- Report Generation ---
 python-pptx
 python-docx
 fpdf2
+reportlab
+pypandoc
+lxml
 
-# Graph Analysis
+# --- PDF Processing ---
+pdfplumber
+pdfminer.six
+pypdfium2
+
+# --- Database Connectivity ---
+sqlalchemy
+pymysql
+psycopg2-binary
+pymssql
+
+# --- Graph Analysis ---
 networkx
 neo4j
+
+# --- NLP & Text ---
+jieba
+snownlp
+beautifulsoup4
+
+# --- File & Encoding ---
+chardet
+python-dotenv
+
+# --- R Integration ---
+rpy2
+
+# --- Visualization ---
+graphviz
+xlsxwriter
+
+# --- Office & Font Support ---
+pillow
+fonttools

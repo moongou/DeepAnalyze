@@ -1,18 +1,18 @@
-# Docker Compose configuration for DeepAnalyze vLLM service
+# Docker Compose configuration for DeepAnalyze
 # Usage: docker-compose up -d
+# All-in-one: Backend API + Frontend + Model Server
 
 version: '3.8'
 
 services:
-  vllm:
-    # Use pre-built image from Docker Hub or locally built image
-    image: deepanalyze-env:latest
-    # Or pull from Docker Hub:
-    # image: yourusername/deepanalyze-env:latest
-    
-    container_name: deepanalyze-vllm
-    
-    # GPU support
+  deepanalyze:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: deepanalyze:latest
+    container_name: deepanalyze
+
+    # GPU support (comment out for CPU-only)
     deploy:
       resources:
         reservations:
@@ -20,29 +20,50 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    
-    # Port mapping
+
+    # Port mapping: Model API, Backend API, File Server, Frontend
     ports:
       - "8000:8000"
-    
+      - "8200:8200"
+      - "8100:8100"
+      - "4000:4000"
+
     # Volume mounts
     volumes:
-      - ./workspace:/workspace
-      - ./models:/models
-    
-    # Environment variables (optional)
+      # Model weights (mount from host to avoid re-downloading)
+      - ../DeepAnalyze-8B:/app/DeepAnalyze-8B:ro
+      # Persistent workspace data
+      - deepanalyze-workspace:/app/demo/chat/workspace
+      # Persistent project data
+      - deepanalyze-projects:/app/demo/chat/projects
+      # Persistent database
+      - deepanalyze-db:/app/demo/chat/
+      # Logs
+      - deepanalyze-logs:/app/logs
+      # Chinese fonts (assets)
+      - ../assets/fonts:/app/assets/fonts:ro
+
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      # - VLLM_USE_MODELSCOPE=False
-    
+      - MPLBACKEND=Agg
+      - PYTHONUNBUFFERED=1
+
     # Startup command
-    # Uncomment and modify to start vLLM server automatically
-    # command: python3 -m vllm.entrypoints.openai.api_server --model /models/your-model-name --host 0.0.0.0 --port 8000
-    
-    # Default: interactive bash shell
-    command: /bin/bash
-    stdin_open: true
-    tty: true
-    
+    command: /bin/bash /app/start_all.sh
+
     # Restart policy
     restart: unless-stopped
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/api/settings/hardware"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  deepanalyze-workspace:
+  deepanalyze-projects:
+  deepanalyze-db:
+  deepanalyze-logs:
