@@ -12,7 +12,6 @@ import { configureMonaco } from "@/lib/monaco-config";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Card } from "@/components/ui/card";
 import { Slider } from "@/components/ui/slider";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
@@ -66,10 +65,12 @@ import {
   Cpu,
   Zap,
   Monitor,
+  ListTree,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tree, NodeApi } from "react-arborist";
 import { useToast } from "@/hooks/use-toast";
 import { FileIcon, defaultStyles } from "react-file-icon";
@@ -110,6 +111,13 @@ interface FileAttachment {
   url: string;
 }
 
+interface TaskTreeNode {
+  id: string;
+  name: string;
+  description: string;
+  children?: TaskTreeNode[];
+}
+
 interface WorkspaceFile {
   name: string;
   size: number;
@@ -138,90 +146,6 @@ interface AnalysisSection {
   icon: string;
   color: string;
 }
-
-interface InteractiveAnalysisTask {
-  id: string;
-  title: string;
-  level: number;
-  children: InteractiveAnalysisTask[];
-}
-
-const INTERACTIVE_TASK_LINE_REGEX = /^\s*[├└│─\-\s]*((?:\d+\.)*\d+)\.?\s+(.+?)\s*$/;
-
-const cleanInteractiveTaskTitle = (value: string) =>
-  value
-    .replace(/^\[(.*)\]$/, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
-
-const parseInteractiveTaskTree = (content: string): InteractiveAnalysisTask[] => {
-  const tasks: InteractiveAnalysisTask[] = [];
-  const stack: InteractiveAnalysisTask[] = [];
-  const normalizedContent = content.replace(/```[\w-]*\n?/g, "").replace(/```/g, "");
-
-  normalizedContent.split("\n").forEach((rawLine) => {
-    const line = rawLine.trim();
-    if (!line || /^任务树[:：]?$/.test(line)) return;
-    const match =
-      rawLine.match(INTERACTIVE_TASK_LINE_REGEX) ||
-      line.match(/^((?:\d+\.)*\d+)\.?\s+(.+?)\s*$/);
-    if (!match) return;
-
-    const id = match[1].replace(/\.$/, "");
-    const title = cleanInteractiveTaskTitle(match[2]);
-    if (!id || !title) return;
-
-    const level = id.split(".").length;
-    const task: InteractiveAnalysisTask = {
-      id,
-      title,
-      level,
-      children: [],
-    };
-
-    while (stack.length > 0 && stack[stack.length - 1].level >= level) {
-      stack.pop();
-    }
-
-    if (stack.length > 0) {
-      stack[stack.length - 1].children.push(task);
-    } else {
-      tasks.push(task);
-    }
-
-    stack.push(task);
-  });
-
-  return tasks;
-};
-
-const flattenInteractiveTaskIds = (tasks: InteractiveAnalysisTask[]): string[] =>
-  tasks.flatMap((task) => [task.id, ...flattenInteractiveTaskIds(task.children)]);
-
-const findInteractiveTaskById = (
-  tasks: InteractiveAnalysisTask[],
-  targetId: string
-): InteractiveAnalysisTask | null => {
-  for (const task of tasks) {
-    if (task.id === targetId) return task;
-    const nested = findInteractiveTaskById(task.children, targetId);
-    if (nested) return nested;
-  }
-  return null;
-};
-
-const collectInteractiveTaskBranchIds = (
-  task: InteractiveAnalysisTask
-): string[] => [task.id, ...task.children.flatMap((child) => collectInteractiveTaskBranchIds(child))];
-
-const collectSelectedInteractiveTasks = (
-  tasks: InteractiveAnalysisTask[],
-  selectedIds: Set<string>
-): Array<{ id: string; title: string }> =>
-  tasks.flatMap((task) => [
-    ...(selectedIds.has(task.id) ? [{ id: task.id, title: task.title }] : []),
-    ...collectSelectedInteractiveTasks(task.children, selectedIds),
-  ]);
 
 const createClientId = () =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -412,7 +336,8 @@ type StructuredSectionType =
   | "Code"
   | "Execute"
   | "Answer"
-  | "File";
+  | "File"
+  | "TaskTree";
 
 const StreamingMarkdownBlock = memo(
   function StreamingMarkdownBlock({
@@ -447,6 +372,13 @@ const StreamingSectionBody = memo(
   }) {
     if (!content.trim()) return null;
     if (!isComplete) {
+      if (type === "TaskTree") {
+        return (
+          <div className="p-3 text-sm text-amber-600 dark:text-amber-400 animate-pulse">
+            正在生成分析任务树...
+          </div>
+        );
+      }
       if (type === "Code" || type === "Execute") {
         return (
           <pre className="m-0 text-xs overflow-x-auto whitespace-pre-wrap font-mono">
@@ -466,6 +398,57 @@ const StreamingSectionBody = memo(
     prev.isComplete === next.isComplete &&
     prev.renderSectionContent === next.renderSectionContent
 );
+
+// TaskTree 任务节点组件
+const TaskTreeItem = memo(function TaskTreeItem({
+  node,
+  selectedTasks,
+  toggleTask,
+  depth,
+}: {
+  node: TaskTreeNode;
+  selectedTasks: Set<string>;
+  toggleTask: (id: string, node: TaskTreeNode) => void;
+  depth: number;
+}) {
+  const isChecked = selectedTasks.has(node.id);
+  const hasChildren = node.children && node.children.length > 0;
+  const allChildrenChecked = hasChildren && node.children!.every(c => selectedTasks.has(c.id));
+
+  return (
+    <div style={{ paddingLeft: depth * 20 }}>
+      <div className="flex items-center gap-2 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2">
+        <Checkbox
+          checked={hasChildren ? allChildrenChecked : isChecked}
+          onCheckedChange={() => toggleTask(node.id, node)}
+          className="data-[state=checked]:bg-amber-600 data-[state=checked]:border-amber-600"
+        />
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium text-gray-800 dark:text-gray-200">
+            <span className="text-amber-600 dark:text-amber-400 mr-1 font-mono">[{node.id}]</span>
+            {node.name}
+          </div>
+          {node.description && (
+            <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">{node.description}</div>
+          )}
+        </div>
+      </div>
+      {hasChildren && (
+        <div>
+          {node.children!.map(child => (
+            <TaskTreeItem
+              key={child.id}
+              node={child}
+              selectedTasks={selectedTasks}
+              toggleTask={toggleTask}
+              depth={depth + 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
 
 // 智能体行为原则配置
 const ANALYSIS_PRINCIPLES = [
@@ -621,6 +604,10 @@ export function ThreePanelInterface() {
   const [projectName, setProjectName] = useState("");
   const [showProjectManager, setShowProjectManager] = useState(false);
   const [userProjects, setUserProjects] = useState<any[]>([]);
+  // TaskTree 交互式任务选择对话框状态
+  const [showTaskTreeDialog, setShowTaskTreeDialog] = useState(false);
+  const [taskTreeData, setTaskTreeData] = useState<TaskTreeNode[] | null>(null);
+  const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
   // 保存确认弹窗状态（同名项目覆盖确认）
   const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
   const [pendingSaveData, setPendingSaveData] = useState<any>(null);
@@ -630,10 +617,18 @@ export function ThreePanelInterface() {
   const [reportTypes, setReportTypes] = useState<string[]>(["pdf"]);
   const [showReportTypePicker, setShowReportTypePicker] = useState(false);
   const [pendingReportTypes, setPendingReportTypes] = useState<string[]>(["pdf"]);
-  const [interactiveTasks, setInteractiveTasks] = useState<InteractiveAnalysisTask[]>([]);
-  const [selectedInteractiveTaskIds, setSelectedInteractiveTaskIds] = useState<string[]>([]);
-  const [interactiveTaskSelectionPending, setInteractiveTaskSelectionPending] = useState(false);
-  const [interactiveTaskSourceMessageId, setInteractiveTaskSourceMessageId] = useState<string | null>(null);
+  // 点击外部关闭报告类型选择器
+  useEffect(() => {
+    if (!showReportTypePicker) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-report-type-picker]')) {
+        setShowReportTypePicker(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showReportTypePicker]);
   // 雨途斩棘录面板状态
   const [showYutuPanel, setShowYutuPanel] = useState(false);
   const [yutuHtmlContent, setYutuHtmlContent] = useState<string>("");
@@ -780,6 +775,7 @@ export function ThreePanelInterface() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const singleClickTimerRef = useRef<number | null>(null);
+  const savingProjectRef = useRef(false);
   const [contextPos, setContextPos] = useState<{ x: number; y: number } | null>(
     null
   );
@@ -1556,10 +1552,9 @@ ${analysisContent}
     setProjectName("");
     setShowSaveDialog(false);
     setShowProjectManager(false);
-    setInteractiveTasks([]);
-    setSelectedInteractiveTaskIds([]);
-    setInteractiveTaskSelectionPending(false);
-    setInteractiveTaskSourceMessageId(null);
+    setShowTaskTreeDialog(false);
+    setTaskTreeData(null);
+    setSelectedTasks(new Set());
 
     // 重新加载已注册用户列表
     try {
@@ -1838,21 +1833,25 @@ ${analysisContent}
       setShowAuthModal(true);
       return;
     }
-    if (!projectName) {
+    if (savingProjectRef.current) return; // 防止重复触发
+    if (!projectName.trim()) {
       toast({ description: "请输入项目名称", variant: "destructive" });
       return;
     }
+    const saveName = projectName.trim();
+    savingProjectRef.current = true;
 
     // 如果未确认且不是新建项目，先检查是否存在同名项目
     if (!confirmed) {
       try {
         const checkRes = await fetch(
-          `${API_URLS.PROJECTS_CHECK_NAME}?username=${encodeURIComponent(currentUser!)}&name=${encodeURIComponent(projectName)}`
+          `${API_URLS.PROJECTS_CHECK_NAME}?username=${encodeURIComponent(currentUser!)}&name=${encodeURIComponent(saveName)}`
         );
         if (checkRes.ok) {
           const checkData = await checkRes.json();
           if (checkData.exists) {
             // 存在同名项目，弹出确认覆盖对话框
+            savingProjectRef.current = false;
             setPendingSaveData({ confirmed: true });
             setSaveConfirmOpen(true);
             return;
@@ -1867,7 +1866,7 @@ ${analysisContent}
       const formData = new FormData();
       formData.append("username", currentUser!);
       formData.append("session_id", sessionId);
-      formData.append("name", projectName);
+      formData.append("name", saveName);
       formData.append("messages", JSON.stringify(messages));
       formData.append("side_tasks", JSON.stringify(sideGuidanceHistory));
       const res = await fetch(API_URLS.PROJECTS_SAVE, {
@@ -1880,9 +1879,14 @@ ${analysisContent}
       const storageSize = resData?.storage_size || "";
       toast({ description: `项目已保存${storageSize ? ` (${storageSize})` : ""}` });
       setShowSaveDialog(false);
-      setProjectName("");
       setPendingSaveData(null);
+      // 延迟清空项目名称，避免 Dialog 关闭动画期间触发空名验证
+      setTimeout(() => {
+        setProjectName("");
+        savingProjectRef.current = false;
+      }, 300);
     } catch (e) {
+      savingProjectRef.current = false;
       toast({ description: "保存失败", variant: "destructive" });
     }
   };
@@ -2263,10 +2267,9 @@ ${analysisContent}
       localOnly: true,
     };
     setMessages([welcome]);
-    setInteractiveTasks([]);
-    setSelectedInteractiveTaskIds([]);
-    setInteractiveTaskSelectionPending(false);
-    setInteractiveTaskSourceMessageId(null);
+    setShowTaskTreeDialog(false);
+    setTaskTreeData(null);
+    setSelectedTasks(new Set());
     try {
       if (typeof window !== "undefined") {
         localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify([welcome]));
@@ -2303,10 +2306,9 @@ ${analysisContent}
     setManualLocks({});
     setProjectName("");
     setSideGuidanceHistory([]);
-    setInteractiveTasks([]);
-    setSelectedInteractiveTaskIds([]);
-    setInteractiveTaskSelectionPending(false);
-    setInteractiveTaskSourceMessageId(null);
+    setShowTaskTreeDialog(false);
+    setTaskTreeData(null);
+    setSelectedTasks(new Set());
     // 清空聊天区域、输入框、代码编辑器
     setMessages([
       {
@@ -2469,10 +2471,9 @@ ${analysisContent}
 
   useEffect(() => {
     if (analysisMode !== "interactive") {
-      setInteractiveTasks([]);
-      setSelectedInteractiveTaskIds([]);
-      setInteractiveTaskSelectionPending(false);
-      setInteractiveTaskSourceMessageId(null);
+      setShowTaskTreeDialog(false);
+      setTaskTreeData(null);
+      setSelectedTasks(new Set());
     }
   }, [analysisMode]);
 
@@ -3522,7 +3523,8 @@ ${analysisContent}
       Code: { icon: "💻", color: "bg-gray-500" },
       Execute: { icon: "⚡", color: "bg-orange-500" },
       Answer: { icon: "✅", color: "bg-green-500" },
-      File: { icon: "📎", color: "bg-purple-500" }, // 添加 File 类型
+      File: { icon: "📎", color: "bg-purple-500" },
+      TaskTree: { icon: "🌲", color: "bg-amber-500" },
     };
 
     const allMatches: Array<{
@@ -3698,6 +3700,7 @@ ${analysisContent}
         "Execute",
         "Answer",
         "File",
+        "TaskTree",
       ] as const;
       const sectionConfigs: Record<
         (typeof sectionTypes)[number],
@@ -3733,6 +3736,11 @@ ${analysisContent}
           color:
             "bg-purple-50 border-purple-200 dark:bg-purple-950/30 dark:border-purple-800",
         },
+        TaskTree: {
+          icon: "🌲",
+          color:
+            "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
+        },
       };
 
       // 没有结构化标签时，保持最轻量文本渲染（避免每个 chunk 都触发 Markdown/高亮重解析）
@@ -3745,7 +3753,7 @@ ${analysisContent}
       }
 
       const parts: React.ReactNode[] = [];
-      const openRe = /<(Analyze|Understand|Code|Execute|Answer|File)>/g;
+      const openRe = /<(Analyze|Understand|Code|Execute|Answer|File|TaskTree)>/g;
       let cursor = 0;
       let sectionIndex = 0;
       let m: RegExpExecArray | null;
@@ -3903,6 +3911,11 @@ ${analysisContent}
         icon: "📎",
         color:
           "bg-purple-50 border-purple-200 dark:bg-purple-950/30 dark:border-purple-800",
+      },
+      TaskTree: {
+        icon: "🌲",
+        color:
+          "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
       },
     };
 
@@ -4154,13 +4167,60 @@ ${analysisContent}
                   </Button>
                 </>
               )}
+              {match.type === "TaskTree" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    try {
+                      const parsed = JSON.parse(match.content.trim());
+                      if (parsed.tasks) {
+                        setTaskTreeData(parsed.tasks);
+                        setSelectedTasks(new Set());
+                        setShowTaskTreeDialog(true);
+                      }
+                    } catch (e) {
+                      toast({ description: "任务树数据解析失败", variant: "destructive" });
+                    }
+                  }}
+                  className="h-5 px-2 text-xs text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+                  title="选择分析任务"
+                >
+                  <ListTree className="h-3 w-3 mr-1" />
+                  选择任务
+                </Button>
+              )}
             </div>
           </div>
           {!isCollapsed && (
             <div
               className={`p-3 ${match.type === "Answer" ? "answer-body" : ""}`}
             >
-              {renderSectionContent(sectionBody)}
+              {match.type === "TaskTree" ? (() => {
+                try {
+                  const parsed = JSON.parse(match.content.trim());
+                  const tasks = parsed.tasks || [];
+                  const countAll = (nodes: TaskTreeNode[]): number => nodes.reduce((s, n) => s + 1 + (n.children ? countAll(n.children) : 0), 0);
+                  return (
+                    <div className="text-sm text-amber-700 dark:text-amber-300">
+                      <div className="mb-2 font-medium">已生成 {tasks.length} 个主任务，共 {countAll(tasks)} 个分析步骤</div>
+                      <div className="space-y-1">
+                        {tasks.map(t => (
+                          <div key={t.id} className="flex items-start gap-2">
+                            <span className="text-amber-500 font-mono shrink-0">[{t.id}]</span>
+                            <span>{t.name}</span>
+                            {t.description && <span className="text-gray-400 text-xs ml-1">— {t.description}</span>}
+                            {t.children && <span className="text-xs text-gray-400">(+{t.children.length} 子任务)</span>}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="mt-3 text-xs text-gray-500">点击上方「选择任务」按钮来选择要执行的分析步骤</div>
+                    </div>
+                  );
+                } catch {
+                  return <div className="text-sm text-gray-500">任务树数据格式异常</div>;
+                }
+              })() : renderSectionContent(sectionBody)}
               {fileGallery}
             </div>
           )}
@@ -4196,6 +4256,7 @@ ${analysisContent}
         "Execute",
         "File",
         "Answer",
+        "TaskTree",
       ] as const;
       const matches: Array<{ type: string; index: number; pos: number }> = [];
       sectionTypes.forEach((t) => {
@@ -4228,40 +4289,6 @@ ${analysisContent}
     },
     [autoCollapseEnabled, manualLocks]
   );
-
-  const applyInteractiveChecklistFromContent = useCallback(
-    (content: string, messageId: string) => {
-      if (analysisMode !== "interactive" || interactiveTaskSourceMessageId === messageId) {
-        return;
-      }
-      const parsedTasks = parseInteractiveTaskTree(content);
-      if (parsedTasks.length === 0) return;
-
-      const defaultSelection = flattenInteractiveTaskIds(parsedTasks);
-      setInteractiveTasks(parsedTasks);
-      setSelectedInteractiveTaskIds(defaultSelection);
-      setInteractiveTaskSelectionPending(true);
-      setInteractiveTaskSourceMessageId(messageId);
-      toast({ description: "已生成交互任务清单，请勾选后开始分析" });
-    },
-    [analysisMode, interactiveTaskSourceMessageId, toast]
-  );
-
-  const toggleInteractiveTaskSelection = (taskId: string, checked: boolean) => {
-    const targetTask = findInteractiveTaskById(interactiveTasks, taskId);
-    const branchIds = targetTask ? collectInteractiveTaskBranchIds(targetTask) : [taskId];
-    setSelectedInteractiveTaskIds((prev) => {
-      const next = new Set(prev);
-      branchIds.forEach((id) => {
-        if (checked) {
-          next.add(id);
-        } else {
-          next.delete(id);
-        }
-      });
-      return Array.from(next);
-    });
-  };
 
   const openReportTypePicker = () => {
     setPendingReportTypes(reportTypes);
@@ -4311,22 +4338,43 @@ ${analysisContent}
     }
   };
 
-  const sendMessageContent = async (
-    messageContent: string,
-    options?: {
-      attachments?: FileAttachment[];
-      resetComposer?: boolean;
-      addToHistory?: boolean;
-    }
-  ) => {
-    const outgoingAttachments = options?.attachments || [];
-    if (!messageContent.trim() && outgoingAttachments.length === 0) return;
+  // === TaskTree 交互式任务选择相关函数 ===
+  const toggleTask = useCallback((id: string, node: TaskTreeNode) => {
+    setSelectedTasks(prev => {
+      const next = new Set(prev);
+      if (prev.has(id)) {
+        next.delete(id);
+        const removeDescendants = (n: TaskTreeNode) => { next.delete(n.id); n.children?.forEach(removeDescendants); };
+        node.children?.forEach(removeDescendants);
+      } else {
+        next.add(id);
+        const addDescendants = (n: TaskTreeNode) => { next.add(n.id); n.children?.forEach(addDescendants); };
+        node.children?.forEach(addDescendants);
+      }
+      return next;
+    });
+  }, []);
+
+  const selectAllTasks = useCallback(() => {
+    if (!taskTreeData) return;
+    const all = new Set<string>();
+    const collect = (nodes: TaskTreeNode[]) => nodes.forEach(n => { all.add(n.id); if (n.children) collect(n.children); });
+    collect(taskTreeData);
+    setSelectedTasks(all);
+  }, [taskTreeData]);
+
+  const deselectAllTasks = useCallback(() => setSelectedTasks(new Set()), []);
+
+  const handleSendMessage = async (overrideMessage?: string) => {
+    const messageText = overrideMessage ?? inputValue;
+    const outgoingAttachments = overrideMessage ? [] : attachments;
+    if (!messageText.trim() && outgoingAttachments.length === 0) return;
     setIsAnalyzing(true);
     const baseMessageIndex = messages.length;
     const aiMessageIndex = baseMessageIndex + 1;
 
     // 检测用户消息中是否指定了报告类型
-    const userInput = messageContent.toLowerCase();
+    const userInput = messageText.toLowerCase();
     const detectedTypes: string[] = [];
     if (userInput.includes("pdf")) detectedTypes.push("pdf");
     if (userInput.includes("docx") || userInput.includes("word")) detectedTypes.push("docx");
@@ -4338,21 +4386,19 @@ ${analysisContent}
 
     const newMessage: Message = {
       id: createClientId(),
-      content: messageContent,
+      content: messageText,
       sender: "user",
       timestamp: new Date(),
       attachments: outgoingAttachments.length > 0 ? [...outgoingAttachments] : undefined,
     };
 
-    if (options?.addToHistory !== false && messageContent.trim()) {
-      setHistoryInputs((prev) => [...prev, messageContent.trim()]);
+    if (messageText.trim()) {
+      setHistoryInputs((prev) => [...prev, messageText.trim()]);
     }
 
     setMessages((prev) => [...prev, newMessage]);
-    if (options?.resetComposer !== false) {
-      setInputValue("");
-      setAttachments([]);
-    }
+    if (!overrideMessage) setInputValue("");
+    setAttachments([]);
     setIsTyping(true);
 
     const controller = new AbortController();
@@ -4377,7 +4423,7 @@ ${analysisContent}
               })),
             {
               role: "user",
-              content: messageContent,
+              content: messageText,
             },
           ],
           stream: true, // [修改] 明确开启流式模式
@@ -4412,7 +4458,6 @@ ${analysisContent}
           },
         ]);
         autoCollapseForContent(content, aiMessageIndex);
-        applyInteractiveChecklistFromContent(content, fallbackAiId);
         if (content.includes("<File>")) {
           await loadWorkspaceTree();
           await loadWorkspaceFiles();
@@ -4559,7 +4604,23 @@ ${analysisContent}
       // 强制同步最后状态
       flushAiMessage(accumulatedMessage);
       autoCollapseForContent(accumulatedMessage, aiMessageIndex);
-      applyInteractiveChecklistFromContent(accumulatedMessage, aiMsgId);
+
+      // 检测 <TaskTree> 并自动弹出交互式任务选择对话框
+      if (accumulatedMessage.includes("<TaskTree>")) {
+        const taskTreeMatch = accumulatedMessage.match(/<TaskTree>([\s\S]*?)<\/TaskTree>/);
+        if (taskTreeMatch) {
+          try {
+            const parsed = JSON.parse(taskTreeMatch[1].trim());
+            if (parsed.tasks && Array.isArray(parsed.tasks)) {
+              setTaskTreeData(parsed.tasks);
+              setSelectedTasks(new Set());
+              setTimeout(() => setShowTaskTreeDialog(true), 300);
+            }
+          } catch (e) {
+            console.warn("[TaskTree] JSON 解析失败:", e);
+          }
+        }
+      }
 
       // 结束后刷新一次文件列表确保无遗漏
       await loadWorkspaceFiles();
@@ -4576,70 +4637,17 @@ ${analysisContent}
     }
   };
 
-  const handleSendMessage = async () => {
-    if (!inputValue.trim() && attachments.length === 0) return;
-    if (interactiveTaskSelectionPending) {
-      toast({ description: "请先确认交互任务清单，再开始执行分析", variant: "destructive" });
-      return;
-    }
-    await sendMessageContent(inputValue, {
-      attachments,
-      resetComposer: true,
-      addToHistory: true,
-    });
-  };
-
-  const handleConfirmInteractiveTasks = async () => {
-    const selected = collectSelectedInteractiveTasks(
-      interactiveTasks,
-      new Set(selectedInteractiveTaskIds)
-    );
-    if (selected.length === 0) {
-      toast({ description: "请至少勾选一个分析任务", variant: "destructive" });
-      return;
-    }
-
-    const taskLines = selected.map((task) => `- ${task.id} ${task.title}`).join("\n");
-    const selectionPrompt = `【交互模式任务确认】请仅执行以下已勾选的分析任务，并在这些任务全部完成后结束本次分析，不要扩展到未勾选任务：\n${taskLines}\n\n请严格以以上任务范围为准继续分析。`;
-
-    setInteractiveTaskSelectionPending(false);
-    await sendMessageContent(selectionPrompt, {
-      attachments: [],
-      resetComposer: false,
-      addToHistory: false,
-    });
-  };
-
-  const renderInteractiveTaskChecklist = (
-    tasks: InteractiveAnalysisTask[],
-    depth = 0
-  ): React.ReactNode =>
-    tasks.map((task) => (
-      <div key={task.id} className="space-y-2">
-        <label
-          className="flex items-start gap-2 rounded-md border bg-white dark:bg-black px-3 py-2"
-          style={{ marginLeft: `${depth * 16}px` }}
-        >
-          <input
-            type="checkbox"
-            checked={selectedInteractiveTaskIds.includes(task.id)}
-            onChange={(event) => toggleInteractiveTaskSelection(task.id, event.target.checked)}
-            className="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-          />
-          <div className="min-w-0">
-            <div className="text-sm font-medium text-gray-800 dark:text-gray-100">
-              {task.id} {task.title}
-            </div>
-            {task.children.length > 0 ? (
-              <div className="text-[11px] text-gray-500 dark:text-gray-400">
-                勾选父任务时将同时勾选其下级任务
-              </div>
-            ) : null}
-          </div>
-        </label>
-        {task.children.length > 0 ? renderInteractiveTaskChecklist(task.children, depth + 1) : null}
-      </div>
-    ));
+  const handleConfirmTaskSelection = useCallback(() => {
+    if (!taskTreeData || selectedTasks.size === 0) return;
+    const items: string[] = [];
+    const collect = (nodes: TaskTreeNode[]) => nodes.forEach(n => { if (selectedTasks.has(n.id)) items.push(`[${n.id}] ${n.name}`); if (n.children) collect(n.children); });
+    collect(taskTreeData);
+    const msg = `用户选择了以下分析任务：${items.join("，")}`;
+    setShowTaskTreeDialog(false);
+    setSelectedTasks(new Set());
+    setTaskTreeData(null);
+    handleSendMessage(msg);
+  }, [taskTreeData, selectedTasks]);
 
   const handleFileUpload = async (
     event: React.ChangeEvent<HTMLInputElement>
@@ -4990,7 +4998,7 @@ ${analysisContent}
                       项目中心
                     </Button>
                     {/* 报告类型选择 */}
-                    <div className="relative">
+                    <div className="relative" data-report-type-picker>
                       <Button
                         variant="outline"
                         size="sm"
@@ -5329,41 +5337,6 @@ ${analysisContent}
                 }}
                 className="flex-1 min-h-0 min-w-0 overflow-y-scroll overflow-x-hidden px-4 py-4 pr-5 space-y-6 scrollbar-auto"
               >
-                {interactiveTaskSelectionPending && interactiveTasks.length > 0 ? (
-                  <Card className="border-orange-200 bg-orange-50/70 dark:border-orange-900/40 dark:bg-orange-950/20 p-4 space-y-4">
-                    <div className="space-y-1">
-                      <div className="text-sm font-semibold text-orange-700 dark:text-orange-300">
-                        交互模式任务清单
-                      </div>
-                      <div className="text-xs text-gray-600 dark:text-gray-300">
-                        请确认要执行的分析任务。智能体只会继续完成您勾选的内容。
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      {renderInteractiveTaskChecklist(interactiveTasks)}
-                    </div>
-                    <div className="flex items-center justify-between gap-3 pt-2 border-t border-orange-200 dark:border-orange-900/40">
-                      <div className="text-xs text-gray-500 dark:text-gray-400">
-                        已勾选 {selectedInteractiveTaskIds.length} 项
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            const allIds = flattenInteractiveTaskIds(interactiveTasks);
-                            setSelectedInteractiveTaskIds(allIds);
-                          }}
-                        >
-                          全选
-                        </Button>
-                        <Button size="sm" onClick={handleConfirmInteractiveTasks}>
-                          开始分析已勾选任务
-                        </Button>
-                      </div>
-                    </div>
-                  </Card>
-                ) : null}
                 {messages.map((message, msgIdx) => (
                   <ChatMessageItem
                     key={message.id}
@@ -5640,18 +5613,15 @@ ${analysisContent}
                         <Textarea
                           value={inputValue}
                           onChange={(e) => setInputValue(e.target.value)}
-                          placeholder={interactiveTaskSelectionPending ? "请先确认交互任务清单，再继续分析..." : "在此输入分析指令或提问..."}
+                          placeholder="在此输入分析指令或提问..."
                           onKeyDown={(e) => {
                             if (e.key === "Enter" && !e.shiftKey) {
                               e.preventDefault();
-                              if (!interactiveTaskSelectionPending) {
-                                handleSendMessage();
-                              }
+                              handleSendMessage();
                             }
                           }}
                           rows={8}
                           className="flex-1 resize-none border-gray-200 dark:border-gray-700 bg-white dark:bg-black rounded-lg focus-visible:ring-1"
-                          disabled={interactiveTaskSelectionPending}
                         />
                       </div>
                     </div>
@@ -5719,9 +5689,9 @@ ${analysisContent}
                           </Button>
                         ) : (
                           <Button
-                            onClick={handleSendMessage}
+                            onClick={() => handleSendMessage()}
                             size="sm"
-                            disabled={!inputValue.trim() || interactiveTaskSelectionPending}
+                            disabled={!inputValue.trim()}
                             className="h-9 px-4 bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
                           >
                             <Send className="h-4 w-4 mr-2" />
@@ -5965,6 +5935,58 @@ ${analysisContent}
         </DialogContent>
       </Dialog>
 
+
+      {/* 交互式任务选择对话框 */}
+      <Dialog open={showTaskTreeDialog} onOpenChange={setShowTaskTreeDialog}>
+        <DialogContent className="sm:max-w-[600px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ListTree className="h-5 w-5 text-amber-600" />
+              选择分析任务
+            </DialogTitle>
+            <DialogDescription>
+              请选择您希望智能体执行的分析任务，确认后智能体将仅分析选定的任务
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex items-center gap-2 py-2 border-b border-gray-100 dark:border-gray-800">
+            <Button variant="outline" size="sm" onClick={selectAllTasks} className="text-xs h-7">
+              全选
+            </Button>
+            <Button variant="outline" size="sm" onClick={deselectAllTasks} className="text-xs h-7">
+              取消全选
+            </Button>
+            <span className="ml-auto text-xs text-gray-500 dark:text-gray-400">
+              已选 {selectedTasks.size} 项
+            </span>
+          </div>
+
+          <div className="py-2 overflow-y-auto max-h-[50vh]">
+            {taskTreeData?.map(node => (
+              <TaskTreeItem
+                key={node.id}
+                node={node}
+                selectedTasks={selectedTasks}
+                toggleTask={toggleTask}
+                depth={0}
+              />
+            ))}
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setShowTaskTreeDialog(false)}>
+              取消
+            </Button>
+            <Button
+              onClick={handleConfirmTaskSelection}
+              disabled={selectedTasks.size === 0}
+              className="bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50"
+            >
+              确认选择
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* 保存项目弹窗 */}
       <Dialog open={showSaveDialog} onOpenChange={setShowSaveDialog}>
@@ -6481,7 +6503,7 @@ ${analysisContent}
 
       {/* 系统设置弹窗 */}
       <Dialog open={showSettingsDialog} onOpenChange={setShowSettingsDialog}>
-        <DialogContent className="sm:max-w-[550px] max-h-[85vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-[550px] max-h-[75vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Settings className="h-5 w-5" />
@@ -7435,7 +7457,7 @@ ${analysisContent}
 
       {/* 数据库连接对话框 */}
       <Dialog open={showDatabaseDialog} onOpenChange={setShowDatabaseDialog}>
-        <DialogContent className="max-w-[95vw] w-[1400px] h-[85vh] p-0 overflow-hidden flex flex-col">
+        <DialogContent className="max-w-[95vw] w-[1400px] h-[75vh] p-0 overflow-hidden flex flex-col">
           <DialogHeader className="px-6 py-4 border-b">
             <DialogTitle className="flex items-center gap-2">
               <Database className="h-5 w-5 text-blue-600" />

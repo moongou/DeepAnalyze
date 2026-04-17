@@ -12,6 +12,8 @@ __pycache__/
 venv/
 env/
 ENV/
+demo/jupyter/.venv/
+.venv/
 
 # IDE 配置
 .vscode/
@@ -27,6 +29,27 @@ ENV/
 *.log
 *.tmp
 .DS_Store
+
+# Model weights (mount as volumes instead)
+DeepAnalyze-8B/
+DeepAnalyze-8B-MLX-FP16/
+.cache/
+
+# Runtime data (use volumes)
+demo/chat/workspace/
+demo/chat/projects/
+demo/chat/deepanalyze.db
+demo/chat/yutu_backups/
+logs/
+
+# Frontend build cache
+demo/chat/frontend/node_modules/
+demo/chat/frontend/.next/
+
+# Large training/research directories
+deepanalyze/ms-swift/
+deepanalyze/SkyRL/
+playground/
 
 # 大文件
 *.tar
