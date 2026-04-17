@@ -12,7 +12,6 @@ import { configureMonaco } from "@/lib/monaco-config";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Card } from "@/components/ui/card";
 import { Slider } from "@/components/ui/slider";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
@@ -147,6 +146,11 @@ interface AnalysisSection {
   icon: string;
   color: string;
 }
+
+const createClientId = () =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 type CodeBlockViewProps = {
   language: string;
@@ -558,6 +562,17 @@ export function ThreePanelInterface() {
   );
   const [modelHeadersInput, setModelHeadersInput] = useState("");
   const [showRawModelHeaders, setShowRawModelHeaders] = useState(false);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [isFetchingModelList, setIsFetchingModelList] = useState(false);
+  const [modelTestStatus, setModelTestStatus] = useState<{
+    status: string;
+    message: string;
+    testedAt: string | null;
+  }>({
+    status: "never_tested",
+    message: "尚未获取模型列表",
+    testedAt: null,
+  });
   const [dbType, setDbType] = useState("mysql");
   const [dbConfig, setDbConfig] = useState({
     host: "localhost",
@@ -601,6 +616,7 @@ export function ThreePanelInterface() {
   // 报告类型选择状态
   const [reportTypes, setReportTypes] = useState<string[]>(["pdf"]);
   const [showReportTypePicker, setShowReportTypePicker] = useState(false);
+  const [pendingReportTypes, setPendingReportTypes] = useState<string[]>(["pdf"]);
   // 点击外部关闭报告类型选择器
   useEffect(() => {
     if (!showReportTypePicker) return;
@@ -663,6 +679,71 @@ export function ThreePanelInterface() {
     );
     setModelProviderConfig(preset);
     setModelHeadersInput(stringifyModelHeaders(preset.headers));
+  };
+
+  const handleFetchModelList = async () => {
+    setIsFetchingModelList(true);
+    try {
+      const response = await fetch(API_URLS.MODEL_LIST, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: modelProviderConfig }),
+      });
+      const data = await response.json();
+      if (data.success) {
+        const models = Array.isArray(data.models) ? data.models.filter(Boolean) : [];
+        setAvailableModels(models);
+        if (data.selected_model && !models.includes(data.selected_model)) {
+          setAvailableModels((prev) => [data.selected_model, ...prev]);
+        }
+        setModelTestStatus({
+          status: "success",
+          message: data.message || "模型列表获取成功",
+          testedAt: data.tested_at || new Date().toISOString(),
+        });
+        if (data.selected_model) {
+          setModelProviderConfig((prev) => ({ ...prev, model: data.selected_model }));
+        }
+        toast({ description: data.message || "模型列表获取成功" });
+      } else {
+        setModelTestStatus({
+          status: "failed",
+          message: data.message || "模型列表获取失败",
+          testedAt: new Date().toISOString(),
+        });
+        toast({ description: data.message || "模型列表获取失败", variant: "destructive" });
+      }
+    } catch (error) {
+      console.error("Fetch model list error:", error);
+      setModelTestStatus({
+        status: "failed",
+        message: "模型列表请求失败",
+        testedAt: new Date().toISOString(),
+      });
+      toast({ description: "模型列表请求失败", variant: "destructive" });
+    } finally {
+      setIsFetchingModelList(false);
+    }
+  };
+
+  const handleSaveModelConfig = () => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("modelProviderConfig", JSON.stringify(modelProviderConfig));
+    }
+    toast({ description: `当前分析模型已设置为 ${modelProviderConfig.model}` });
+  };
+
+  const handleSaveDatabaseConfig = () => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(
+        "systemDbSettings",
+        JSON.stringify({
+          dbType,
+          dbConfig,
+        })
+      );
+    }
+    toast({ description: "数据库配置已保存到当前浏览器" });
   };
 
   // 智能体介绍面板状态
@@ -1471,6 +1552,9 @@ ${analysisContent}
     setProjectName("");
     setShowSaveDialog(false);
     setShowProjectManager(false);
+    setShowTaskTreeDialog(false);
+    setTaskTreeData(null);
+    setSelectedTasks(new Set());
 
     // 重新加载已注册用户列表
     try {
@@ -1530,6 +1614,7 @@ ${analysisContent}
           db_type: dbType,
           prompt: dbPrompt,
           schema_info: "", // 可以在此注入已获取的表结构
+          model_provider: modelProviderConfig,
         }),
       });
       const data = await response.json();
@@ -2182,6 +2267,9 @@ ${analysisContent}
       localOnly: true,
     };
     setMessages([welcome]);
+    setShowTaskTreeDialog(false);
+    setTaskTreeData(null);
+    setSelectedTasks(new Set());
     try {
       if (typeof window !== "undefined") {
         localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify([welcome]));
@@ -2218,6 +2306,9 @@ ${analysisContent}
     setManualLocks({});
     setProjectName("");
     setSideGuidanceHistory([]);
+    setShowTaskTreeDialog(false);
+    setTaskTreeData(null);
+    setSelectedTasks(new Set());
     // 清空聊天区域、输入框、代码编辑器
     setMessages([
       {
@@ -2284,6 +2375,34 @@ ${analysisContent}
       }
     }
 
+    const savedReportTypes = localStorage.getItem("reportTypes");
+    if (savedReportTypes) {
+      try {
+        const parsed = JSON.parse(savedReportTypes);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setReportTypes(parsed.filter((item) => typeof item === "string"));
+          setPendingReportTypes(parsed.filter((item) => typeof item === "string"));
+        }
+      } catch {
+        // ignore invalid report types cache
+      }
+    }
+
+    const savedDbSettings = localStorage.getItem("systemDbSettings");
+    if (savedDbSettings) {
+      try {
+        const parsed = JSON.parse(savedDbSettings);
+        if (typeof parsed?.dbType === "string") {
+          setDbType(parsed.dbType);
+        }
+        if (parsed?.dbConfig && typeof parsed.dbConfig === "object") {
+          setDbConfig((prev) => ({ ...prev, ...parsed.dbConfig }));
+        }
+      } catch {
+        // ignore invalid db settings cache
+      }
+    }
+
     const savedModelProvider = localStorage.getItem("modelProviderConfig");
     if (savedModelProvider) {
       try {
@@ -2325,6 +2444,38 @@ ${analysisContent}
       })
     );
   }, [knowledgePreferredView, showKnowledgeHints, autoOpenYutuAfterAnalysis]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem("modelProviderConfig", JSON.stringify(modelProviderConfig));
+  }, [modelProviderConfig]);
+
+  useEffect(() => {
+    setAvailableModels([]);
+    setModelTestStatus({
+      status: "never_tested",
+      message: "模型配置已变更，请重新获取模型名称",
+      testedAt: null,
+    });
+  }, [
+    modelProviderConfig.providerType,
+    modelProviderConfig.baseUrl,
+    modelProviderConfig.apiKey,
+    modelProviderConfig.headers,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem("reportTypes", JSON.stringify(reportTypes));
+  }, [reportTypes]);
+
+  useEffect(() => {
+    if (analysisMode !== "interactive") {
+      setShowTaskTreeDialog(false);
+      setTaskTreeData(null);
+      setSelectedTasks(new Set());
+    }
+  }, [analysisMode]);
 
   useEffect(() => {
     const loadRegisteredUsers = async () => {
@@ -4139,6 +4290,26 @@ ${analysisContent}
     [autoCollapseEnabled, manualLocks]
   );
 
+  const openReportTypePicker = () => {
+    setPendingReportTypes(reportTypes);
+    setShowReportTypePicker(true);
+  };
+
+  const cancelReportTypePicker = () => {
+    setPendingReportTypes(reportTypes);
+    setShowReportTypePicker(false);
+  };
+
+  const confirmReportTypePicker = () => {
+    if (pendingReportTypes.length === 0) {
+      toast({ description: "请至少选择一种报告类型", variant: "destructive" });
+      return;
+    }
+    setReportTypes(pendingReportTypes);
+    setShowReportTypePicker(false);
+    toast({ description: `报告类型已更新为 ${pendingReportTypes.map((item) => item.toUpperCase()).join(", ")}` });
+  };
+
   const handleSendGuidance = async () => {
     if (!sideGuidanceText.trim()) return;
     setIsSubmittingGuidance(true);
@@ -4196,7 +4367,8 @@ ${analysisContent}
 
   const handleSendMessage = async (overrideMessage?: string) => {
     const messageText = overrideMessage ?? inputValue;
-    if (!messageText.trim() && attachments.length === 0) return;
+    const outgoingAttachments = overrideMessage ? [] : attachments;
+    if (!messageText.trim() && outgoingAttachments.length === 0) return;
     setIsAnalyzing(true);
     const baseMessageIndex = messages.length;
     const aiMessageIndex = baseMessageIndex + 1;
@@ -4207,16 +4379,17 @@ ${analysisContent}
     if (userInput.includes("pdf")) detectedTypes.push("pdf");
     if (userInput.includes("docx") || userInput.includes("word")) detectedTypes.push("docx");
     if (userInput.includes("pptx") || userInput.includes("ppt")) detectedTypes.push("pptx");
+    const effectiveReportTypes = detectedTypes.length > 0 ? detectedTypes : reportTypes;
     if (detectedTypes.length > 0) {
       setReportTypes(detectedTypes);
     }
 
     const newMessage: Message = {
-      id: Date.now().toString(),
+      id: createClientId(),
       content: messageText,
       sender: "user",
       timestamp: new Date(),
-      attachments: attachments.length > 0 ? [...attachments] : undefined,
+      attachments: outgoingAttachments.length > 0 ? [...outgoingAttachments] : undefined,
     };
 
     if (messageText.trim()) {
@@ -4250,14 +4423,15 @@ ${analysisContent}
               })),
             {
               role: "user",
-              content: inputValue,
+              content: messageText,
             },
           ],
           stream: true, // [修改] 明确开启流式模式
           session_id: sessionId,
           strategy: analysisStrategy,
           analysis_mode: analysisMode,
-          report_types: reportTypes,
+          report_types: effectiveReportTypes,
+          model_provider: modelProviderConfig,
           ...(temperature !== null && { temperature }),
         }),
       });
@@ -4273,10 +4447,11 @@ ${analysisContent}
       if (contentType.includes("application/json")) {
         const data = await response.json();
         const content = data?.choices?.[0]?.message?.content || "";
+        const fallbackAiId = createClientId();
         setMessages((prev) => [
           ...prev,
           {
-            id: Date.now().toString(),
+            id: fallbackAiId,
             sender: "ai",
             content,
             timestamp: new Date(),
@@ -4288,6 +4463,7 @@ ${analysisContent}
           await loadWorkspaceFiles();
         }
         setIsTyping(false);
+        setIsAnalyzing(false);
         return;
       }
 
@@ -4301,7 +4477,7 @@ ${analysisContent}
       }
 
       // 预先插入 AI 消息占位
-      const aiMsgId = `${Date.now()}-${Math.random()}`;
+      const aiMsgId = createClientId();
       setStreamingMessageId(aiMsgId);
       setMessages((prev) => [
         ...prev,
@@ -4827,28 +5003,34 @@ ${analysisContent}
                         variant="outline"
                         size="sm"
                         className="h-7 text-[11px] px-2 gap-1 border-green-200 text-green-600 hover:bg-green-50 dark:border-green-900 dark:text-green-400"
-                        onClick={() => setShowReportTypePicker(!showReportTypePicker)}
+                        onClick={() => {
+                          if (showReportTypePicker) {
+                            cancelReportTypePicker();
+                          } else {
+                            openReportTypePicker();
+                          }
+                        }}
                       >
                         <FileText className="h-3 w-3" />
                         报告类型
                       </Button>
                       {showReportTypePicker && (
-                        <div className="absolute top-8 left-0 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 min-w-[160px]">
+                        <div className="absolute top-8 left-0 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 min-w-[220px] space-y-3">
                           <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择报告输出格式</div>
                           {["pdf", "docx", "pptx"].map((type) => (
                             <label key={type} className="flex items-center gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer">
                               <input
                                 type="checkbox"
-                                checked={reportTypes.includes(type)}
+                                checked={pendingReportTypes.includes(type)}
                                 onChange={(e) => {
                                   if (e.target.checked) {
-                                    setReportTypes(prev => [...prev, type]);
+                                    setPendingReportTypes((prev) =>
+                                      prev.includes(type) ? prev : [...prev, type]
+                                    );
                                   } else {
-                                    const next = reportTypes.filter(t => t !== type);
-                                    // 至少保留一项
-                                    if (next.length > 0) {
-                                      setReportTypes(next);
-                                    }
+                                    setPendingReportTypes((prev) =>
+                                      prev.filter((item) => item !== type)
+                                    );
                                   }
                                 }}
                                 className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
@@ -4856,8 +5038,16 @@ ${analysisContent}
                               <span className="text-xs text-gray-700 dark:text-gray-300 uppercase font-mono">{type}</span>
                             </label>
                           ))}
-                          <div className="text-[9px] text-gray-400 mt-2 pt-2 border-t border-gray-100 dark:border-gray-800">
-                            当前: {reportTypes.map(t => t.toUpperCase()).join(", ")}
+                          <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
+                            当前: {pendingReportTypes.map(t => t.toUpperCase()).join(", ") || "未选择"}
+                          </div>
+                          <div className="flex justify-end gap-2">
+                            <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelReportTypePicker}>
+                              取消
+                            </Button>
+                            <Button size="sm" className="h-7 text-[11px]" onClick={confirmReportTypePicker}>
+                              确定
+                            </Button>
                           </div>
                         </div>
                       )}
@@ -5387,11 +5577,11 @@ ${analysisContent}
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="full_agent" className="text-xs">全程代理</SelectItem>
-                            <SelectItem value="interactive" className="text-xs">交互式</SelectItem>
+                            <SelectItem value="interactive" className="text-xs">交互模式</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
-                      <span className="text-blue-600 dark:text-blue-400 font-bold text-base">请风控专家指示分析目标</span>
+                      <span className="text-blue-600 dark:text-blue-400 font-bold text-base">分析要求</span>
                       {/* 分析策略 - 右侧 */}
                       <div className="flex items-center gap-1">
                         <Select value={analysisStrategy} onValueChange={(val) => {
@@ -6377,7 +6567,7 @@ ${analysisContent}
                       : "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
                   )}
                 >
-                  <span className="font-medium">全程代理分析</span>
+                  <span className="font-medium">全程代理</span>
                   <span className="text-[10px] text-gray-500 text-left">智能体自主完成全部分析流程，无需人工干预</span>
                 </button>
                 <button
@@ -6389,7 +6579,7 @@ ${analysisContent}
                       : "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
                   )}
                 >
-                  <span className="font-medium">交互式分析</span>
+                  <span className="font-medium">交互模式</span>
                   <span className="text-[10px] text-gray-500 text-left">用户参与任务拆分与分析角度选择</span>
                 </button>
               </div>
@@ -6806,6 +6996,25 @@ ${analysisContent}
                           setModelProviderConfig((prev) => ({ ...prev, model: e.target.value }))
                         }
                       />
+                      {availableModels.length > 0 ? (
+                        <Select
+                          value={modelProviderConfig.model}
+                          onValueChange={(value) =>
+                            setModelProviderConfig((prev) => ({ ...prev, model: value }))
+                          }
+                        >
+                          <SelectTrigger className="mt-2">
+                            <SelectValue placeholder="从已获取模型列表中选择" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {availableModels.map((modelName) => (
+                              <SelectItem key={modelName} value={modelName}>
+                                {modelName}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : null}
                     </div>
                     <div className="col-span-2 space-y-1.5">
                       <Label htmlFor="model-description">描述</Label>
@@ -6869,9 +7078,41 @@ ${analysisContent}
                     ) : null}
                   </div>
 
+                  <div className="rounded-lg border p-4 space-y-4 bg-white dark:bg-gray-950">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="text-sm font-medium">模型配置测试</div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                          获取当前提供商可用模型名称，并从列表中确认实际使用的模型。
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={handleFetchModelList}
+                          disabled={isFetchingModelList}
+                        >
+                          {isFetchingModelList ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                          获取模型名称
+                        </Button>
+                        <Button size="sm" onClick={handleSaveModelConfig}>
+                          保存模型配置
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="rounded-md border bg-gray-50 dark:bg-gray-900/30 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
+                      <div>状态：{modelTestStatus.status}</div>
+                      <div>结果：{modelTestStatus.message}</div>
+                      <div>时间：{modelTestStatus.testedAt || "-"}</div>
+                      <div>当前生效模型：{modelProviderConfig.model || "-"}</div>
+                    </div>
+                  </div>
+
                   <div className="rounded-lg border p-4 space-y-2 bg-blue-50 dark:bg-blue-950/20 text-sm">
                     <div className="font-medium text-blue-700 dark:text-blue-300">当前分析参数</div>
                     <div className="text-xs text-blue-700 dark:text-blue-300">分析策略与温度仍保留在聊天输入区，不从那里移除，避免影响现有分析流程。</div>
+                    <div className="text-xs text-gray-600 dark:text-gray-300">当前模型：{modelProviderConfig.model}</div>
                     <div className="text-xs text-gray-600 dark:text-gray-300">当前分析策略：{analysisStrategy}</div>
                     <div className="text-xs text-gray-600 dark:text-gray-300">当前温度：{temperature ?? "自动"}</div>
                   </div>
@@ -7187,17 +7428,27 @@ ${analysisContent}
           </div>
           <DialogFooter className="px-6 py-4 border-t justify-between">
             <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              {knowledgeSettingsLoaded ? "配置已加载" : "尚未加载配置"}
+              {systemSettingsTab === "model"
+                ? `当前模型：${modelProviderConfig.model || "-"}`
+                : systemSettingsTab === "database"
+                  ? `数据库测试状态：${isDbTested ? "已通过" : "未测试"}`
+                  : knowledgeSettingsLoaded
+                    ? "配置已加载"
+                    : "尚未加载配置"}
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={() => handleTestKnowledgeProvider("all")} disabled={knowledgeTestTarget !== null || isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
-                {knowledgeTestTarget === "all" ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
-                测试全部
-              </Button>
-              <Button onClick={handleSaveKnowledgeConfig} disabled={isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
-                {isSavingKnowledgeConfig ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
-                保存配置
-              </Button>
+              {systemSettingsTab === "model" ? (
+                <Button onClick={handleSaveModelConfig}>保存模型配置</Button>
+              ) : null}
+              {systemSettingsTab === "database" ? (
+                <Button onClick={handleSaveDatabaseConfig}>保存数据库配置</Button>
+              ) : null}
+              {systemSettingsTab === "knowledge" ? (
+                <Button onClick={handleSaveKnowledgeConfig} disabled={isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
+                  {isSavingKnowledgeConfig ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
+                  保存知识库配置
+                </Button>
+              ) : null}
               <Button variant="outline" onClick={() => setShowSystemSettings(false)}>关闭</Button>
             </div>
           </DialogFooter>
