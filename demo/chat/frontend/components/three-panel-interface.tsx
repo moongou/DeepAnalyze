@@ -118,6 +118,60 @@ interface TaskTreeNode {
   children?: TaskTreeNode[];
 }
 
+/**
+ * Robustly extract task tree JSON from content that may contain
+ * extra text, markdown code fences, or other non-JSON material.
+ * Returns parsed { tasks: TaskTreeNode[] } or null.
+ */
+function parseTaskTreeContent(raw: string): { tasks: TaskTreeNode[] } | null {
+  if (!raw) return null;
+  let text = raw.trim();
+
+  // Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+  text = text.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```\s*$/, "");
+  text = text.trim();
+
+  // Try direct parse first (ideal case: content is pure JSON)
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && Array.isArray(parsed.tasks)) return parsed;
+  } catch { /* continue to heuristic extraction */ }
+
+  // Heuristic: find the outermost { ... } that contains "tasks"
+  const firstBrace = text.indexOf("{");
+  if (firstBrace === -1) return null;
+
+  // Find matching closing brace by counting
+  let depth = 0;
+  let lastBrace = -1;
+  for (let i = firstBrace; i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}") {
+      depth--;
+      if (depth === 0) { lastBrace = i; break; }
+    }
+  }
+
+  if (lastBrace === -1) return null;
+
+  try {
+    const jsonStr = text.slice(firstBrace, lastBrace + 1);
+    const parsed = JSON.parse(jsonStr);
+    if (parsed && Array.isArray(parsed.tasks)) return parsed;
+  } catch { /* fall through */ }
+
+  // Last resort: try to find a JSON array for "tasks" key
+  const tasksMatch = text.match(/"tasks"\s*:\s*(\[[\s\S]*\])/);
+  if (tasksMatch) {
+    try {
+      const tasks = JSON.parse(tasksMatch[1]);
+      if (Array.isArray(tasks)) return { tasks };
+    } catch { /* give up */ }
+  }
+
+  return null;
+}
+
 interface WorkspaceFile {
   name: string;
   size: number;
@@ -389,6 +443,40 @@ const StreamingSectionBody = memo(
       return (
         <div className="text-sm break-words whitespace-pre-wrap">{content}</div>
       );
+    }
+    // Completed TaskTree: show structured summary instead of raw JSON
+    if (type === "TaskTree") {
+      const parsed = parseTaskTreeContent(content);
+      if (parsed) {
+        const tasks = parsed.tasks;
+        const countAll = (nodes: TaskTreeNode[]): number =>
+          nodes.reduce((s, n) => s + 1 + (n.children ? countAll(n.children) : 0), 0);
+        return (
+          <div className="text-sm text-amber-700 dark:text-amber-300">
+            <div className="mb-2 font-medium">
+              已生成 {tasks.length} 个主任务，共 {countAll(tasks)} 个分析步骤
+            </div>
+            <div className="space-y-1">
+              {tasks.map((t: TaskTreeNode) => (
+                <div key={t.id} className="flex items-start gap-2">
+                  <span className="text-amber-500 font-mono shrink-0">[{t.id}]</span>
+                  <span>{t.name}</span>
+                  {t.description && (
+                    <span className="text-gray-400 text-xs ml-1">— {t.description}</span>
+                  )}
+                  {t.children && (
+                    <span className="text-xs text-gray-400">(+{t.children.length} 子任务)</span>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 text-xs text-gray-500">
+              任务选择面板已自动弹出，请勾选要执行的分析步骤
+            </div>
+          </div>
+        );
+      }
+      return <div className="text-sm text-gray-500">任务树数据格式异常，请重新生成</div>;
     }
     return <div className="markdown-content">{renderSectionContent(content)}</div>;
   },
@@ -4172,14 +4260,12 @@ ${analysisContent}
                   variant="ghost"
                   size="sm"
                   onClick={() => {
-                    try {
-                      const parsed = JSON.parse(match.content.trim());
-                      if (parsed.tasks) {
-                        setTaskTreeData(parsed.tasks);
-                        setSelectedTasks(new Set());
-                        setShowTaskTreeDialog(true);
-                      }
-                    } catch (e) {
+                    const parsed = parseTaskTreeContent(match.content);
+                    if (parsed) {
+                      setTaskTreeData(parsed.tasks);
+                      setSelectedTasks(new Set());
+                      setShowTaskTreeDialog(true);
+                    } else {
                       toast({ description: "任务树数据解析失败", variant: "destructive" });
                     }
                   }}
@@ -4197,9 +4283,9 @@ ${analysisContent}
               className={`p-3 ${match.type === "Answer" ? "answer-body" : ""}`}
             >
               {match.type === "TaskTree" ? (() => {
-                try {
-                  const parsed = JSON.parse(match.content.trim());
-                  const tasks = parsed.tasks || [];
+                const parsed = parseTaskTreeContent(match.content);
+                if (parsed) {
+                  const tasks = parsed.tasks;
                   const countAll = (nodes: TaskTreeNode[]): number => nodes.reduce((s, n) => s + 1 + (n.children ? countAll(n.children) : 0), 0);
                   return (
                     <div className="text-sm text-amber-700 dark:text-amber-300">
@@ -4217,8 +4303,8 @@ ${analysisContent}
                       <div className="mt-3 text-xs text-gray-500">点击上方「选择任务」按钮来选择要执行的分析步骤</div>
                     </div>
                   );
-                } catch {
-                  return <div className="text-sm text-gray-500">任务树数据格式异常</div>;
+                } else {
+                  return <div className="text-sm text-gray-500">任务树数据格式异常，请重新生成</div>;
                 }
               })() : renderSectionContent(sectionBody)}
               {fileGallery}
@@ -4609,15 +4695,13 @@ ${analysisContent}
       if (accumulatedMessage.includes("<TaskTree>")) {
         const taskTreeMatch = accumulatedMessage.match(/<TaskTree>([\s\S]*?)<\/TaskTree>/);
         if (taskTreeMatch) {
-          try {
-            const parsed = JSON.parse(taskTreeMatch[1].trim());
-            if (parsed.tasks && Array.isArray(parsed.tasks)) {
-              setTaskTreeData(parsed.tasks);
-              setSelectedTasks(new Set());
-              setTimeout(() => setShowTaskTreeDialog(true), 300);
-            }
-          } catch (e) {
-            console.warn("[TaskTree] JSON 解析失败:", e);
+          const parsed = parseTaskTreeContent(taskTreeMatch[1]);
+          if (parsed) {
+            setTaskTreeData(parsed.tasks);
+            setSelectedTasks(new Set());
+            setTimeout(() => setShowTaskTreeDialog(true), 300);
+          } else {
+            console.warn("[TaskTree] JSON 解析失败, 原始内容:", taskTreeMatch[1].slice(0, 200));
           }
         }
       }
