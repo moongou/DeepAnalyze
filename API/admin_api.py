@@ -4,15 +4,33 @@ Handles administrative endpoints like thread cleanup and statistics
 """
 
 import time
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
 
 from config import CLEANUP_TIMEOUT_HOURS
-from models import ThreadCleanupRequest, ThreadCleanupResponse, ThreadStatsResponse
+from model_gateway import model_gateway
+from models import (
+    ThreadCleanupRequest,
+    ThreadCleanupResponse,
+    ThreadStatsResponse,
+    ModelProviderUpsertRequest,
+    ModelProviderObject,
+    ModelProvidersListResponse,
+    ModelCatalogUpsertRequest,
+    ModelCatalogObject,
+    ModelCatalogListResponse,
+)
 from storage import storage
 
 
 # Create router for admin endpoints
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
+
+
+def _mask_provider_secret(provider: dict) -> dict:
+    masked = dict(provider)
+    if masked.get("api_key"):
+        masked["api_key"] = "******"
+    return masked
 
 
 @router.post("/cleanup-threads", response_model=ThreadCleanupResponse)
@@ -73,3 +91,53 @@ async def get_threads_stats():
         timeout_hours=CLEANUP_TIMEOUT_HOURS,
         timestamp=int(time.time())
     )
+
+
+@router.get("/model-providers", response_model=ModelProvidersListResponse)
+async def list_model_providers(include_disabled: bool = Query(True)):
+    """List model providers in model gateway."""
+    providers = model_gateway.list_providers(include_disabled=include_disabled)
+    items = [ModelProviderObject(**_mask_provider_secret(p)) for p in providers]
+    return ModelProvidersListResponse(object="list", data=items)
+
+
+@router.post("/model-providers", response_model=ModelProviderObject)
+async def upsert_model_provider(req: ModelProviderUpsertRequest):
+    """Create or update one model provider."""
+    try:
+        provider = model_gateway.upsert_provider(req.dict())
+        return ModelProviderObject(**_mask_provider_secret(provider))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.delete("/model-providers/{provider_id}")
+async def delete_model_provider(provider_id: str):
+    """Delete one model provider and its mapped models."""
+    deleted = model_gateway.remove_provider(provider_id)
+    return {"id": provider_id, "deleted": deleted}
+
+
+@router.get("/model-catalog", response_model=ModelCatalogListResponse)
+async def list_model_catalog(include_disabled: bool = Query(True)):
+    """List model catalog items exposed to agents."""
+    models = model_gateway.list_models(include_disabled=include_disabled)
+    items = [ModelCatalogObject(**m) for m in models]
+    return ModelCatalogListResponse(object="list", data=items)
+
+
+@router.post("/model-catalog", response_model=ModelCatalogObject)
+async def upsert_model_catalog(req: ModelCatalogUpsertRequest):
+    """Create or update one exposed model id."""
+    try:
+        model_item = model_gateway.upsert_model(req.dict())
+        return ModelCatalogObject(**model_item)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.delete("/model-catalog/{model_id}")
+async def delete_model_catalog(model_id: str):
+    """Delete one exposed model id from catalog."""
+    deleted = model_gateway.remove_model(model_id)
+    return {"id": model_id, "deleted": deleted}

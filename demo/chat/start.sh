@@ -3,8 +3,25 @@
 echo "Starting Chat System"
 echo "=========================="
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="$SCRIPT_DIR/logs"
+VENV_PYTHON="$SCRIPT_DIR/../jupyter/.venv/bin/python"
+
+if [ -x "$VENV_PYTHON" ]; then
+    PYTHON_BIN="$VENV_PYTHON"
+else
+    PYTHON_BIN="$(command -v python3 || true)"
+fi
+
+if [ -z "$PYTHON_BIN" ]; then
+    echo "Error: python3 not found. Please install Python 3 first."
+    exit 1
+fi
+
+echo "Using Python interpreter: $PYTHON_BIN"
+
 # Ensure logs directory exists
-mkdir -p logs
+mkdir -p "$LOG_DIR"
 
 # Function to check and free ports
 check_port() {
@@ -49,7 +66,7 @@ echo ""
 
 # Start backend API (ports 8200, 8100)
 echo "Starting backend API..."
-nohup python3 backend.py > logs/backend.log 2>&1 &
+nohup "$PYTHON_BIN" "$SCRIPT_DIR/backend.py" > "$LOG_DIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 echo "Backend PID: $BACKEND_PID"
 echo "API running on: http://localhost:8200"
@@ -61,16 +78,15 @@ sleep 3
 # Start frontend (React, default port: $FRONTEND_PORT)
 echo ""
 echo "Starting React frontend..."
-cd frontend || exit
-nohup npm run dev -- -p "$FRONTEND_PORT" > ../logs/frontend.log 2>&1 &
+cd "$SCRIPT_DIR/frontend" || exit
+nohup npm run dev -- -p "$FRONTEND_PORT" > "$LOG_DIR/frontend.log" 2>&1 &
 FRONTEND_PID=$!
-cd ..
 echo "Frontend PID: $FRONTEND_PID"
 echo "Frontend running on: http://localhost:$FRONTEND_PORT"
 
 # Save PIDs
-echo $BACKEND_PID > logs/backend.pid
-echo $FRONTEND_PID > logs/frontend.pid
+echo $BACKEND_PID > "$LOG_DIR/backend.pid"
+echo $FRONTEND_PID > "$LOG_DIR/frontend.pid"
 
 echo ""
 echo "All services started successfully."

@@ -680,6 +680,81 @@ export function ThreePanelInterface() {
   const [isExecutingDbSql, setIsExecutingDbSql] = useState(false);
   const [isDbTested, setIsDbTested] = useState(false);
 
+  const normalizeDbTypeForRequest = (type: string) => {
+    const normalized = (type || "").toLowerCase();
+    if (normalized === "postgres") return "postgresql";
+    if (normalized === "sqlserver") return "mssql";
+    return normalized || "mysql";
+  };
+
+  const getDefaultPortForDbType = (type: string) => {
+    const normalized = normalizeDbTypeForRequest(type);
+    if (normalized === "mysql") return "3306";
+    if (normalized === "postgresql") return "5432";
+    if (normalized === "mssql") return "1433";
+    if (normalized === "oracle") return "1521";
+    return "";
+  };
+
+  const handleDbTypeChange = (nextType: string) => {
+    const normalizedNextType = normalizeDbTypeForRequest(nextType);
+    const previousDefaultPort = getDefaultPortForDbType(dbType);
+    const nextDefaultPort = getDefaultPortForDbType(normalizedNextType);
+
+    setDbType(normalizedNextType);
+    setDbConfig((prev) => {
+      const currentPort = (prev.port || "").trim();
+      const shouldUseNextDefault =
+        !currentPort || currentPort === previousDefaultPort || currentPort === "0";
+      return {
+        ...prev,
+        port: shouldUseNextDefault ? nextDefaultPort : prev.port,
+      };
+    });
+  };
+
+  const buildDbRequestPayload = () => {
+    const normalizedType = normalizeDbTypeForRequest(dbType);
+    const trimmedDatabase = (dbConfig.database || "").trim();
+
+    if (!trimmedDatabase) {
+      toast({
+        description: normalizedType === "sqlite" ? "请填写 SQLite 文件路径" : "请填写数据库名称",
+        variant: "destructive",
+      });
+      return null;
+    }
+
+    if (normalizedType === "sqlite") {
+      return {
+        db_type: normalizedType,
+        config: {
+          database: trimmedDatabase,
+        },
+      };
+    }
+
+    const host = (dbConfig.host || "").trim() || "localhost";
+    const user = (dbConfig.user || "").trim();
+    const port = (dbConfig.port || "").trim() || getDefaultPortForDbType(normalizedType);
+
+    if (port && !/^\d+$/.test(port)) {
+      toast({ description: "端口必须为数字", variant: "destructive" });
+      return null;
+    }
+
+    return {
+      db_type: normalizedType,
+      config: {
+        host,
+        port,
+        user,
+        password: dbConfig.password || "",
+        database: trimmedDatabase,
+      },
+    };
+  };
+
   // 用户认证与项目管理状态
   const [currentUser, setCurrentUser] = useState<string | null>(null);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -1666,12 +1741,15 @@ ${analysisContent}
 
   // ========== 数据库连接功能函数 ==========
   const handleTestConnection = async () => {
+    const payload = buildDbRequestPayload();
+    if (!payload) return;
+
     setIsTestingDb(true);
     try {
       const response = await fetch(API_URLS.DB_TEST, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ db_type: dbType, config: dbConfig }),
+        body: JSON.stringify(payload),
       });
       const data = await response.json();
       if (data.success) {
@@ -1679,7 +1757,7 @@ ${analysisContent}
         setIsDbTested(true);
       } else {
         toast({
-          description: `连接失败: ${data.message}`,
+          description: `连接失败: ${data.message || data.detail || "未知错误"}`,
           variant: "destructive",
         });
       }
@@ -1699,7 +1777,7 @@ ${analysisContent}
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          db_type: dbType,
+          db_type: normalizeDbTypeForRequest(dbType),
           prompt: dbPrompt,
           schema_info: "", // 可以在此注入已获取的表结构
           model_provider: modelProviderConfig,
@@ -1725,6 +1803,9 @@ ${analysisContent}
   const handleExecuteDbSql = async () => {
     if (!dbGeneratedSql.trim()) return;
 
+    const payload = buildDbRequestPayload();
+    if (!payload) return;
+
     // 检查文件是否存在并提醒覆盖
     const fileName = `${dbDatasetName}.csv`;
     const fileExists = workspaceFiles.some(f => f.name === fileName);
@@ -1740,8 +1821,7 @@ ${analysisContent}
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          db_type: dbType,
-          config: dbConfig,
+          ...payload,
           sql: dbGeneratedSql,
           dataset_name: dbDatasetName,
           mode: dbExecuteMode,
@@ -1761,7 +1841,7 @@ ${analysisContent}
         await loadWorkspaceFiles();
       } else {
         toast({
-          description: `执行失败: ${data.message}`,
+          description: `执行失败: ${data.message || data.detail || "未知错误"}`,
           variant: "destructive",
         });
       }
@@ -2480,11 +2560,18 @@ ${analysisContent}
     if (savedDbSettings) {
       try {
         const parsed = JSON.parse(savedDbSettings);
+        const normalizedType = normalizeDbTypeForRequest(parsed?.dbType || "mysql");
         if (typeof parsed?.dbType === "string") {
-          setDbType(parsed.dbType);
+          setDbType(normalizedType);
         }
         if (parsed?.dbConfig && typeof parsed.dbConfig === "object") {
-          setDbConfig((prev) => ({ ...prev, ...parsed.dbConfig }));
+          setDbConfig((prev) => {
+            const merged = { ...prev, ...parsed.dbConfig };
+            if (!String(merged.port || "").trim()) {
+              merged.port = getDefaultPortForDbType(normalizedType);
+            }
+            return merged;
+          });
         }
       } catch {
         // ignore invalid db settings cache
@@ -7209,7 +7296,7 @@ ${analysisContent}
                     <ResizablePanel defaultSize={20} minSize={15} className="bg-gray-50 dark:bg-gray-900/20 border-r">
                       <div className="p-4 space-y-4">
                         <Label className="text-sm font-semibold">选择数据库类型</Label>
-                        <RadioGroup value={dbType} onValueChange={setDbType} className="space-y-2">
+                        <RadioGroup value={dbType} onValueChange={handleDbTypeChange} className="space-y-2">
                           {[
                             { id: "mysql", label: "MySQL", icon: "🐬" },
                             { id: "mssql", label: "SQL Server", icon: "🪟" },
@@ -7246,7 +7333,7 @@ ${analysisContent}
                               </div>
                               <div className="space-y-1.5">
                                 <Label htmlFor="system-db-port">端口</Label>
-                                <Input id="system-db-port" placeholder={dbType === "mysql" ? "3306" : dbType === "mssql" ? "1433" : "5432"} value={dbConfig.port} onChange={(e) => setDbConfig({ ...dbConfig, port: e.target.value })} />
+                                <Input id="system-db-port" placeholder={getDefaultPortForDbType(dbType)} value={dbConfig.port} onChange={(e) => setDbConfig({ ...dbConfig, port: e.target.value })} />
                               </div>
                               <div className="space-y-1.5">
                                 <Label htmlFor="system-db-user">用户名</Label>
@@ -7555,7 +7642,7 @@ ${analysisContent}
               <ResizablePanel defaultSize={20} minSize={15} className="bg-gray-50 dark:bg-gray-900/20 border-r">
                 <div className="p-4 space-y-4">
                   <Label className="text-sm font-semibold">选择数据库类型</Label>
-                  <RadioGroup value={dbType} onValueChange={setDbType} className="space-y-2">
+                  <RadioGroup value={dbType} onValueChange={handleDbTypeChange} className="space-y-2">
                     {[
                       { id: "mysql", label: "MySQL", icon: "🐬" },
                       { id: "mssql", label: "SQL Server", icon: "🪟" },
@@ -7601,7 +7688,7 @@ ${analysisContent}
                           <Label htmlFor="db-port">端口</Label>
                           <Input
                             id="db-port"
-                            placeholder={dbType === "mysql" ? "3306" : dbType === "mssql" ? "1433" : "5432"}
+                            placeholder={getDefaultPortForDbType(dbType)}
                             value={dbConfig.port}
                             onChange={(e) => setDbConfig({ ...dbConfig, port: e.target.value })}
                           />

@@ -13,11 +13,11 @@ from typing import List, Optional, Dict, Any
 
 from fastapi import HTTPException
 
-import openai
 from fastapi import APIRouter, Body
 from fastapi.responses import StreamingResponse
 
-from config import API_BASE, DEFAULT_TEMPERATURE, STOP_TOKEN_IDS, MAX_NEW_TOKENS
+from config import DEFAULT_TEMPERATURE, STOP_TOKEN_IDS, MAX_NEW_TOKENS
+from model_gateway import model_gateway
 from models import ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChoice
 from storage import storage
 from utils import (
@@ -34,11 +34,6 @@ import matplotlib.pyplot as plt
 plt.rcParams['font.sans-serif'] = ['SimHei'] 
 plt.rcParams['axes.unicode_minus'] = False    
 """
-
-
-# Initialize OpenAI clients for vllm
-vllm_client = openai.OpenAI(base_url=API_BASE, api_key="dummy")
-vllm_client_async = openai.AsyncOpenAI(base_url=API_BASE, api_key="dummy")
 
 # Create router for chat endpoints
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
@@ -67,6 +62,12 @@ async def chat_completions(
     - Standard OpenAI chat completion response
     - Additional field 'generated_files' with list of generated file URLs
     """
+    try:
+        _, provider_id, provider_model = model_gateway.resolve_model(model)
+        async_client = model_gateway.get_async_client(provider_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Model routing error: {exc}")
+
     # Check if any message contains thread_id
     existing_thread_id = None
     if isinstance(messages[-1], dict) and "thread_id" in messages[-1]:
@@ -133,8 +134,8 @@ async def chat_completions(
 
                 while not finished:
                     # 使用异步客户端
-                    response = await vllm_client_async.chat.completions.create(
-                        model=model,
+                    response = await async_client.chat.completions.create(
+                        model=provider_model,
                         messages=vllm_messages,
                         temperature=temperature,
                         stream=True,
@@ -266,6 +267,8 @@ async def chat_completions(
 
                 # Add thread_id to final chunk
                 final_chunk_data["thread_id"] = current_thread_id
+                final_chunk_data["provider_id"] = provider_id
+                final_chunk_data["resolved_model"] = provider_model
 
                 final_chunk = {
                     "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
@@ -299,8 +302,8 @@ async def chat_completions(
 
             while not finished:
                 # Use async client to avoid blocking
-                response = await vllm_client_async.chat.completions.create(
-                    model=model,
+                response = await async_client.chat.completions.create(
+                    model=provider_model,
                     messages=vllm_messages,
                     temperature=temperature,
                     stream=True,
@@ -381,6 +384,8 @@ async def chat_completions(
 
             # Add thread_id to message object
             message_data["thread_id"] = current_thread_id
+            message_data["provider_id"] = provider_id
+            message_data["resolved_model"] = provider_model
 
             # Add files to message object (new OpenAI compatibility)
             if generated_files:

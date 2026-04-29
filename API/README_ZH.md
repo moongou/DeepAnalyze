@@ -29,7 +29,116 @@ API 服务器将在当前目录下创建一个新的 `workspace` 文件夹作为
 cd example
 python exampleRequest.py          # 请求示例
 python exampleOpenAI.py    # OpenAI 库示例
+python exampleAnalytics.py  # 分层分析接口示例
 ```
+
+## 🧱 分层分析架构（已实现）
+
+API 服务器现已内置分层分析流水线：
+
+- 存储层：本地文件 + 上传文件 + 内存元数据
+- 处理层：格式解析 + 数据质量检查 + 分组聚合
+- 计算层：浅/中/深分析（统计、相关性、趋势、异常扫描）
+- 交互层：`/v1/analytics` REST 接口
+
+本次实现中已明确移除以下可选组件：
+
+- Elasticsearch：已删减
+- Redis：已删减
+
+### 分析接口
+
+- `POST /v1/analytics/datasets/register`
+- `GET /v1/analytics/datasets`
+- `GET /v1/analytics/datasets/{dataset_id}`
+- `POST /v1/analytics/jobs/run`
+- `GET /v1/analytics/jobs`
+- `GET /v1/analytics/jobs/{job_id}`
+
+### 分析接口快速示例
+
+```python
+import requests
+
+base = "http://localhost:8200"
+
+dataset = requests.post(
+    f"{base}/v1/analytics/datasets/register",
+    json={
+        "name": "employee_data",
+        "source_type": "local_path",
+        "path": "./example/employee_data.csv",
+        "format": "csv"
+    },
+    timeout=60,
+).json()
+
+job = requests.post(
+    f"{base}/v1/analytics/jobs/run",
+    json={
+        "dataset_id": dataset["id"],
+        "depth": "deep",
+        "group_by": ["department"],
+        "time_column": "hire_date",
+        "target_column": "salary"
+    },
+    timeout=120,
+).json()
+
+print(job["status"])
+print(job["result"].get("report_markdown", ""))
+```
+
+## 🤖 多模型网关（已实现）
+
+当前系统在保留本地 vLLM 的同时，已支持多模型路由：
+
+- 本地 vLLM（内置默认）
+- OpenAI 端点
+- Microsoft Foundry 端点（OpenAI 兼容）
+- GitHub Models 端点（OpenAI 兼容）
+- 任意自定义 OpenAI 兼容端点
+
+### 模型管理后台接口
+
+- `GET /v1/admin/model-providers`
+- `POST /v1/admin/model-providers`
+- `DELETE /v1/admin/model-providers/{provider_id}`
+- `GET /v1/admin/model-catalog`
+- `POST /v1/admin/model-catalog`
+- `DELETE /v1/admin/model-catalog/{model_id}`
+
+### Provider 配置示例（OpenAI）
+
+```python
+import requests
+
+requests.post(
+    "http://localhost:8200/v1/admin/model-providers",
+    json={
+        "id": "openai",
+        "name": "OpenAI",
+        "type": "openai_compatible",
+        "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "enabled": True,
+    },
+    timeout=30,
+)
+
+requests.post(
+    "http://localhost:8200/v1/admin/model-catalog",
+    json={
+        "id": "gpt-4.1",
+        "provider_id": "openai",
+        "provider_model": "gpt-4.1",
+        "enabled": True,
+    },
+    timeout=30,
+)
+```
+
+之后在聊天请求中把 `model` 设为 `gpt-4.1` 即可调用。
 
 ## 📚 API 使用
 

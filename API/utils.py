@@ -4,6 +4,7 @@ Contains helper functions for file operations, workspace management, and more
 """
 
 import hashlib
+import importlib
 import os
 import json
 import re
@@ -21,19 +22,34 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from functools import partial
 
-from config import WORKSPACE_BASE_DIR, HTTP_SERVER_PORT
+from config import WORKSPACE_BASE_DIR, HTTP_SERVER_PORT, ANALYST_SYSTEM_PROMPT
 from shared_dependency_recovery import (
     build_dependency_install_block,
     extract_missing_python_packages,
     install_missing_python_packages,
 )
 
-try:
-    from demo.chat.yutu_zhanyilu import add_error_solution, search_errors, add_env_todo
-except Exception:
-    add_error_solution = None
-    search_errors = None
-    add_env_todo = None
+add_error_solution = None
+search_errors = None
+add_env_todo = None
+_YUTU_HELPERS_LOADED = False
+
+
+def _ensure_yutu_helpers() -> None:
+    """Lazily load yutu helpers to avoid startup side effects."""
+    global add_error_solution, search_errors, add_env_todo, _YUTU_HELPERS_LOADED
+    if _YUTU_HELPERS_LOADED:
+        return
+    _YUTU_HELPERS_LOADED = True
+    try:
+        module = importlib.import_module("demo.chat.yutu_zhanyilu")
+        add_error_solution = getattr(module, "add_error_solution", None)
+        search_errors = getattr(module, "search_errors", None)
+        add_env_todo = getattr(module, "add_env_todo", None)
+    except Exception:
+        add_error_solution = None
+        search_errors = None
+        add_env_todo = None
 
 
 SESSION_YUTU_FAILURES: Dict[str, Dict[str, Any]] = {}
@@ -329,6 +345,7 @@ def detect_execution_error(exe_output: str) -> dict:
     if error_type in {"ImportError", "FontNotFoundError", "UnicodeError", "FileNotFoundError"} or "tabulate" in error_message.lower():
         result["record_category"] = "base_environment_fixable"
 
+    _ensure_yutu_helpers()
     if search_errors is None:
         return result
 
@@ -362,6 +379,7 @@ def remember_failed_execution(session_id: str, error_info: dict, code_str: str, 
 
 
 def record_verified_yutu_solution(session_id: str, code_str: str, workspace_dir: str, exe_output: str) -> dict:
+    _ensure_yutu_helpers()
     pending = SESSION_YUTU_FAILURES.get(session_id)
     if not pending:
         return {"recorded": False}
@@ -447,6 +465,7 @@ def build_execution_guidance(error_info: Dict[str, Any]) -> str:
 
 
 def build_yutu_pitfall_context(limit: int = 5) -> str:
+    _ensure_yutu_helpers()
     if search_errors is None:
         return ""
     try:
@@ -508,9 +527,28 @@ def build_download_url(thread_id: str, rel_path: str) -> str:
     return f"http://localhost:{HTTP_SERVER_PORT}/{encoded}"
 
 
+def get_thread_workspace(thread_id: str) -> str:
+    """Get workspace directory path for one thread."""
+    safe_thread_id = re.sub(r"[^a-zA-Z0-9._-]", "_", str(thread_id or "thread"))
+    return os.path.join(WORKSPACE_BASE_DIR, safe_thread_id)
+
+
 def uniquify_path(target: Path) -> Path:
     """Return a unique path if target already exists"""
-    return target
+    target = Path(target)
+    if not target.exists():
+        return target
+
+    stem = target.stem
+    suffix = target.suffix
+    parent = target.parent
+    index = 1
+
+    while True:
+        candidate = parent / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index += 1
 
 
 def _normalize_openai_message_content(raw_content: Any) -> str:
@@ -563,6 +601,7 @@ def prepare_vllm_messages(
 ) -> List[Dict[str, str]]:
     """
     Convert incoming messages to vLLM format and inject DeepAnalyze template:
+    - Prepend analyst methodology as system prompt if no system message is present
     - Always wrap user message with "# Instruction" heading
     - Optionally append workspace file info under "# Data"
     """
@@ -573,6 +612,11 @@ def prepare_vllm_messages(
         content = _normalize_openai_message_content(raw_content)
         if role:
             vllm_messages.append({"role": role, "content": content})
+
+    # Inject analyst methodology as system prompt if none is present
+    has_system = any(m.get("role") == "system" for m in vllm_messages)
+    if not has_system:
+        vllm_messages.insert(0, {"role": "system", "content": ANALYST_SYSTEM_PROMPT})
 
     # Locate last user message
     last_user_idx: Optional[int] = None
@@ -1044,11 +1088,17 @@ def start_http_server():
         directory=WORKSPACE_BASE_DIR
     )
 
-    with socketserver.ThreadingTCPServer(("", HTTP_SERVER_PORT), handler) as httpd:
-        httpd.allow_reuse_address = True
-        print(f"HTTP Server serving {WORKSPACE_BASE_DIR} at port {HTTP_SERVER_PORT}")
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("HTTP server shutting down...")
-            httpd.shutdown()
+    class ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    try:
+        with ReusableThreadingTCPServer(("", HTTP_SERVER_PORT), handler) as httpd:
+            print(f"HTTP Server serving {WORKSPACE_BASE_DIR} at port {HTTP_SERVER_PORT}")
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                print("HTTP server shutting down...")
+                httpd.shutdown()
+    except OSError as exc:
+        print(f"HTTP server failed to start on port {HTTP_SERVER_PORT}: {exc}")

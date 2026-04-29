@@ -66,6 +66,7 @@ if os.path.exists(_FONT_DIR):
 import chardet
 from docx import Document
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
 import pandas as pd
 from datetime import datetime
 
@@ -4602,27 +4603,129 @@ async def cancel_organize(data: dict, username: str = ""):
 
 
 # ========== 数据库连接与查询 API ==========
-def build_db_url(db_type: str, config: dict) -> str:
-    """构建 SQLAlchemy 连接字符串"""
-    user = config.get("user", "")
-    password = config.get("password", "")
-    host = config.get("host", "localhost")
-    port = config.get("port", "")
-    database = config.get("database", "")
+DB_TYPE_ALIASES = {
+    "postgres": "postgresql",
+    "postgresql": "postgresql",
+    "mysql": "mysql",
+    "mssql": "mssql",
+    "sqlserver": "mssql",
+    "sqlite": "sqlite",
+    "oracle": "oracle",
+}
 
-    if db_type == "mysql":
-        return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?charset=utf8mb4"
-    elif db_type == "postgresql":
-        return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}"
-    elif db_type == "mssql":
-        return f"mssql+pymssql://{user}:{password}@{host}:{port}/{database}"
-    elif db_type == "sqlite":
-        return f"sqlite:///{database}"
-    elif db_type == "oracle":
-        # 注意：oracle 可能需要 cx_oracle 或 oracledb
-        return f"oracle+cx_oracle://{user}:{password}@{host}:{port}/{database}"
+DB_DEFAULT_PORTS = {
+    "mysql": 3306,
+    "postgresql": 5432,
+    "mssql": 1433,
+    "oracle": 1521,
+}
+
+DB_DRIVER_NAMES = {
+    "mysql": "mysql+pymysql",
+    "postgresql": "postgresql+psycopg2",
+    "mssql": "mssql+pymssql",
+    "oracle": "oracle+cx_oracle",
+}
+
+DB_DRIVER_PACKAGES = {
+    "mysql": "pymysql",
+    "postgresql": "psycopg2-binary",
+    "mssql": "pymssql",
+    "oracle": "cx_Oracle",
+}
+
+
+def normalize_db_type(db_type: Optional[str]) -> str:
+    normalized = str(db_type or "").strip().lower()
+    if not normalized:
+        raise ValueError("缺少 db_type，请选择数据库类型")
+    resolved = DB_TYPE_ALIASES.get(normalized)
+    if not resolved:
+        supported = ", ".join(sorted(set(DB_TYPE_ALIASES.values())))
+        raise ValueError(f"不支持的数据库类型: {db_type}。支持: {supported}")
+    return resolved
+
+
+def build_db_url(db_type: str, config: dict) -> str:
+    """构建 SQLAlchemy 连接字符串（使用 URL.create，避免特殊字符导致解析错误）"""
+    db_type = normalize_db_type(db_type)
+    config = config or {}
+
+    if db_type == "sqlite":
+        database = str(config.get("database", "")).strip()
+        if not database:
+            raise ValueError("SQLite 连接需要提供数据库文件路径")
+        if database == ":memory:":
+            return "sqlite:///:memory:"
+        return URL.create(drivername="sqlite", database=database).render_as_string(hide_password=False)
+
+    drivername = DB_DRIVER_NAMES[db_type]
+    host = str(config.get("host", "localhost") or "localhost").strip() or "localhost"
+    database = str(config.get("database", "")).strip()
+    if not database:
+        raise ValueError("请填写数据库名称")
+
+    port_raw = str(config.get("port", "") or "").strip()
+    if port_raw:
+        if not port_raw.isdigit():
+            raise ValueError("端口必须为数字")
+        port = int(port_raw)
     else:
-        raise ValueError(f"Unsupported database type: {db_type}")
+        port = DB_DEFAULT_PORTS.get(db_type)
+
+    user = str(config.get("user", "") or "").strip() or None
+    password_raw = config.get("password", None)
+    password = None if password_raw in (None, "") else str(password_raw)
+    query = {"charset": "utf8mb4"} if db_type == "mysql" else None
+
+    return URL.create(
+        drivername=drivername,
+        username=user,
+        password=password,
+        host=host,
+        port=port,
+        database=database,
+        query=query,
+    ).render_as_string(hide_password=False)
+
+
+def build_db_engine(db_type: str, config: dict):
+    db_type = normalize_db_type(db_type)
+    url = build_db_url(db_type, config)
+
+    connect_args = {}
+    if db_type in ("mysql", "postgresql"):
+        connect_args["connect_timeout"] = 5
+    elif db_type == "mssql":
+        connect_args["login_timeout"] = 5
+
+    engine_kwargs = {"pool_pre_ping": True}
+    if connect_args:
+        engine_kwargs["connect_args"] = connect_args
+    return create_engine(url, **engine_kwargs)
+
+
+def format_db_error(exc: Exception, db_type: Optional[str]) -> str:
+    raw_message = str(exc).strip() or exc.__class__.__name__
+    # 避免把连接串中的明文密码返回前端
+    safe_message = re.sub(r"://([^:/@]+):([^@]+)@", r"://\1:***@", raw_message)
+    lower = safe_message.lower()
+
+    try:
+        normalized_type = normalize_db_type(db_type)
+    except Exception:
+        normalized_type = str(db_type or "").strip().lower()
+
+    driver_pkg = DB_DRIVER_PACKAGES.get(normalized_type)
+    if driver_pkg and ("no module named" in lower or "can't load plugin" in lower):
+        return f"缺少数据库驱动，请安装 `{driver_pkg}` 后重试。原始错误: {safe_message}"
+    if "password authentication failed" in lower or "access denied" in lower:
+        return "数据库账号或密码错误，请检查连接配置"
+    if "connection refused" in lower or "can't connect" in lower:
+        return "无法连接到数据库服务，请确认主机、端口和数据库服务状态"
+    if "could not translate host name" in lower or "name or service not known" in lower:
+        return "数据库主机名无法解析，请检查主机地址配置"
+    return safe_message
 
 
 @app.post("/api/db/test")
@@ -4631,15 +4734,16 @@ async def test_db_connection(body: dict = Body(...)):
     try:
         db_type = body.get("db_type")
         config = body.get("config", {})
-        url = build_db_url(db_type, config)
-        # SQLite 不需要超时设置，其他 DB 设置 5 秒超时
-        engine = create_engine(url, connect_args={"connect_timeout": 5} if db_type != "sqlite" else {})
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        engine = build_db_engine(db_type, config)
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        finally:
+            engine.dispose()
         return {"success": True, "message": "Connection successful"}
     except Exception as e:
         print(f"DB Test Error: {e}")
-        return {"success": False, "message": str(e)}
+        return {"success": False, "message": format_db_error(e, body.get("db_type"))}
 
 
 @app.post("/api/db/generate-sql")
@@ -4704,11 +4808,12 @@ async def execute_db_sql(body: dict = Body(...)):
         if not sql:
             return {"success": False, "message": "SQL is required"}
 
-        url = build_db_url(db_type, config)
-        engine = create_engine(url)
-
-        # 使用 pandas 执行查询
-        df = pd.read_sql(sql, engine)
+        engine = build_db_engine(db_type, config)
+        try:
+            # 使用 pandas 执行查询
+            df = pd.read_sql(sql, engine)
+        finally:
+            engine.dispose()
 
         workspace_dir = get_session_workspace(session_id, username)
         file_ext = ".csv" if format == "csv" else ".json"
@@ -4738,7 +4843,7 @@ async def execute_db_sql(body: dict = Body(...)):
         }
     except Exception as e:
         print(f"Execute DB SQL Error: {e}")
-        return {"success": False, "message": str(e)}
+        return {"success": False, "message": format_db_error(e, body.get("db_type"))}
 
 
 @app.get("/api/kb/settings")
