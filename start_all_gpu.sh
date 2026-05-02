@@ -182,7 +182,7 @@ fi
 echo "[2/3] Starting Backend API..."
 echo "      启动后端 API..."
 cd "$SCRIPT_DIR/demo/chat" || exit
-nohup "$PYTHON_BIN" backend.py > "$LOG_DIR/backend.log" 2>&1 &
+nohup "$PYTHON_BIN" API/main.py > "$LOG_DIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 echo "Backend API started with PID: $BACKEND_PID"
 

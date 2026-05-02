@@ -70,9 +70,9 @@ done
 
 # 4. Start Backend API
 echo "[2/3] Starting Backend API..."
-cd "$SCRIPT_DIR/demo/chat" || exit
+cd "$SCRIPT_DIR/API" || exit
 # Ensure MODEL_PATH matches what MLX server might return or ignore
-nohup "$PYTHON_BIN" backend.py > "$LOG_DIR/backend.log" 2>&1 &
+nohup "$PYTHON_BIN" main.py > "$LOG_DIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 echo "Backend API started with PID: $BACKEND_PID"
 

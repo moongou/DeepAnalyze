@@ -34,12 +34,76 @@ class Storage:
         self.skill_policy_decisions: Dict[str, Dict[str, Any]] = {}
 
         os.makedirs(WORKSPACE_BASE_DIR, exist_ok=True)
+        self._db_path = os.path.join(WORKSPACE_BASE_DIR, "_deepanalyze.db")
+        self._db_conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._db_conn.row_factory = sqlite3.Row
+        self._init_main_db()
+
         self._audit_db_path = os.path.join(WORKSPACE_BASE_DIR, "_governance_audit.db")
         self._audit_conn = sqlite3.connect(self._audit_db_path, check_same_thread=False)
         self._audit_conn.row_factory = sqlite3.Row
         self._init_audit_db()
 
         self._lock = threading.Lock()
+
+    def _init_main_db(self) -> None:
+        cur = self._db_conn.cursor()
+        cur.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL REFERENCES users(username),
+                key_hash TEXT NOT NULL,
+                key_prefix TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT 'default',
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_api_keys_username
+            ON api_keys(username);
+
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                messages_json TEXT NOT NULL DEFAULT '[]',
+                files_data_json TEXT NOT NULL DEFAULT '{}',
+                side_tasks_json TEXT NOT NULL DEFAULT '{}',
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_projects_username
+            ON projects(username);
+
+            CREATE TABLE IF NOT EXISTS knowledge_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                error_hash TEXT UNIQUE NOT NULL,
+                error_type TEXT NOT NULL,
+                error_message TEXT NOT NULL,
+                solution TEXT NOT NULL DEFAULT '',
+                code_context TEXT NOT NULL DEFAULT '',
+                exe_output TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                verified_count INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_knowledge_type
+            ON knowledge_entries(error_type);
+
+            CREATE INDEX IF NOT EXISTS idx_knowledge_hash
+            ON knowledge_entries(error_hash);
+            """
+        )
+        self._db_conn.commit()
 
     def _init_audit_db(self) -> None:
         cur = self._audit_conn.cursor()
@@ -612,6 +676,178 @@ class Storage:
             if not row:
                 return None
             return self._row_to_policy_decision(row)
+
+
+    # --- User & Auth ---
+
+    def create_user(self, username: str, password_hash: str) -> Dict[str, Any]:
+        with self._lock:
+            now = int(time.time())
+            self._db_conn.execute(
+                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                (username, password_hash, now),
+            )
+            self._db_conn.commit()
+            return {"username": username, "password_hash": password_hash, "created_at": now}
+
+    def get_user(self, username: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            cur = self._db_conn.execute("SELECT * FROM users WHERE username = ?", (username,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def list_users(self) -> List[str]:
+        with self._lock:
+            cur = self._db_conn.execute("SELECT username FROM users")
+            return [r["username"] for r in cur.fetchall()]
+
+    def create_api_key(self, key_id: str, username: str, key_hash: str, key_prefix: str, label: str) -> None:
+        with self._lock:
+            now = int(time.time())
+            self._db_conn.execute(
+                "INSERT INTO api_keys (id, username, key_hash, key_prefix, label, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (key_id, username, key_hash, key_prefix, label, now),
+            )
+            self._db_conn.commit()
+
+    def verify_api_key(self, api_key: str) -> Optional[str]:
+        from auth_service import verify_password
+        with self._lock:
+            cur = self._db_conn.execute("SELECT id, key_hash, username FROM api_keys")
+            for row in cur.fetchall():
+                if verify_password(api_key, row["key_hash"]):
+                    return row["username"]
+            return None
+
+    def list_api_keys(self, username: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            cur = self._db_conn.execute(
+                "SELECT id, key_prefix, label, created_at FROM api_keys WHERE username = ?",
+                (username,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def delete_api_key(self, key_id: str, username: str) -> bool:
+        with self._lock:
+            cur = self._db_conn.execute(
+                "DELETE FROM api_keys WHERE id = ? AND username = ?", (key_id, username)
+            )
+            self._db_conn.commit()
+            return cur.rowcount > 0
+
+    # --- Projects ---
+
+    def save_project(
+        self,
+        username: str,
+        session_id: str,
+        name: str,
+        messages_json: str,
+        files_data_json: str,
+        side_tasks_json: str,
+    ) -> str:
+        with self._lock:
+            project_id = f"proj-{uuid.uuid4().hex[:16]}"
+            now = int(time.time())
+            self._db_conn.execute(
+                """INSERT INTO projects (id, username, session_id, name, messages_json, files_data_json, side_tasks_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (project_id, username, session_id, name, messages_json, files_data_json, side_tasks_json, now),
+            )
+            self._db_conn.commit()
+            return project_id
+
+    def list_projects(self, username: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            cur = self._db_conn.execute(
+                "SELECT id, username, session_id, name, messages_json, files_data_json, side_tasks_json, created_at FROM projects WHERE username = ? ORDER BY created_at DESC",
+                (username,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def get_project(self, project_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            cur = self._db_conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,))
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def delete_project(self, project_id: str) -> bool:
+        with self._lock:
+            cur = self._db_conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            self._db_conn.commit()
+            return cur.rowcount > 0
+
+    def check_project_name_exists(self, username: str, name: str) -> bool:
+        with self._lock:
+            cur = self._db_conn.execute(
+                "SELECT 1 FROM projects WHERE username = ? AND name = ?", (username, name)
+            )
+            return cur.fetchone() is not None
+
+    # --- Knowledge (Yutu) ---
+
+    def add_knowledge_entry(
+        self, error_hash: str, error_type: str, error_message: str,
+        solution: str = "", code_context: str = "", exe_output: str = "", tags: str = ""
+    ) -> int:
+        with self._lock:
+            now = int(time.time())
+            cur = self._db_conn.execute(
+                """INSERT OR REPLACE INTO knowledge_entries
+                   (error_hash, error_type, error_message, solution, code_context, exe_output, tags, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (error_hash, error_type, error_message, solution, code_context, exe_output, tags, now, now),
+            )
+            self._db_conn.commit()
+            return cur.lastrowid
+
+    def search_knowledge_entries(self, keyword: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            cur = self._db_conn.execute(
+                """SELECT * FROM knowledge_entries
+                   WHERE error_message LIKE ? OR error_type LIKE ? OR tags LIKE ?
+                   ORDER BY updated_at DESC LIMIT 50""",
+                (f"%{keyword}%", f"%{keyword}%", f"%{keyword}%"),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def get_knowledge_entry_by_hash(self, error_hash: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            cur = self._db_conn.execute(
+                "SELECT * FROM knowledge_entries WHERE error_hash = ?", (error_hash,)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def update_knowledge_entry(self, entry_id: int, patch: Dict[str, Any]) -> bool:
+        with self._lock:
+            patch["updated_at"] = int(time.time())
+            cols = ", ".join(f"{k} = ?" for k in patch)
+            vals = list(patch.values()) + [entry_id]
+            cur = self._db_conn.execute(
+                f"UPDATE knowledge_entries SET {cols} WHERE id = ?", vals
+            )
+            self._db_conn.commit()
+            return cur.rowcount > 0
+
+    def delete_knowledge_entry(self, entry_id: int) -> bool:
+        with self._lock:
+            cur = self._db_conn.execute("DELETE FROM knowledge_entries WHERE id = ?", (entry_id,))
+            self._db_conn.commit()
+            return cur.rowcount > 0
+
+    def list_knowledge_entries(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            cur = self._db_conn.execute("SELECT * FROM knowledge_entries ORDER BY updated_at DESC")
+            return [dict(r) for r in cur.fetchall()]
+
+    def increment_knowledge_verified_count(self, error_hash: str) -> None:
+        with self._lock:
+            self._db_conn.execute(
+                "UPDATE knowledge_entries SET verified_count = verified_count + 1, updated_at = ? WHERE error_hash = ?",
+                (int(time.time()), error_hash),
+            )
+            self._db_conn.commit()
 
 
 # Global storage instance

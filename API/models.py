@@ -638,3 +638,154 @@ class ReleaseGateDecisionsListResponse(BaseModel):
     """Release gate decision list response."""
     object: Literal["list"] = "list"
     data: List[ReleaseGateDecisionObject]
+
+
+# --- Auth Models ---
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    username: str
+
+
+class ApiKeyCreateRequest(BaseModel):
+    label: str = Field(default="default", max_length=64)
+
+
+class ApiKeyObject(BaseModel):
+    id: str
+    key_prefix: str
+    label: str
+    created_at: int
+
+
+class ApiKeysListResponse(BaseModel):
+    object: Literal["list"] = "list"
+    data: List[ApiKeyObject]
+
+
+# --- Project Models ---
+
+class ProjectSaveRequest(BaseModel):
+    session_id: str
+    name: str = Field(..., max_length=128)
+    messages_json: str = "[]"
+    files_data_json: str = "{}"
+    side_tasks_json: str = "{}"
+
+
+class ProjectObject(BaseModel):
+    id: str
+    username: str
+    session_id: str
+    name: str
+    created_at: int
+
+
+class ProjectsListResponse(BaseModel):
+    object: Literal["list"] = "list"
+    data: List[ProjectObject]
+
+
+# --- Knowledge Base Models ---
+
+class KnowledgeEntryAddRequest(BaseModel):
+    error_type: str
+    error_message: str
+    solution: str = ""
+    code_context: str = ""
+    tags: str = ""
+
+
+class KnowledgeEntryUpdateRequest(BaseModel):
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    solution: Optional[str] = None
+    code_context: Optional[str] = None
+    tags: Optional[str] = None
+
+
+class KnowledgeEntryObject(BaseModel):
+    id: int
+    error_type: str
+    error_message: str
+    solution: str
+    code_context: str
+    tags: str
+    created_at: int
+    updated_at: int
+    verified_count: int
+
+
+class KnowledgeSearchRequest(BaseModel):
+    keyword: str
+
+
+class KnowledgeEntriesListResponse(BaseModel):
+    object: Literal["list"] = "list"
+    data: List[KnowledgeEntryObject]
+
+
+# --- Database Connectivity Models ---
+
+class DatabaseTestRequest(BaseModel):
+    db_type: str
+    host: str
+    port: int
+    user: str
+    password: str = ""
+    database: str
+
+
+class DatabaseSqlGenerateRequest(BaseModel):
+    db_type: str
+    schema_info: str
+    question: str
+
+
+class DatabaseExecuteRequest(BaseModel):
+    db_type: str
+    host: str
+    port: int
+    user: str
+    password: str = ""
+    database: str
+    sql: str
+
+
+# --- Export Models ---
+
+class ExportReportRequest(BaseModel):
+    messages: List[Dict[str, Any]]
+    workspace_dir: str
+    format: Literal["md", "pdf", "docx", "pptx"] = "md"
+
+
+class ExportReportResponse(BaseModel):
+    file_url: str
+    filename: str
+    format: str
+
+
+# --- Settings Models ---
+
+class SettingsObject(BaseModel):
+    hardware: str = "mlx"
+    defaults: Dict[str, Any] = Field(default_factory=dict)
+
+
+class KnowledgeBaseSettingsRequest(BaseModel):
+    onyx_base_url: str = ""
+    onyx_api_key: str = ""
+    dify_base_url: str = ""
+    dify_api_key: str = ""

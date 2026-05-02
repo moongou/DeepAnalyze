@@ -27,6 +27,8 @@ from config import (
 from models import HealthResponse
 from utils import start_http_server
 from storage import storage
+from middleware import create_security_middleware
+from logging_config import log, request_id_var
 
 # Safety constants
 # MAX_CLEANUP_ERRORS = 10
@@ -47,6 +49,9 @@ def create_app() -> FastAPI:
         allow_headers=CORS_ALLOW_HEADERS,
     )
 
+    # Add rate limiting + request tracing as pure ASGI middleware
+    create_security_middleware(app)
+
     # Include all routers
     from file_api import router as file_router
     from models_api import router as models_router
@@ -56,6 +61,11 @@ def create_app() -> FastAPI:
     from marketplace_api import router as marketplace_router
     from analysis_workflow_api import router as analysis_workflow_router
     from release_governance_api import router as release_governance_router
+    from auth_api import router as auth_router
+    from projects_api import router as projects_router
+    from knowledge_api import router as knowledge_router
+    from database_api import router as database_router
+    from export_api import router as export_router
 
     app.include_router(file_router)
     app.include_router(models_router)
@@ -65,6 +75,11 @@ def create_app() -> FastAPI:
     app.include_router(marketplace_router)
     app.include_router(analysis_workflow_router)
     app.include_router(release_governance_router)
+    app.include_router(auth_router)
+    app.include_router(projects_router)
+    app.include_router(knowledge_router)
+    app.include_router(database_router)
+    app.include_router(export_router)
 
     # Health check endpoint
     @app.get("/health", response_model=HealthResponse)
@@ -85,16 +100,19 @@ def main():
     print(f"   - File Server: http://localhost:{HTTP_SERVER_PORT}")
     print(f"   - Workspace: workspace")
     print("\n📖 API Endpoints:")
+    print("   - Auth API: /v1/auth")
     print("   - Models API: /v1/models")
     print("   - Files API: /v1/files")
     print("   - Chat API: /v1/chat/completions")
     print("   - Admin API: /v1/admin")
-    print("   - Model Provider Admin: /v1/admin/model-providers")
-    print("   - Model Catalog Admin: /v1/admin/model-catalog")
     print("   - Analytics API: /v1/analytics")
     print("   - Marketplace API: /v1/marketplace")
     print("   - Analysis Workflow API: /v1/analysis-workflows")
     print("   - Governance API: /v1/governance")
+    print("   - Projects API: /v1/projects")
+    print("   - Knowledge API: /v1/knowledge")
+    print("   - Database API: /v1/database")
+    print("   - Export API: /v1/export")
 
     # Start HTTP file server in a separate thread
     http_thread = threading.Thread(target=start_http_server, daemon=True)

@@ -23,8 +23,6 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogFooter,
-  DialogDescription,
 } from "@/components/ui/dialog";
 import {
   ResizablePanelGroup,
@@ -68,11 +66,26 @@ import {
   ListTree,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Tree, NodeApi } from "react-arborist";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/hooks/useAuth";
+import { useDatabase, normalizeDbType as normalizeDbTypeForRequest, getDefaultPort as getDefaultPortForDbType } from "@/hooks/useDatabase";
+import { useProjects } from "@/hooks/useProjects";
+import { useKnowledgeBase } from "@/hooks/useKnowledgeBase";
+import { useWorkspace } from "@/hooks/useWorkspace";
+import { AgentIntroDialog } from "@/components/dialogs/AgentIntroDialog";
+import { SideGuidanceDialog } from "@/components/dialogs/SideGuidanceDialog";
+import { TaskTreeDialog, type TaskTreeNode, parseTaskTreeContent } from "@/components/dialogs/TaskTreeDialog";
+import { ProjectSaveDialog } from "@/components/dialogs/ProjectSaveDialog";
+import { ProjectManagerDialog } from "@/components/dialogs/ProjectManagerDialog";
+import { BackupRestoreDialog } from "@/components/dialogs/BackupRestoreDialog";
+import { AuthDialog } from "@/components/dialogs/AuthDialog";
+import { LogoutConfirmDialog } from "@/components/dialogs/LogoutConfirmDialog";
+import { DatabaseDialog } from "@/components/dialogs/DatabaseDialog";
+import { YutuPanel } from "@/components/dialogs/YutuPanel";
+import { SimpleSettingsDialog } from "@/components/dialogs/SimpleSettingsDialog";
+import { KnowledgeSettingsDialog } from "@/components/dialogs/KnowledgeSettingsDialog";
+import { SystemSettingsDialog } from "@/components/dialogs/SystemSettingsDialog";
 import { FileIcon, defaultStyles } from "react-file-icon";
 import {
   Select,
@@ -92,7 +105,6 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 interface Message {
   id: string;
@@ -109,67 +121,6 @@ interface FileAttachment {
   size: number;
   type: string;
   url: string;
-}
-
-interface TaskTreeNode {
-  id: string;
-  name: string;
-  description: string;
-  children?: TaskTreeNode[];
-}
-
-/**
- * Robustly extract task tree JSON from content that may contain
- * extra text, markdown code fences, or other non-JSON material.
- * Returns parsed { tasks: TaskTreeNode[] } or null.
- */
-function parseTaskTreeContent(raw: string): { tasks: TaskTreeNode[] } | null {
-  if (!raw) return null;
-  let text = raw.trim();
-
-  // Strip markdown code fences if present (```json ... ``` or ``` ... ```)
-  text = text.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?\s*```\s*$/, "");
-  text = text.trim();
-
-  // Try direct parse first (ideal case: content is pure JSON)
-  try {
-    const parsed = JSON.parse(text);
-    if (parsed && Array.isArray(parsed.tasks)) return parsed;
-  } catch { /* continue to heuristic extraction */ }
-
-  // Heuristic: find the outermost { ... } that contains "tasks"
-  const firstBrace = text.indexOf("{");
-  if (firstBrace === -1) return null;
-
-  // Find matching closing brace by counting
-  let depth = 0;
-  let lastBrace = -1;
-  for (let i = firstBrace; i < text.length; i++) {
-    if (text[i] === "{") depth++;
-    else if (text[i] === "}") {
-      depth--;
-      if (depth === 0) { lastBrace = i; break; }
-    }
-  }
-
-  if (lastBrace === -1) return null;
-
-  try {
-    const jsonStr = text.slice(firstBrace, lastBrace + 1);
-    const parsed = JSON.parse(jsonStr);
-    if (parsed && Array.isArray(parsed.tasks)) return parsed;
-  } catch { /* fall through */ }
-
-  // Last resort: try to find a JSON array for "tasks" key
-  const tasksMatch = text.match(/"tasks"\s*:\s*(\[[\s\S]*\])/);
-  if (tasksMatch) {
-    try {
-      const tasks = JSON.parse(tasksMatch[1]);
-      if (Array.isArray(tasks)) return { tasks };
-    } catch { /* give up */ }
-  }
-
-  return null;
 }
 
 interface WorkspaceFile {
@@ -487,57 +438,6 @@ const StreamingSectionBody = memo(
     prev.renderSectionContent === next.renderSectionContent
 );
 
-// TaskTree 任务节点组件
-const TaskTreeItem = memo(function TaskTreeItem({
-  node,
-  selectedTasks,
-  toggleTask,
-  depth,
-}: {
-  node: TaskTreeNode;
-  selectedTasks: Set<string>;
-  toggleTask: (id: string, node: TaskTreeNode) => void;
-  depth: number;
-}) {
-  const isChecked = selectedTasks.has(node.id);
-  const hasChildren = node.children && node.children.length > 0;
-  const allChildrenChecked = hasChildren && node.children!.every(c => selectedTasks.has(c.id));
-
-  return (
-    <div style={{ paddingLeft: depth * 20 }}>
-      <div className="flex items-center gap-2 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2">
-        <Checkbox
-          checked={hasChildren ? allChildrenChecked : isChecked}
-          onCheckedChange={() => toggleTask(node.id, node)}
-          className="data-[state=checked]:bg-amber-600 data-[state=checked]:border-amber-600"
-        />
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium text-gray-800 dark:text-gray-200">
-            <span className="text-amber-600 dark:text-amber-400 mr-1 font-mono">[{node.id}]</span>
-            {node.name}
-          </div>
-          {node.description && (
-            <div className="text-xs text-gray-500 dark:text-gray-400 mt-0.5 truncate">{node.description}</div>
-          )}
-        </div>
-      </div>
-      {hasChildren && (
-        <div>
-          {node.children!.map(child => (
-            <TaskTreeItem
-              key={child.id}
-              node={child}
-              selectedTasks={selectedTasks}
-              toggleTask={toggleTask}
-              depth={depth + 1}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-});
-
 // 智能体行为原则配置
 const ANALYSIS_PRINCIPLES = [
   { label: "自我纠错", desc: "自动检测错误并尝试修复，最多重试3次", key: "selfCorrectionEnabled" },
@@ -561,6 +461,34 @@ export function ThreePanelInterface() {
 
   // Session ID：用于区分不同浏览器用户（无需登录）
   const [sessionId, setSessionId] = useState<string>("");
+  const CHAT_STORAGE_KEY = "chat_messages_v1";
+
+  const {
+    currentUser, setCurrentUser, isLoggedIn, setIsLoggedIn,
+    showAuthModal, setShowAuthModal,
+    isLoginMode, setIsLoginMode,
+    authUsername, setAuthUsername,
+    authPassword, setAuthPassword,
+    registeredUsers,
+    showLogoutConfirm, setShowLogoutConfirm,
+    handleAuth, handleLogout, performLogout: performLogoutRaw,
+    loadRegisteredUsers,
+    userRef,
+  } = useAuth({
+    onWorkspaceRefresh: async () => {
+      // Workspace refresh is handled by the polling useEffect
+    },
+    clearMessages: () => {
+      setMessages([{
+        id: "welcome-1",
+        content: "您好！很高兴和您一起运用大数据开展海关风险分析。我将按您的分析目标和要求，协助您深入分析进出口业务数据，运用规律分析、统计分析、对比分析、关联分析等方法，开展多角度逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
+        sender: "ai",
+        timestamp: new Date(),
+        localOnly: true,
+      }]);
+    },
+    setSessionId,
+  });
 
   // 步骤导航相关状态
   const [activeSection, setActiveSection] = useState<string>("");
@@ -580,44 +508,21 @@ export function ThreePanelInterface() {
   const [historyInputs, setHistoryInputs] = useState<string[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   // 抑制轮询刷新的计数器（>0 时轮询不更新状态）
-  const suppressWorkspaceRefreshCount = useRef(0);
-  // 项目加载期间文件恢复专用抑制（防止轮询干扰文件恢复）
-  const suppressDuringFileRestore = useRef(false);
-  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
-  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
-  const [workspaceTree, setWorkspaceTree] = useState<WorkspaceNode | null>(
-    null
-  );
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const treeContainerRef = useRef<HTMLDivElement>(null);
-  const [treeSize, setTreeSize] = useState<{ w: number; h: number }>({
-    w: 0,
-    h: 0,
-  });
-  // 监听容器大小变化，更新 Tree 尺寸
-  useEffect(() => {
-    if (!treeContainerRef.current) return;
-
-    const container = treeContainerRef.current;
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        setTreeSize({ w: width, h: height });
-        console.log("[WorkspaceTree] Resized:", width, height);
-      }
-    });
-
-    observer.observe(container);
-    // 初始设置一次
-    setTreeSize({
-      w: container.clientWidth,
-      h: container.clientHeight,
-    });
-
-    return () => {
-      observer.disconnect();
-    };
-  }, [mounted]);
+  const {
+    attachments, setAttachments,
+    workspaceFiles, setWorkspaceFiles,
+    workspaceTree, setWorkspaceTree,
+    expanded, toggleExpand,
+    isUploading, setIsUploading,
+    treeContainerRef, treeSize,
+    suppressRefreshCount: suppressWorkspaceRefreshCount,
+    suppressDuringFileRestore,
+    loadFiles: loadWorkspaceFiles,
+    loadTree: loadWorkspaceTree,
+    refresh: refreshWorkspace,
+    deleteFile,
+    deleteDir,
+  } = useWorkspace({ sessionId, userRef });
 
   const [selectedCodeSection, setSelectedCodeSection] = useState<string>("");
   const [codeEditorContent, setCodeEditorContent] = useState("");
@@ -642,7 +547,6 @@ export function ThreePanelInterface() {
   const [sideGuidanceIndex, setSideGuidanceIndex] = useState(-1);
 
   // 数据库连接相关状态
-  const [showDatabaseDialog, setShowDatabaseDialog] = useState(false);
   const [showSystemSettings, setShowSystemSettings] = useState(false);
   const [systemSettingsTab, setSystemSettingsTab] = useState<"model" | "database" | "knowledge">("model");
   const [modelProviderConfig, setModelProviderConfig] = useState<ModelProviderConfig>(
@@ -661,121 +565,57 @@ export function ThreePanelInterface() {
     message: "尚未获取模型列表",
     testedAt: null,
   });
-  const [dbType, setDbType] = useState("mysql");
-  const [dbConfig, setDbConfig] = useState({
-    host: "localhost",
-    port: "3306",
-    user: "root",
-    password: "",
-    database: "",
+  const {
+    showDialog: showDatabaseDialog,
+    setShowDialog: setShowDatabaseDialog,
+    dbType, setDbType: handleDbTypeChange,
+    dbConfig, setDbConfig,
+    dbPrompt, setDbPrompt,
+    dbGeneratedSql, setDbGeneratedSql,
+    dbDatasetName, setDbDatasetName,
+    dbExecuteMode, setDbExecuteMode,
+    isTestingDb, isGeneratingSql, isExecutingDbSql, isDbTested,
+    testConnection: handleTestConnection,
+    generateSql: handleGenerateSql,
+    executeSql: handleExecuteDbSql,
+    buildPayload: buildDbRequestPayload,
+    workspaceFilesRef,
+  } = useDatabase({
+    sessionId,
+    currentUser,
+    modelProviderConfig,
+    onRefreshWorkspace: refreshWorkspace,
   });
-  const [dbPrompt, setDbPrompt] = useState("");
-  const [dbGeneratedSql, setDbGeneratedSql] = useState("");
-  const [dbDatasetName, setDbDatasetName] = useState("query_result");
-  const [dbExecuteMode, setDbExecuteMode] = useState<"overwrite" | "append">(
-    "overwrite"
-  );
-  const [isTestingDb, setIsTestingDb] = useState(false);
-  const [isGeneratingSql, setIsGeneratingSql] = useState(false);
-  const [isExecutingDbSql, setIsExecutingDbSql] = useState(false);
-  const [isDbTested, setIsDbTested] = useState(false);
 
-  const normalizeDbTypeForRequest = (type: string) => {
-    const normalized = (type || "").toLowerCase();
-    if (normalized === "postgres") return "postgresql";
-    if (normalized === "sqlserver") return "mssql";
-    return normalized || "mysql";
-  };
+  useEffect(() => {
+    workspaceFilesRef.current = workspaceFiles;
+  }, [workspaceFiles, workspaceFilesRef]);
 
-  const getDefaultPortForDbType = (type: string) => {
-    const normalized = normalizeDbTypeForRequest(type);
-    if (normalized === "mysql") return "3306";
-    if (normalized === "postgresql") return "5432";
-    if (normalized === "mssql") return "1433";
-    if (normalized === "oracle") return "1521";
-    return "";
-  };
+  // 项目管理
+  const {
+    projectName, setProjectName,
+    showSaveDialog, setShowSaveDialog,
+    showProjectManager, setShowProjectManager,
+    userProjects,
+    saveConfirmOpen, setSaveConfirmOpen,
+    pendingSaveData, setPendingSaveData,
+    saveProject, loadProject, deleteProject, listProjects,
+  } = useProjects({
+    isLoggedIn, currentUser, sessionId, messages, sideGuidanceHistory,
+    setSessionId, setMessages, setSideGuidanceHistory,
+    onRefreshWorkspace: refreshWorkspace,
+    clearWorkspace: async (sid: string, username: string) => {
+      await fetch(`${API_URLS.WORKSPACE_CLEAR}?session_id=${sid}&username=${username}`, { method: "DELETE" });
+    },
+    showAuthModal: () => setShowAuthModal(true),
+    CHAT_STORAGE_KEY,
+    suppressWorkspaceRefreshCount,
+  });
 
-  const handleDbTypeChange = (nextType: string) => {
-    const normalizedNextType = normalizeDbTypeForRequest(nextType);
-    const previousDefaultPort = getDefaultPortForDbType(dbType);
-    const nextDefaultPort = getDefaultPortForDbType(normalizedNextType);
-
-    setDbType(normalizedNextType);
-    setDbConfig((prev) => {
-      const currentPort = (prev.port || "").trim();
-      const shouldUseNextDefault =
-        !currentPort || currentPort === previousDefaultPort || currentPort === "0";
-      return {
-        ...prev,
-        port: shouldUseNextDefault ? nextDefaultPort : prev.port,
-      };
-    });
-  };
-
-  const buildDbRequestPayload = () => {
-    const normalizedType = normalizeDbTypeForRequest(dbType);
-    const trimmedDatabase = (dbConfig.database || "").trim();
-
-    if (!trimmedDatabase) {
-      toast({
-        description: normalizedType === "sqlite" ? "请填写 SQLite 文件路径" : "请填写数据库名称",
-        variant: "destructive",
-      });
-      return null;
-    }
-
-    if (normalizedType === "sqlite") {
-      return {
-        db_type: normalizedType,
-        config: {
-          database: trimmedDatabase,
-        },
-      };
-    }
-
-    const host = (dbConfig.host || "").trim() || "localhost";
-    const user = (dbConfig.user || "").trim();
-    const port = (dbConfig.port || "").trim() || getDefaultPortForDbType(normalizedType);
-
-    if (port && !/^\d+$/.test(port)) {
-      toast({ description: "端口必须为数字", variant: "destructive" });
-      return null;
-    }
-
-    return {
-      db_type: normalizedType,
-      config: {
-        host,
-        port,
-        user,
-        password: dbConfig.password || "",
-        database: trimmedDatabase,
-      },
-    };
-  };
-
-  // 用户认证与项目管理状态
-  const [currentUser, setCurrentUser] = useState<string | null>(null);
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [isLoginMode, setIsLoginMode] = useState(true);
-  const [authUsername, setAuthUsername] = useState("");
-  const [authPassword, setAuthPassword] = useState("");
-  const [registeredUsers, setRegisteredUsers] = useState<string[]>([]);
-  const [showSaveDialog, setShowSaveDialog] = useState(false);
-  const [projectName, setProjectName] = useState("");
-  const [showProjectManager, setShowProjectManager] = useState(false);
-  const [userProjects, setUserProjects] = useState<any[]>([]);
   // TaskTree 交互式任务选择对话框状态
   const [showTaskTreeDialog, setShowTaskTreeDialog] = useState(false);
   const [taskTreeData, setTaskTreeData] = useState<TaskTreeNode[] | null>(null);
   const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
-  // 保存确认弹窗状态（同名项目覆盖确认）
-  const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
-  const [pendingSaveData, setPendingSaveData] = useState<any>(null);
-  // 退出登录确认弹窗状态
-  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   // 报告类型选择状态
   const [reportTypes, setReportTypes] = useState<string[]>(["pdf"]);
   const [showReportTypePicker, setShowReportTypePicker] = useState(false);
@@ -792,26 +632,29 @@ export function ThreePanelInterface() {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showReportTypePicker]);
-  // 雨途斩棘录面板状态
-  const [showYutuPanel, setShowYutuPanel] = useState(false);
-  const [yutuHtmlContent, setYutuHtmlContent] = useState<string>("");
-  const [yutuRecords, setYutuRecords] = useState<any[]>([]);
-  const [searchKeyword, setSearchKeyword] = useState("");
-  const [editRecord, setEditRecord] = useState<any>(null);
-  const [showEditDialog, setShowEditDialog] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [yutuViewAsRegular, setYutuViewAsRegular] = useState(false); // 超级用户查看模式：false=管理界面, true=只读HTML
-  const [showOrganizePreview, setShowOrganizePreview] = useState(false); // 整理预览弹窗
-  const [organizedRecords, setOrganizedRecords] = useState<any[]>([]); // 整理后的记录
-  const [isOrganizing, setIsOrganizing] = useState(false); // 是否正在整理
-  const [organizingProgress, setOrganizingProgress] = useState<string>(""); // 整理进度描述
-  const [organizeProgressPercent, setOrganizeProgressPercent] = useState<number>(0); // 整理进度百分比
-
-  // 雨途斩棘录功能状态
-  const [hasAnalysisCompleted, setHasAnalysisCompleted] = useState(false); // 分析任务是否完成
-  const [knowledgeBaseEnabled, setKnowledgeBaseEnabled] = useState(true); // 知识库是否启用
-  const [externalKnowledgeEnabled, setExternalKnowledgeEnabled] = useState(true);
-  const [isRecordingKnowledge, setIsRecordingKnowledge] = useState(false); // 是否正在记录知识
+  // 雨途斩棘录知识库
+  const {
+    showYutuPanel, setShowYutuPanel,
+    yutuHtmlContent,
+    yutuRecords, setYutuRecords,
+    searchKeyword, setSearchKeyword,
+    editRecord, setEditRecord, showEditDialog, setShowEditDialog,
+    showDeleteConfirm, setShowDeleteConfirm,
+    yutuViewAsRegular, setYutuViewAsRegular,
+    showOrganizePreview, setShowOrganizePreview,
+    organizedRecords, setOrganizedRecords,
+    isOrganizing, organizingProgress, setOrganizingProgress,
+    organizeProgressPercent, setOrganizeProgressPercent,
+    hasAnalysisCompleted, setHasAnalysisCompleted,
+    knowledgeBaseEnabled, setKnowledgeBaseEnabled,
+    externalKnowledgeEnabled, setExternalKnowledgeEnabled,
+    isRecordingKnowledge, setIsRecordingKnowledge,
+    loadYutuHtml, loadYutuRecords,
+    saveRecord: handleSaveYutuRecord,
+    updateRecord: handleUpdateYutuRecord,
+    deleteRecord: handleDeleteYutuRecord,
+    organizeNotes: organizeYutuNotes,
+  } = useKnowledgeBase({ currentUser });
   const [showKnowledgeSettings, setShowKnowledgeSettings] = useState(false); // 知识库设置弹窗
   const [knowledgePreferredView, setKnowledgePreferredView] = useState<"html" | "table">("html");
   const [showKnowledgeHints, setShowKnowledgeHints] = useState(true);
@@ -938,7 +781,6 @@ export function ThreePanelInterface() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const singleClickTimerRef = useRef<number | null>(null);
-  const savingProjectRef = useRef(false);
   const [contextPos, setContextPos] = useState<{ x: number; y: number } | null>(
     null
   );
@@ -947,7 +789,6 @@ export function ThreePanelInterface() {
   );
   const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string>("");
 
   const lastScrollTimeRef = useRef(0);
@@ -1145,130 +986,6 @@ export function ThreePanelInterface() {
     }
   };
 
-  const loadYutuHtml = async () => {
-    try {
-      const res = await fetch(API_URLS.YUTU_HTML);
-      if (res.ok) {
-        const data = await res.json();
-        setYutuHtmlContent(data.html || "");
-      }
-    } catch (e) {
-      console.error("加载雨途斩棘录失败:", e);
-      setYutuHtmlContent("<html><body><h1>加载失败</h1></body></html>");
-    }
-  };
-
-  const loadYutuRecords = async (keywords: string[] = [], errorType: string = "") => {
-    try {
-      const res = await fetch(API_URLS.YUTU_SEARCH, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          keywords: keywords,
-          error_type: errorType,
-          page: 1,
-          page_size: 50
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setYutuRecords(data.data?.items || []);
-      }
-    } catch (e) {
-      console.error("加载记录失败:", e);
-    }
-  };
-
-  const handleSaveYutuRecord = async (record: any) => {
-    if (currentUser !== "rainforgrain") {
-      toast({ description: "只有超级用户可以添加记录", variant: "destructive" });
-      return false;
-    }
-    try {
-      const res = await fetch(`${API_URLS.YUTU_ADD}?username=${encodeURIComponent(currentUser || "")}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          error_type: record.error_type,
-          error_message: record.error_message,
-          error_context: record.error_context,
-          solution: record.solution,
-          solution_code: record.solution_code,
-          confidence: record.confidence
-        })
-      });
-      if (res.ok) {
-        toast({ description: "记录保存成功" });
-        loadYutuHtml();
-        loadYutuRecords();
-        return true;
-      } else {
-        const data = await res.json();
-        toast({ description: data.detail || "保存失败", variant: "destructive" });
-      }
-    } catch (e) {
-      toast({ description: "保存失败: " + (e as Error).message, variant: "destructive" });
-    }
-    return false;
-  };
-
-  const handleUpdateYutuRecord = async (record: any) => {
-    if (currentUser !== "rainforgrain") {
-      toast({ description: "只有超级用户可以更新记录", variant: "destructive" });
-      return false;
-    }
-    try {
-      const res = await fetch(`${API_URLS.YUTU_UPDATE}?username=${encodeURIComponent(currentUser || "")}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          error_hash: record.error_hash,
-          solution: record.solution,
-          solution_code: record.solution_code,
-          confidence: record.confidence
-        })
-      });
-      if (res.ok) {
-        toast({ description: "记录更新成功" });
-        loadYutuHtml();
-        loadYutuRecords();
-        return true;
-      } else {
-        const data = await res.json();
-        toast({ description: data.detail || "更新失败", variant: "destructive" });
-      }
-    } catch (e) {
-      toast({ description: "更新失败: " + (e as Error).message, variant: "destructive" });
-    }
-    return false;
-  };
-
-  const handleDeleteYutuRecord = async (errorHash: string) => {
-    if (currentUser !== "rainforgrain") {
-      toast({ description: "只有超级用户可以删除记录", variant: "destructive" });
-      return false;
-    }
-    try {
-      const res = await fetch(`${API_URLS.YUTU_DELETE}?username=${encodeURIComponent(currentUser || "")}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ error_hash: errorHash })
-      });
-      if (res.ok) {
-        toast({ description: "记录已删除" });
-        loadYutuHtml();
-        loadYutuRecords();
-        return true;
-      } else {
-        const data = await res.json();
-        toast({ description: data.detail || "删除失败", variant: "destructive" });
-      }
-    } catch (e) {
-      toast({ description: "删除失败: " + (e as Error).message, variant: "destructive" });
-    }
-    return false;
-  };
-
   const initYutu = async () => {
     if (currentUser !== "rainforgrain") {
       toast({ description: "只有超级用户可以初始化", variant: "destructive" });
@@ -1296,110 +1013,6 @@ export function ThreePanelInterface() {
       toast({ description: "初始化失败: " + (e as Error).message, variant: "destructive" });
     }
     return false;
-  };
-
-  // 整理雨途斩棘录笔记 - AI重新组织所有记录（预览模式）
-  const organizeYutuNotes = async () => {
-    if (currentUser !== "rainforgrain") {
-      toast({
-        description: "只有超级用户可以整理笔记",
-        variant: "destructive",
-      });
-      return;
-    }
-    if (yutuRecords.length === 0) {
-      toast({ description: "暂无记录可整理", variant: "destructive" });
-      return;
-    }
-
-    setIsOrganizing(true);
-    setOrganizingProgress("开始整理...");
-    setOrganizeProgressPercent(2);
-
-    // 进度条模拟：在请求过程中慢慢增加，直到 95%
-    const progressInterval = setInterval(() => {
-      setOrganizeProgressPercent((prev) => {
-        if (prev >= 95) return prev;
-        // 随机步进，模拟真实感
-        const increment = Math.random() * 3 + 1;
-        const next = prev + increment;
-        return next > 95 ? 95 : Math.floor(next);
-      });
-    }, 600);
-
-    try {
-      // 使用完整的API URL
-      const organizeUrl = `${
-        API_URLS.YUTU_ORGANIZE
-      }?username=${encodeURIComponent(currentUser || "")}`;
-      console.log("整理笔记URL:", organizeUrl);
-
-      setOrganizingProgress("正在分析记录...");
-      const res = await fetch(organizeUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ records: yutuRecords }),
-      });
-
-      setOrganizingProgress("正在组织结果...");
-
-      const contentType = res.headers.get("content-type");
-      if (!res.ok) {
-        clearInterval(progressInterval);
-        const errorText = await res.text();
-        setIsOrganizing(false);
-        setOrganizeProgressPercent(0);
-        toast({
-          description: `整理失败: ${res.status} - ${errorText.substring(0, 100)}`,
-          variant: "destructive",
-        });
-        return;
-      }
-
-      if (contentType && contentType.includes("application/json")) {
-        const data = await res.json();
-        clearInterval(progressInterval);
-        setOrganizeProgressPercent(100);
-
-        if (data.records && data.records.length > 0) {
-          // 显示预览
-          setOrganizedRecords(data.records);
-          setShowOrganizePreview(true);
-          setOrganizingProgress("整理完毕");
-          setTimeout(() => {
-            setIsOrganizing(false);
-            // 这里不重置进度，让用户在弹窗出现前看到100%
-          }, 500);
-          toast({ description: `整理完成，请预览并确认` });
-        } else {
-          setIsOrganizing(false);
-          setOrganizeProgressPercent(0);
-          toast({
-            description: data.detail || "整理失败：无可用记录",
-            variant: "destructive",
-          });
-        }
-      } else {
-        // 非JSON响应（可能是HTML错误页面）
-        clearInterval(progressInterval);
-        const errorText = await res.text();
-        setIsOrganizing(false);
-        setOrganizeProgressPercent(0);
-        toast({
-          description: `整理失败: 服务器返回非JSON响应`,
-          variant: "destructive",
-        });
-        console.error("Non-JSON response:", errorText);
-      }
-    } catch (e) {
-      clearInterval(progressInterval);
-      setIsOrganizing(false);
-      setOrganizeProgressPercent(0);
-      toast({
-        description: "整理失败: " + (e as Error).message,
-        variant: "destructive",
-      });
-    }
   };
 
   // 确认整理结果 - 使用完整URL
@@ -1620,97 +1233,14 @@ ${analysisContent}
     setHasAnalysisCompleted(hasAnswer);
   }, [messages]);
 
-  // --- 用户认证与项目管理函数 ---
-  const handleAuth = async () => {
-    if (!authUsername) {
-      toast({ description: "请输入用户名", variant: "destructive" });
-      return;
-    }
-
-    try {
-      const url = isLoginMode ? API_URLS.AUTH_LOGIN : API_URLS.AUTH_REGISTER;
-      const formData = new FormData();
-      formData.append("username", authUsername);
-      formData.append("password", authPassword);
-
-      const res = await fetch(url, {
-        method: "POST",
-        body: formData,
-      });
-
-      let data;
-      try {
-        data = await res.json();
-      } catch (e) {
-        throw new Error(`服务器响应错误 (${res.status})`);
-      }
-
-      if (!res.ok) {
-        // 如果 data.detail 是列表（FastAPI 422 验证错误）
-        const detail = data.detail;
-        const errorMessage = typeof detail === 'string'
-          ? detail
-          : Array.isArray(detail)
-            ? detail.map(d => `${d.loc.join('.')}: ${d.msg}`).join('; ')
-            : "认证失败";
-        throw new Error(errorMessage);
-      }
-
-      if (isLoginMode) {
-        setCurrentUser(data.username);
-        setIsLoggedIn(true);
-        setShowAuthModal(false);
-        toast({ description: `欢迎回来, ${data.username}` });
-        // 登录后重置并拉取文件
-        await loadWorkspaceFiles();
-        await loadWorkspaceTree();
-      } else {
-        toast({ description: "注册成功，请登录" });
-        setIsLoginMode(true);
-      }
-    } catch (e: any) {
-      toast({ description: e.message, variant: "destructive" });
-    }
-  };
-
-  const handleLogout = () => {
-    setShowLogoutConfirm(true);
-  };
-
+  // 登出后额外清理（组件级别的状态，不在 hooks 中管理）
   const performLogout = async () => {
-    // 先清空工作区文件（使用旧sessionId）
-    const oldSessionId = sessionId;
-    const oldUsername = currentUser || "default";
-    suppressWorkspaceRefreshCount.current += 1;
-    try {
-      await fetch(`${API_URLS.WORKSPACE_CLEAR}?session_id=${oldSessionId}&username=${oldUsername}`, {
-        method: "DELETE",
-      });
-    } catch (e) {
-      console.warn("Failed to clear workspace on logout", e);
-    } finally {
-      suppressWorkspaceRefreshCount.current -= 1;
-    }
-
-    setCurrentUser(null);
-    setIsLoggedIn(false);
-    setAuthUsername("");
-    setAuthPassword("");
-    setMessages([
-      {
-        id: "welcome-1",
-        content: "您好！很高兴和您一起运用大数据开展海关风险分析。我将按您的分析目标和要求，协助您深入分析进出口业务数据，运用规律分析、统计分析、对比分析、关联分析等方法，开展多角度逻辑推理，协助您挖掘走私违规、逃证逃税及违反安全准入等潜在风险，维护贸易秩序。请上传数据，让我们开始深度洞察。",
-        sender: "ai",
-        timestamp: new Date(),
-        localOnly: true,
-      },
-    ]);
-    setAttachments([]);
+    await performLogoutRaw(sessionId);
     setWorkspaceFiles([]);
     setWorkspaceTree(null);
+    setAttachments([]);
     setInputValue("");
     setSideGuidanceHistory([]);
-    setRegisteredUsers([]); // 先清空，然后重新加载
     setUserProjects([]);
     setProjectName("");
     setShowSaveDialog(false);
@@ -1718,140 +1248,10 @@ ${analysisContent}
     setShowTaskTreeDialog(false);
     setTaskTreeData(null);
     setSelectedTasks(new Set());
-
-    // 重新加载已注册用户列表
-    try {
-      const res = await fetch(API_URLS.USERS_LIST);
-      if (res.ok) {
-        const data = await res.json();
-        setRegisteredUsers(data.users || []);
-      }
-    } catch (e) {
-      console.warn("Failed to reload registered users after logout", e);
-    }
-
-    // 生成全新的 sessionId，完全替换旧的
-    const newSid = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    localStorage.setItem("sessionId", newSid);
-    setSessionId(newSid);
-
-    setShowAuthModal(true); // 重新显示登录界面
-    toast({ description: "已退出登录，工作区已清空" });
+    setRegisteredUsers([]);
+    loadRegisteredUsers();
   };
 
-  // ========== 数据库连接功能函数 ==========
-  const handleTestConnection = async () => {
-    const payload = buildDbRequestPayload();
-    if (!payload) return;
-
-    setIsTestingDb(true);
-    try {
-      const response = await fetch(API_URLS.DB_TEST, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json();
-      if (data.success) {
-        toast({ description: "数据库连接测试成功！" });
-        setIsDbTested(true);
-      } else {
-        toast({
-          description: `连接失败: ${data.message || data.detail || "未知错误"}`,
-          variant: "destructive",
-        });
-      }
-    } catch (error) {
-      console.error("Test connection error:", error);
-      toast({ description: "连接请求失败，请检查网络", variant: "destructive" });
-    } finally {
-      setIsTestingDb(false);
-    }
-  };
-
-  const handleGenerateSql = async () => {
-    if (!dbPrompt.trim()) return;
-    setIsGeneratingSql(true);
-    try {
-      const response = await fetch(API_URLS.DB_GENERATE_SQL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          db_type: normalizeDbTypeForRequest(dbType),
-          prompt: dbPrompt,
-          schema_info: "", // 可以在此注入已获取的表结构
-          model_provider: modelProviderConfig,
-        }),
-      });
-      const data = await response.json();
-      if (data.success) {
-        setDbGeneratedSql(data.sql);
-      } else {
-        toast({
-          description: `生成失败: ${data.message}`,
-          variant: "destructive",
-        });
-      }
-    } catch (error) {
-      console.error("Generate SQL error:", error);
-      toast({ description: "请求失败，请稍后重试", variant: "destructive" });
-    } finally {
-      setIsGeneratingSql(false);
-    }
-  };
-
-  const handleExecuteDbSql = async () => {
-    if (!dbGeneratedSql.trim()) return;
-
-    const payload = buildDbRequestPayload();
-    if (!payload) return;
-
-    // 检查文件是否存在并提醒覆盖
-    const fileName = `${dbDatasetName}.csv`;
-    const fileExists = workspaceFiles.some(f => f.name === fileName);
-    if (fileExists && dbExecuteMode === "overwrite") {
-      if (!window.confirm(`文件 "${fileName}" 已存在，确定要覆盖它吗？`)) {
-        return;
-      }
-    }
-
-    setIsExecutingDbSql(true);
-    try {
-      const response = await fetch(API_URLS.DB_EXECUTE, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...payload,
-          sql: dbGeneratedSql,
-          dataset_name: dbDatasetName,
-          mode: dbExecuteMode,
-          format: "csv",
-          session_id: sessionId,
-          username: currentUser || "default",
-        }),
-      });
-      const data = await response.json();
-      if (data.success) {
-        toast({
-          description: `执行成功！结果已保存为 ${data.filename} (${data.row_count} 行)`,
-        });
-        setShowDatabaseDialog(false);
-        // 刷新文件列表
-        await loadWorkspaceTree();
-        await loadWorkspaceFiles();
-      } else {
-        toast({
-          description: `执行失败: ${data.message || data.detail || "未知错误"}`,
-          variant: "destructive",
-        });
-      }
-    } catch (error) {
-      console.error("Execute DB SQL error:", error);
-      toast({ description: "执行请求失败", variant: "destructive" });
-    } finally {
-      setIsExecutingDbSql(false);
-    }
-  };
 
   const applyKnowledgeSettings = (settings: any) => {
     setKnowledgeBaseEnabled(Boolean(settings?.knowledge_base_enabled));
@@ -1996,186 +1396,6 @@ ${analysisContent}
     }
   };
 
-  const saveProject = async (confirmed = false) => {
-    if (!isLoggedIn) {
-      setShowAuthModal(true);
-      return;
-    }
-    if (savingProjectRef.current) return; // 防止重复触发
-    if (!projectName.trim()) {
-      toast({ description: "请输入项目名称", variant: "destructive" });
-      return;
-    }
-    const saveName = projectName.trim();
-    savingProjectRef.current = true;
-
-    // 如果未确认且不是新建项目，先检查是否存在同名项目
-    if (!confirmed) {
-      try {
-        const checkRes = await fetch(
-          `${API_URLS.PROJECTS_CHECK_NAME}?username=${encodeURIComponent(currentUser!)}&name=${encodeURIComponent(saveName)}`
-        );
-        if (checkRes.ok) {
-          const checkData = await checkRes.json();
-          if (checkData.exists) {
-            // 存在同名项目，弹出确认覆盖对话框
-            savingProjectRef.current = false;
-            setPendingSaveData({ confirmed: true });
-            setSaveConfirmOpen(true);
-            return;
-          }
-        }
-      } catch (e) {
-        console.warn("Check project name failed, proceeding with save", e);
-      }
-    }
-
-    try {
-      const formData = new FormData();
-      formData.append("username", currentUser!);
-      formData.append("session_id", sessionId);
-      formData.append("name", saveName);
-      formData.append("messages", JSON.stringify(messages));
-      formData.append("side_tasks", JSON.stringify(sideGuidanceHistory));
-      const res = await fetch(API_URLS.PROJECTS_SAVE, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!res.ok) throw new Error("保存失败");
-      const resData = await res.json();
-      const storageSize = resData?.storage_size || "";
-      toast({ description: `项目已保存${storageSize ? ` (${storageSize})` : ""}` });
-      setShowSaveDialog(false);
-      setPendingSaveData(null);
-      // 延迟清空项目名称，避免 Dialog 关闭动画期间触发空名验证
-      setTimeout(() => {
-        setProjectName("");
-        savingProjectRef.current = false;
-      }, 300);
-    } catch (e) {
-      savingProjectRef.current = false;
-      toast({ description: "保存失败", variant: "destructive" });
-    }
-  };
-
-  const listProjects = async () => {
-    if (!currentUser) return;
-    try {
-      const res = await fetch(`${API_URLS.PROJECTS_LIST}?username=${currentUser}`);
-      if (res.ok) {
-        const data = await res.json();
-        setUserProjects(data.projects);
-      }
-    } catch (e) {
-      console.error("List projects error", e);
-    }
-  };
-
-  const loadProject = async (projectId: number) => {
-    try {
-      const res = await fetch(`${API_URLS.PROJECTS_LOAD}?project_id=${projectId}`);
-      if (!res.ok) throw new Error("加载失败");
-      const data = await res.json();
-
-      // 1. 立即获取项目的文件下载链接（在清空工作区之前）
-      const restoreRes = await fetch(`${API_URLS.PROJECTS_RESTORE_FILES}?project_id=${projectId}`);
-      let filesToRestore: Array<{name: string; download_url: string}> = [];
-      if (restoreRes.ok) {
-        const restoreData = await restoreRes.json();
-        filesToRestore = restoreData.files || [];
-      }
-
-      // 2. 清空当前工作区（仅清空当前 session，不影响已保存项目文件）
-      suppressWorkspaceRefreshCount.current += 1;
-      try {
-        await fetch(`${API_URLS.WORKSPACE_CLEAR}?session_id=${sessionId}&username=${currentUser || "default"}`, {
-          method: "DELETE",
-        });
-      } catch (e) {
-        console.warn("Failed to clear workspace before load", e);
-      } finally {
-        suppressWorkspaceRefreshCount.current -= 1;
-      }
-
-      // 3. 设置会话 ID 和消息记录
-      const newSessionId = data.session_id;
-      setSessionId(newSessionId);
-      localStorage.setItem("sessionId", newSessionId);
-
-      const restoredMessages = data.messages.map((m: any) => ({
-        ...m,
-        timestamp: new Date(m.timestamp)
-      }));
-      setMessages(restoredMessages);
-      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(restoredMessages));
-
-      // 恢复过程指导历史
-      if (data.side_tasks && Array.isArray(data.side_tasks)) {
-        setSideGuidanceHistory(data.side_tasks);
-      } else {
-        setSideGuidanceHistory([]);
-      }
-
-      // 4. 关闭弹窗
-      setShowProjectManager(false);
-
-      // 5. 设置项目名称
-      const proj = userProjects.find(p => p.id === projectId);
-      if (proj) setProjectName(proj.name);
-
-      toast({ description: "正在恢复项目文件..." });
-
-      // 6. 恢复工作区文件：从已保存的项目中重新上传
-      // 启用文件恢复专用抑制，防止轮询在上传期间干扰
-      suppressDuringFileRestore.current = true;
-
-      const restoreFiles = async () => {
-        try {
-          const restoreUrl = `${API_URLS.PROJECTS_RESTORE_TO_WORKSPACE}?project_id=${projectId}&session_id=${newSessionId}&username=${currentUser || "default"}`;
-          const res = await fetch(restoreUrl, { method: "POST" });
-          if (!res.ok) throw new Error("Restoration failed");
-
-          suppressDuringFileRestore.current = false;
-          setTimeout(() => {
-            loadWorkspaceFiles();
-            loadWorkspaceTree();
-            toast({ description: "项目已加载，文件已全部恢复" });
-          }, 500);
-        } catch (e) {
-          suppressDuringFileRestore.current = false;
-          console.error("File restore failed", e);
-          toast({ description: "项目加载失败", variant: "destructive" });
-        }
-      };
-
-      setTimeout(() => {
-        restoreFiles();
-      }, 300);
-
-    } catch (e) {
-      toast({ description: "加载失败", variant: "destructive" });
-    }
-  };
-
-  const deleteProject = async (projectId: number) => {
-    try {
-      const res = await fetch(`${API_URLS.PROJECTS_DELETE}?project_id=${projectId}&username=${currentUser}`, {
-        method: "DELETE",
-      });
-      if (res.ok) {
-        toast({ description: "项目已删除" });
-        listProjects();
-      }
-    } catch (e) {
-      toast({ description: "删除失败", variant: "destructive" });
-    }
-  };
-
-  // 数据库连接配置变化时重置测试状态
-  useEffect(() => {
-    setIsDbTested(false);
-  }, [dbConfig, dbType]);
 
   // 监听登录状态变化以同步项目列表
   useEffect(() => {
@@ -2362,7 +1582,6 @@ ${analysisContent}
   }, [messages, scrollToBottom, streamingMessageId]);
 
   // 聊天消息本地缓存：加载与保存
-  const CHAT_STORAGE_KEY = "chat_messages_v1";
   const [chatLoaded, setChatLoaded] = useState(false);
 
   // 挂载后再次从本地覆盖加载，避免 SSR 初始状态覆盖缓存
@@ -2562,7 +1781,7 @@ ${analysisContent}
         const parsed = JSON.parse(savedDbSettings);
         const normalizedType = normalizeDbTypeForRequest(parsed?.dbType || "mysql");
         if (typeof parsed?.dbType === "string") {
-          setDbType(normalizedType);
+          handleDbTypeChange(normalizedType);
         }
         if (parsed?.dbConfig && typeof parsed.dbConfig === "object") {
           setDbConfig((prev) => {
@@ -2670,72 +1889,6 @@ ${analysisContent}
     }
   }, [showAuthModal]);
 
-  const loadWorkspaceFiles = useCallback(async () => {
-    if (!sessionId) return;
-    if (suppressWorkspaceRefreshCount.current > 0) return;
-    if (suppressDuringFileRestore.current) return;
-    try {
-      const response = await fetch(
-        `${API_URLS.WORKSPACE_FILES}?session_id=${sessionId}&username=${currentUser || "default"}`
-      );
-      if (response.ok) {
-        const data = await response.json();
-        setWorkspaceFiles(data.files);
-      }
-    } catch (error) {
-      console.error("Failed to load workspace files:", error);
-    }
-  }, [sessionId, currentUser]);
-
-  const loadWorkspaceTree = useCallback(async () => {
-    if (!sessionId) return;
-    if (suppressWorkspaceRefreshCount.current > 0) return;
-    if (suppressDuringFileRestore.current) return;
-    try {
-      const res = await fetch(
-        `${API_URLS.WORKSPACE_TREE}?session_id=${sessionId}&username=${currentUser || "default"}`
-      );
-      if (res.ok) {
-        const data = await res.json();
-        // 标记 generated 文件夹及其内容
-        const markGenerated = (
-          node: WorkspaceNode,
-          parentIsGenerated = false
-        ) => {
-          const isGenerated =
-            parentIsGenerated ||
-            node.name === "generated" ||
-            node.path.startsWith("generated/") ||
-            node.path.startsWith("generated");
-          node.is_generated = isGenerated;
-          if (node.children) {
-            node.children.forEach((child) => markGenerated(child, isGenerated));
-          }
-        };
-        if (data) {
-          markGenerated(data);
-          console.log("[WorkspaceTree] Loaded tree data:", data);
-        }
-        setWorkspaceTree(data);
-        // 增量合并展开状态：保留原有的，并默认展开第一层（包括 generated 文件夹）
-        setExpanded((prev) => {
-          const next = { ...prev, "": true };
-          if (data?.children) {
-            data.children.forEach((c: WorkspaceNode) => {
-              if (c.is_dir && prev[c.path] === undefined) {
-                // 仅当之前未定义时才设置默认展开
-                next[c.path] = true;
-              }
-            });
-          }
-          return next;
-        });
-      }
-    } catch (e) {
-      console.error("load tree error", e);
-    }
-  }, [sessionId, currentUser]);
-
   useEffect(() => {
     const id = setInterval(() => {
       // 智能轮询：仅在页面可见且未上传时轮询
@@ -2748,45 +1901,6 @@ ${analysisContent}
     }, 4000);
     return () => clearInterval(id);
   }, [isUploading, sessionId, currentUser, loadWorkspaceTree, loadWorkspaceFiles]);
-
-  const toggleExpand = (p: string) =>
-    setExpanded((prev) => ({ ...prev, [p]: !prev[p] }));
-
-  const deleteFile = async (p: string) => {
-    suppressWorkspaceRefreshCount.current += 1;
-    try {
-      const url = `${API_URLS.WORKSPACE_DELETE_FILE}?path=${encodeURIComponent(
-        p
-      )}&session_id=${encodeURIComponent(sessionId)}&username=${currentUser || "default"}`;
-      const res = await fetch(url, { method: "DELETE" });
-      if (res.ok) {
-        await loadWorkspaceTree();
-        await loadWorkspaceFiles();
-      }
-    } catch (e) {
-      console.error("delete file error", e);
-    } finally {
-      suppressWorkspaceRefreshCount.current -= 1;
-    }
-  };
-
-  const deleteDir = async (p: string) => {
-    suppressWorkspaceRefreshCount.current += 1;
-    try {
-      const url = `${API_URLS.WORKSPACE_DELETE_DIR}?path=${encodeURIComponent(
-        p
-      )}&recursive=true&session_id=${encodeURIComponent(sessionId)}&username=${currentUser || "default"}`;
-      const res = await fetch(url, { method: "DELETE" });
-      if (res.ok) {
-        await loadWorkspaceTree();
-        await loadWorkspaceFiles();
-      }
-    } catch (e) {
-      console.error("delete dir error", e);
-    } finally {
-      suppressWorkspaceRefreshCount.current -= 1;
-    }
-  };
 
   // 移动：将工作区内的文件/文件夹移动到指定目录（空字符串表示根目录）
   const moveToDir = async (srcPath: string, dstDir: string) => {
@@ -4845,78 +3959,19 @@ ${analysisContent}
     return (
       <>
         {/* 认证弹窗 */}
-        <Dialog open={showAuthModal} onOpenChange={(open) => {
-          if (!isLoggedIn && !open) {
-            // 如果用户未登录但尝试关闭弹窗，保持弹窗打开
-            setShowAuthModal(true);
-          } else {
-            setShowAuthModal(open);
-          }
-        }}>
-          <DialogContent className="sm:max-w-[450px]">
-            <DialogHeader>
-              <div className="flex flex-col items-center mb-4">
-                <DialogTitle className="text-xl font-bold">雨途欢迎您一起前行</DialogTitle>
-              </div>
-            </DialogHeader>
-            <div className="space-y-4 py-4">
-              {/* 已注册用户快捷选择 */}
-              {registeredUsers.length > 0 && (
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                    {isLoginMode ? "已注册用户（点击快速登录）" : "已注册用户"}
-                  </label>
-                  <div className="flex flex-wrap gap-2 max-h-[100px] overflow-y-auto">
-                    {registeredUsers.map((u) => (
-                      <button
-                        key={u}
-                        onClick={() => setAuthUsername(u)}
-                        className={`px-3 py-1.5 text-xs rounded-full border transition-colors ${
-                          authUsername === u
-                            ? "bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-900 dark:border-blue-600 dark:text-blue-200"
-                            : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-blue-50 hover:border-blue-200 dark:bg-gray-800 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-blue-900/30"
-                        }`}
-                      >
-                        {u}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div className="space-y-2">
-                <label className="text-sm font-medium">用户名</label>
-                <Input
-                  value={authUsername}
-                  onChange={(e) => setAuthUsername(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") handleAuth(); }}
-                  placeholder="请输入用户名"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">密码</label>
-                <Input
-                  type="password"
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") handleAuth(); }}
-                  placeholder={isLoginMode ? "请输入密码（可为空）" : "最少 8 位密码"}
-                />
-              </div>
-              <Button className="w-full" onClick={handleAuth}>
-                {isLoginMode ? "登录" : "注册"}
-              </Button>
-              <div className="text-center text-xs text-gray-500">
-                {isLoginMode ? "没有账号？" : "已有账号？"}
-                <button
-                  className="text-blue-600 hover:underline ml-1"
-                  onClick={() => setIsLoginMode(!isLoginMode)}
-                >
-                  {isLoginMode ? "立即注册" : "去登录"}
-                </button>
-              </div>
-            </div>
-          </DialogContent>
-        </Dialog>
+        <AuthDialog
+          open={showAuthModal}
+          onOpenChange={setShowAuthModal}
+          isLoggedIn={isLoggedIn}
+          isLoginMode={isLoginMode}
+          authUsername={authUsername}
+          setAuthUsername={setAuthUsername}
+          authPassword={authPassword}
+          setAuthPassword={setAuthPassword}
+          registeredUsers={registeredUsers}
+          onAuth={handleAuth}
+          onToggleMode={() => setIsLoginMode(!isLoginMode)}
+        />
       </>
     );
   }
@@ -6108,1715 +5163,248 @@ ${analysisContent}
 
 
       {/* 交互式任务选择对话框 */}
-      <Dialog open={showTaskTreeDialog} onOpenChange={setShowTaskTreeDialog}>
-        <DialogContent className="sm:max-w-[600px]">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <ListTree className="h-5 w-5 text-amber-600" />
-              选择分析任务
-            </DialogTitle>
-            <DialogDescription>
-              请选择您希望智能体执行的分析任务，确认后智能体将仅分析选定的任务
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="flex items-center gap-2 py-2 border-b border-gray-100 dark:border-gray-800">
-            <Button variant="outline" size="sm" onClick={selectAllTasks} className="text-xs h-7">
-              全选
-            </Button>
-            <Button variant="outline" size="sm" onClick={deselectAllTasks} className="text-xs h-7">
-              取消全选
-            </Button>
-            <span className="ml-auto text-xs text-gray-500 dark:text-gray-400">
-              已选 {selectedTasks.size} 项
-            </span>
-          </div>
-
-          <div className="py-2 overflow-y-auto max-h-[50vh]">
-            {taskTreeData?.map(node => (
-              <TaskTreeItem
-                key={node.id}
-                node={node}
-                selectedTasks={selectedTasks}
-                toggleTask={toggleTask}
-                depth={0}
-              />
-            ))}
-          </div>
-
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button variant="outline" onClick={() => setShowTaskTreeDialog(false)}>
-              取消
-            </Button>
-            <Button
-              onClick={handleConfirmTaskSelection}
-              disabled={selectedTasks.size === 0}
-              className="bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50"
-            >
-              确认选择
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <TaskTreeDialog
+        open={showTaskTreeDialog}
+        onOpenChange={setShowTaskTreeDialog}
+        taskTreeData={taskTreeData}
+        selectedTasks={selectedTasks}
+        toggleTask={toggleTask}
+        selectAllTasks={selectAllTasks}
+        deselectAllTasks={deselectAllTasks}
+        onConfirm={handleConfirmTaskSelection}
+      />
 
       {/* 保存项目弹窗 */}
-      <Dialog open={showSaveDialog} onOpenChange={setShowSaveDialog}>
-        <DialogContent className="sm:max-w-[450px]">
-          <DialogHeader>
-            <DialogTitle>保存分析项目</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">项目名称</label>
-              <div className="relative">
-                <Input
-                  value={projectName}
-                  onChange={(e) => setProjectName(e.target.value)}
-                  placeholder="请输入或选择已有项目名称"
-                  className="pr-10"
-                />
-                {userProjects.length > 0 && (
-                  <div className="mt-2 max-h-[150px] overflow-y-auto border rounded-md p-1 bg-gray-50 dark:bg-gray-900">
-                    <div className="text-[10px] text-gray-500 px-2 py-1 uppercase font-bold">已有项目 (点击覆盖)</div>
-                    {userProjects.map(p => (
-                      <button
-                        key={p.id}
-                        onClick={() => setProjectName(p.name)}
-                        className="w-full text-left px-2 py-1.5 text-xs hover:bg-blue-100 dark:hover:bg-blue-900 rounded transition-colors truncate"
-                      >
-                        {p.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="text-[10px] text-gray-500 italic bg-amber-50 dark:bg-amber-950/20 p-2 rounded">
-              提示：保存操作将同时记录当前的聊天历史、上传的数据文件以及生成的分析结果。
-            </div>
-            <Button className="w-full" onClick={() => saveProject(false)}>
-              确认保存
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* 保存项目同名覆盖确认弹窗 */}
-      <AlertDialog open={saveConfirmOpen} onOpenChange={setSaveConfirmOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>项目名称已存在</AlertDialogTitle>
-            <AlertDialogDescription>
-              项目中已存在名称为「{projectName}」的分析项目。覆盖将永久替换原项目内容，是否确认覆盖？
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => {
-              setSaveConfirmOpen(false);
-              setPendingSaveData(null);
-            }}>
-              取消
-            </AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-amber-600 hover:bg-amber-700"
-              onClick={() => {
-                setSaveConfirmOpen(false);
-                saveProject(true); // confirmed = true，直接覆盖保存
-              }}
-            >
-              确认覆盖
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <ProjectSaveDialog
+        showSaveDialog={showSaveDialog}
+        setShowSaveDialog={setShowSaveDialog}
+        projectName={projectName}
+        setProjectName={setProjectName}
+        userProjects={userProjects.map((p: any) => ({ id: p.id, name: p.name }))}
+        onSave={() => saveProject(false)}
+        saveConfirmOpen={saveConfirmOpen}
+        setSaveConfirmOpen={setSaveConfirmOpen}
+        setPendingSaveData={setPendingSaveData}
+        onConfirmOverwrite={() => saveProject(true)}
+      />
 
       {/* 项目中心弹窗 */}
-      <Dialog open={showProjectManager} onOpenChange={setShowProjectManager}>
-        <DialogContent className="sm:max-w-[600px] max-h-[80vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle>项目中心</DialogTitle>
-          </DialogHeader>
-          <div className="flex-1 overflow-y-auto py-4">
-            {userProjects.length === 0 ? (
-              <div className="text-center py-10 text-gray-500 italic text-sm">
-                暂无保存的项目
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {userProjects.map((proj) => (
-                  <div
-                    key={proj.id}
-                    className="flex items-center justify-between p-3 border border-gray-200 dark:border-gray-800 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-900 transition-colors"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium truncate">{proj.name}</div>
-                      <div className="text-[10px] text-gray-500 mt-1">
-                        保存时间：{new Date(proj.created_at).toLocaleString()}
-                        {proj.storage_size && (
-                          <span className="ml-2 px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[9px] font-mono">
-                            {proj.storage_size}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2 ml-4">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-8 px-3 text-xs"
-                        onClick={() => loadProject(proj.id)}
-                      >
-                        打开
-                      </Button>
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-8 w-8 p-0 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>确认删除项目？</AlertDialogTitle>
-                            <AlertDialogDescription>
-                              这将永久删除项目记录及其相关的工作空间文件。
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>取消</AlertDialogCancel>
-                            <AlertDialogAction
-                              className="bg-red-600 hover:bg-red-700"
-                              onClick={() => deleteProject(proj.id)}
-                            >
-                              确认删除
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
+      <ProjectManagerDialog
+        open={showProjectManager}
+        onOpenChange={setShowProjectManager}
+        userProjects={userProjects}
+        onLoad={loadProject}
+        onDelete={deleteProject}
+      />
 
       {/* 退出登录确认弹窗 */}
-      <AlertDialog open={showLogoutConfirm} onOpenChange={setShowLogoutConfirm}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>确认退出登录？</AlertDialogTitle>
-            <AlertDialogDescription>
-              退出登录将清空当前所有区域信息、聊天记录和工作区文件，并返回登录界面。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction
-              className="bg-red-600 hover:bg-red-700"
-              onClick={() => {
-                performLogout();
-                setShowLogoutConfirm(false);
-              }}
-            >
-              确认退出
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      <LogoutConfirmDialog
+        open={showLogoutConfirm}
+        onOpenChange={setShowLogoutConfirm}
+        onConfirm={performLogout}
+      />
 
       {/* 雨途斩棘录面板 */}
-      <Dialog open={showYutuPanel} onOpenChange={setShowYutuPanel}>
-        <DialogContent className="sm:max-w-[90vw] max-h-[90vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <BookOpen className="h-5 w-5" />
-              雨途斩棘录
-              <span className="text-xs font-normal text-gray-500 dark:text-gray-400 ml-2">
-                - 智能体错误修正记录知识库 -
-              </span>
-            </DialogTitle>
-          </DialogHeader>
-          <div className="flex-1 overflow-hidden flex flex-col">
-            {/* 管理工具栏 - 仅超级用户可见 */}
-            {currentUser === "rainforgrain" && (
-              <div className="flex items-center justify-between gap-2 mb-2 px-1">
-                <div className="flex items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant={yutuViewAsRegular ? "outline" : "default"}
-                    onClick={() => setYutuViewAsRegular(!yutuViewAsRegular)}
-                    className={yutuViewAsRegular ? "" : "bg-blue-600"}
-                  >
-                    {yutuViewAsRegular ? "管理模式" : "查看HTML"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={initYutu}
-                    className="text-orange-600 border-orange-200 hover:bg-orange-50"
-                  >
-                    初始化知识库
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="text-green-600 border-green-200 hover:bg-green-50 relative overflow-hidden"
-                    onClick={() => {
-                      if (window.confirm("确定要整理所有笔记吗？这将使用AI重新组织所有记录。")) {
-                        // 调用AI整理功能
-                        organizeYutuNotes();
-                      }
-                    }}
-                    disabled={isOrganizing}
-                  >
-                    {isOrganizing ? (
-                      <>
-                        {/* 进度条背景 */}
-                        <div
-                          className="absolute left-0 top-0 bottom-0 bg-green-100 opacity-50 transition-all duration-300 ease-out"
-                          style={{ width: `${organizeProgressPercent}%` }}
-                        />
-                        <span className="relative z-10 flex items-center">
-                          <span className="animate-spin mr-1">⏳</span>
-                          {organizingProgress} ({organizeProgressPercent}%)
-                        </span>
-                      </>
-                    ) : (
-                      "整理笔记"
-                    )}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="text-purple-600 border-purple-200 hover:bg-purple-50"
-                    onClick={() => {
-                      loadBackups();
-                      setShowBackupRestore(true);
-                    }}
-                  >
-                    备份与恢复
-                  </Button>
-                </div>
-                <span className="text-xs text-gray-500">共 {yutuRecords.length} 条记录</span>
-              </div>
-            )}
-
-            {/* 搜索栏 - 仅超级用户可见 */}
-            {currentUser === "rainforgrain" && (
-              <div className="flex items-center gap-2 mb-3 p-2 border rounded-md bg-gray-50 dark:bg-gray-900">
-                <Input
-                  placeholder="搜索错误消息..."
-                  value={searchKeyword}
-                  onChange={(e) => setSearchKeyword(e.target.value)}
-                  className="flex-1"
-                />
-                <Button
-                  size="sm"
-                  onClick={() => loadYutuRecords(searchKeyword ? [searchKeyword] : [], "")}
-                >
-                  搜索
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => {
-                    setSearchKeyword("");
-                    loadYutuRecords([], "");
-                  }}
-                >
-                  重置
-                </Button>
-              </div>
-            )}
-
-            {/* 内容显示区域 - 超级用户看列表(可切换)，其他人看HTML */}
-            {currentUser === "rainforgrain" && !yutuViewAsRegular ? (
-              /* 超级用户：表格列表视图，支持编辑删除 */
-              <div className="flex-1 min-h-0 overflow-auto rounded-md border bg-white dark:bg-gray-950">
-                {yutuRecords.length > 0 ? (
-                  <table className="w-full text-sm">
-                    <thead className="bg-gray-50 dark:bg-gray-900 sticky top-0">
-                      <tr>
-                        <th className="px-3 py-2 text-left">错误类型</th>
-                        <th className="px-3 py-2 text-left">错误消息</th>
-                        <th className="px-3 py-2 text-left">解决方案</th>
-                        <th className="px-3 py-2 text-center">置信度</th>
-                        <th className="px-3 py-2 text-center">使用次数</th>
-                        <th className="px-3 py-2 text-center">操作</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                      {yutuRecords.map((record: any) => (
-                        <tr key={record.error_hash} className="bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-800">
-                          <td className="px-3 py-2">
-                            <span className={`px-2 py-0.5 text-xs rounded ${
-                              record.error_type === 'ImportError' ? 'bg-blue-100 text-blue-700' :
-                              record.error_type === 'ValueError' ? 'bg-red-100 text-red-700' :
-                              record.error_type === 'TypeError' ? 'bg-orange-100 text-orange-700' :
-                              'bg-gray-100 text-gray-700'
-                            }`}>
-                              {record.error_type || "Unknown"}
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 max-w-[200px] truncate" title={record.error_message || ""}>
-                            {record.error_message ? record.error_message.substring(0, 50) + (record.error_message.length > 50 ? "..." : "") : ""}
-                          </td>
-                          <td className="px-3 py-2 max-w-[250px] truncate" title={record.solution || ""}>
-                            {record.solution ? record.solution.substring(0, 80) + (record.solution.length > 80 ? "..." : "") : ""}
-                          </td>
-                          <td className="px-3 py-2 text-center">
-                            <span className={`px-2 py-0.5 text-xs rounded ${
-                              (record.confidence || 0) >= 0.8 ? 'bg-green-100 text-green-700' :
-                              (record.confidence || 0) >= 0.5 ? 'bg-yellow-100 text-yellow-700' :
-                              'bg-red-100 text-red-700'
-                            }`}>
-                              {Math.round((record.confidence || 0) * 100)}%
-                            </span>
-                          </td>
-                          <td className="px-3 py-2 text-center text-gray-500">
-                            {record.usage_count || 0}
-                          </td>
-                          <td className="px-3 py-2">
-                            <div className="flex items-center justify-center gap-1">
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-6 w-6 p-0 text-red-500 hover:text-red-600"
-                                onClick={() => handleDeleteYutuRecord(record.error_hash)}
-                                title="删除"
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-gray-500 p-8">
-                    <BookOpen className="h-12 w-12 mb-4 opacity-30" />
-                    <p>暂无错误记录</p>
-                    <p className="text-xs mt-2">当智能体遇到错误并成功解决后，记录将自动添加到这里</p>
-                  </div>
-                )}
-              </div>
-            ) : (
-              /* 普通用户：HTML视图 */
-              <div
-                ref={yutuPanelRef}
-                className="flex-1 min-h-0 overflow-auto rounded-md border bg-white dark:bg-gray-950"
-              >
-                {yutuHtmlContent ? (
-                  <div
-                    className="p-4 prose prose-sm dark:prose-invert max-w-none"
-                    dangerouslySetInnerHTML={{ __html: yutuHtmlContent }}
-                  />
-                ) : (
-                  <div className="h-full flex items-center justify-center text-gray-500">
-                    加载中...
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          <div className="flex justify-end gap-2 mt-3">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowYutuPanel(false)}
-            >
-              关闭
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <YutuPanel
+        open={showYutuPanel}
+        onOpenChange={setShowYutuPanel}
+        currentUser={currentUser}
+        yutuViewAsRegular={yutuViewAsRegular}
+        setYutuViewAsRegular={setYutuViewAsRegular}
+        onInitYutu={initYutu}
+        onOrganizeNotes={organizeYutuNotes}
+        isOrganizing={isOrganizing}
+        organizingProgress={organizingProgress}
+        organizeProgressPercent={organizeProgressPercent}
+        onOpenBackupRestore={() => {
+          loadBackups();
+          setShowBackupRestore(true);
+        }}
+        yutuRecords={yutuRecords}
+        searchKeyword={searchKeyword}
+        setSearchKeyword={setSearchKeyword}
+        loadYutuRecords={loadYutuRecords}
+        yutuHtmlContent={yutuHtmlContent}
+        onDeleteRecord={handleDeleteYutuRecord}
+        panelRef={yutuPanelRef}
+      />
 
       {/* 备份与恢复对话框 */}
-      <Dialog open={showBackupRestore} onOpenChange={setShowBackupRestore}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>雨途斩棘录 - 备份与恢复</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2 pb-2 border-b">
-              <label className="text-sm font-medium">创建新备份</label>
-              <div className="flex gap-2">
-                <Input
-                  placeholder="备份名称 (可选)"
-                  value={backupName}
-                  onChange={(e) => setBackupName(e.target.value)}
-                  className="flex-1"
-                />
-                <Button size="sm" onClick={createBackup} disabled={isCreatingBackup}>
-                  {isCreatingBackup ? "备份中..." : "立即备份"}
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">现有备份</label>
-              <div className="max-h-[200px] overflow-y-auto border rounded-md divide-y dark:divide-gray-800">
-                {backups.length === 0 ? (
-                  <div className="p-4 text-center text-xs text-gray-500">暂无备份文件</div>
-                ) : (
-                  backups.map(f => (
-                    <div
-                      key={f}
-                      className={`flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-900 cursor-pointer ${selectedBackup === f ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}
-                      onClick={() => setSelectedBackup(f)}
-                    >
-                      <div className="flex-1 text-xs truncate mr-2" title={f}>
-                        {f}
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 w-7 p-0 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteBackupFile(f);
-                        }}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">恢复模式</label>
-              <div className="flex gap-4">
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input
-                    type="radio"
-                    name="restoreMode"
-                    checked={restoreMode === 'append'}
-                    onChange={() => setRestoreMode('append')}
-                  />
-                  追加模式
-                </label>
-                <label className="flex items-center gap-2 text-sm cursor-pointer">
-                  <input
-                    type="radio"
-                    name="restoreMode"
-                    checked={restoreMode === 'overwrite'}
-                    onChange={() => setRestoreMode('overwrite')}
-                  />
-                  覆盖模式
-                </label>
-              </div>
-              <p className="text-[10px] text-gray-500">
-                追加：仅导入不重复的记录。覆盖：清空当前库并完全替换。
-              </p>
-            </div>
-            <Button
-              className="w-full bg-blue-600 hover:bg-blue-700 mt-2"
-              onClick={restoreBackup}
-              disabled={!selectedBackup}
-            >
-              执行恢复
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* 知识库设置弹窗 - 仅超级用户可见 */}
-      <Dialog open={showKnowledgeSettings} onOpenChange={setShowKnowledgeSettings}>
-        <DialogContent className="sm:max-w-[400px]">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <BookOpen className="h-5 w-5" />
-              知识库设置
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="flex items-center justify-between p-3 border rounded-lg">
-              <div>
-                <div className="text-sm font-medium">启用知识库</div>
-                <div className="text-xs text-gray-500">启用后智能体启动时会阅读知识库</div>
-              </div>
-              <Switch
-                checked={knowledgeBaseEnabled}
-                onCheckedChange={(checked) => {
-                  setKnowledgeBaseEnabled(checked);
-                  // 保存设置到 localStorage
-                  localStorage.setItem("knowledgeBaseEnabled", checked ? "true" : "false");
-                  toast({ description: checked ? "知识库已启用" : "知识库已停用" });
-                }}
-              />
-            </div>
-
-            <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-              <div className="text-sm font-medium text-blue-700 dark:text-blue-300 mb-2">
-                使用说明
-              </div>
-              <ul className="text-xs text-blue-600 dark:text-blue-400 space-y-1">
-                <li>• 启用后，智能体在每次分析开始时会查询雨途斩棘录</li>
-                <li>• "雨途斩棘录"按钮在分析完成后变为可用</li>
-                <li>• 点击可自动提取分析过程中的问题和解决方案</li>
-                <li>• 重复的记录会自动过滤，不会重复添加</li>
-              </ul>
-            </div>
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" size="sm" onClick={() => setShowKnowledgeSettings(false)}>
-              关闭
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <BackupRestoreDialog
+        open={showBackupRestore}
+        onOpenChange={setShowBackupRestore}
+        backups={backups}
+        selectedBackup={selectedBackup}
+        onSelectBackup={setSelectedBackup}
+        backupName={backupName}
+        onBackupNameChange={setBackupName}
+        restoreMode={restoreMode}
+        onRestoreModeChange={setRestoreMode}
+        isCreatingBackup={isCreatingBackup}
+        onCreateBackup={createBackup}
+        onDeleteBackup={deleteBackupFile}
+        onRestore={restoreBackup}
+      />
 
       {/* 系统设置弹窗 */}
-      <Dialog open={showSettingsDialog} onOpenChange={setShowSettingsDialog}>
-        <DialogContent className="sm:max-w-[550px] max-h-[75vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Settings className="h-5 w-5" />
-              系统设置
-            </DialogTitle>
-            <DialogDescription>
-              配置智能体的运行参数和分析行为
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-5 py-4">
+      <SimpleSettingsDialog
+        open={showSettingsDialog}
+        onOpenChange={setShowSettingsDialog}
+        modelVersion={modelVersion}
+        setModelVersion={setModelVersion}
+        analysisMode={analysisMode}
+        setAnalysisMode={setAnalysisMode}
+        analysisStrategy={analysisStrategy}
+        setAnalysisStrategy={setAnalysisStrategy}
+        temperature={temperature}
+        setTemperature={setTemperature}
+        principles={{
+          selfCorrectionEnabled,
+          shortTestEnabled,
+          taskDecompositionEnabled,
+          explainabilityEnabled,
+          efficientProcessingEnabled,
+          deadLoopDetectionEnabled,
+        }}
+        onPrincipleChange={(key, checked) => {
+          const setters: Record<string, (v: boolean) => void> = {
+            selfCorrectionEnabled: setSelfCorrectionEnabled,
+            shortTestEnabled: setShortTestEnabled,
+            taskDecompositionEnabled: setTaskDecompositionEnabled,
+            explainabilityEnabled: setExplainabilityEnabled,
+            efficientProcessingEnabled: setEfficientProcessingEnabled,
+            deadLoopDetectionEnabled: setDeadLoopDetectionEnabled,
+          };
+          setters[key]?.(checked);
+          localStorage.setItem(key, checked ? "true" : "false");
+        }}
+        knowledgeBaseEnabled={knowledgeBaseEnabled}
+        setKnowledgeBaseEnabled={setKnowledgeBaseEnabled}
+      />
 
-            {/* 模型版本 */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <Cpu className="h-4 w-4 text-blue-500" />
-                模型运行环境
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => { setModelVersion("mlx"); localStorage.setItem("modelVersion", "mlx"); }}
-                  className={cn(
-                    "flex flex-col items-center gap-1 p-3 rounded-lg border-2 transition-all text-xs",
-                    modelVersion === "mlx"
-                      ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
-                      : "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
-                  )}
-                >
-                  <Monitor className="h-5 w-5" />
-                  <span className="font-medium">MLX (Apple Silicon)</span>
-                  <span className="text-[10px] text-gray-500">适用于 M1/M2/M3/M4 芯片</span>
-                </button>
-                <button
-                  onClick={() => { setModelVersion("gpu"); localStorage.setItem("modelVersion", "gpu"); }}
-                  className={cn(
-                    "flex flex-col items-center gap-1 p-3 rounded-lg border-2 transition-all text-xs",
-                    modelVersion === "gpu"
-                      ? "border-green-500 bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
-                      : "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
-                  )}
-                >
-                  <Zap className="h-5 w-5" />
-                  <span className="font-medium">GPU (CUDA/OpenCL)</span>
-                  <span className="text-[10px] text-gray-500">适用于 NVIDIA/AMD 显卡</span>
-                </button>
-              </div>
-            </div>
-
-            {/* 分析模式 */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <Bot className="h-4 w-4 text-purple-500" />
-                分析模式
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => { setAnalysisMode("full_agent"); localStorage.setItem("analysisMode", "full_agent"); }}
-                  className={cn(
-                    "flex flex-col items-start gap-1 p-3 rounded-lg border-2 transition-all text-xs",
-                    analysisMode === "full_agent"
-                      ? "border-purple-500 bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300"
-                      : "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
-                  )}
-                >
-                  <span className="font-medium">全程代理</span>
-                  <span className="text-[10px] text-gray-500 text-left">智能体自主完成全部分析流程，无需人工干预</span>
-                </button>
-                <button
-                  onClick={() => { setAnalysisMode("interactive"); localStorage.setItem("analysisMode", "interactive"); }}
-                  className={cn(
-                    "flex flex-col items-start gap-1 p-3 rounded-lg border-2 transition-all text-xs",
-                    analysisMode === "interactive"
-                      ? "border-orange-500 bg-orange-50 dark:bg-orange-900/20 text-orange-700 dark:text-orange-300"
-                      : "border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600"
-                  )}
-                >
-                  <span className="font-medium">交互模式</span>
-                  <span className="text-[10px] text-gray-500 text-left">用户参与任务拆分与分析角度选择</span>
-                </button>
-              </div>
-            </div>
-
-            {/* 分析策略与热度 */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <Sparkles className="h-4 w-4 text-amber-500" />
-                分析策略与热度
-              </div>
-              <div className="flex items-center gap-3 p-3 border rounded-lg">
-                <div className="flex-1 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-500 w-16">策略:</span>
-                    <Select value={analysisStrategy} onValueChange={setAnalysisStrategy}>
-                      <SelectTrigger className="h-7 flex-1 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求 — 直击要点</SelectItem>
-                        <SelectItem value="适度扩展" className="text-xs">适度扩展 — 兼顾关联</SelectItem>
-                        <SelectItem value="广泛延展" className="text-xs">广泛延展 — 深度探索</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-500 w-16">热度:</span>
-                    <Slider
-                      value={[temperature ?? (analysisStrategy === "聚焦诉求" ? 0.2 : analysisStrategy === "适度扩展" ? 0.4 : 0.6)]}
-                      min={0.0}
-                      max={1.0}
-                      step={0.05}
-                      onValueChange={(vals) => setTemperature(vals[0])}
-                      className="flex-1 h-4"
-                    />
-                    <span className="text-xs text-gray-500 w-10 text-right">
-                      {temperature !== null ? temperature.toFixed(2) : "auto"}
-                    </span>
-                    {temperature !== null && (
-                      <button
-                        onClick={() => setTemperature(null)}
-                        className="text-xs text-gray-400 hover:text-gray-600"
-                        title="恢复自动"
-                      >
-                        ↺
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* 七大原则 */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <BookOpen className="h-4 w-4 text-teal-500" />
-                智能体行为原则
-              </div>
-              <div className="space-y-1.5">
-                {(() => {
-                  const principleStates: Record<string, { state: boolean; setter: (v: boolean) => void }> = {
-                    selfCorrectionEnabled: { state: selfCorrectionEnabled, setter: setSelfCorrectionEnabled },
-                    shortTestEnabled: { state: shortTestEnabled, setter: setShortTestEnabled },
-                    taskDecompositionEnabled: { state: taskDecompositionEnabled, setter: setTaskDecompositionEnabled },
-                    explainabilityEnabled: { state: explainabilityEnabled, setter: setExplainabilityEnabled },
-                    efficientProcessingEnabled: { state: efficientProcessingEnabled, setter: setEfficientProcessingEnabled },
-                    deadLoopDetectionEnabled: { state: deadLoopDetectionEnabled, setter: setDeadLoopDetectionEnabled },
-                  };
-                  return ANALYSIS_PRINCIPLES.map((item) => {
-                    const ps = principleStates[item.key];
-                    return (
-                      <div key={item.key} className="flex items-center justify-between py-1.5 px-3 border rounded-lg">
-                        <div>
-                          <div className="text-xs font-medium">{item.label}</div>
-                          <div className="text-[10px] text-gray-500">{item.desc}</div>
-                        </div>
-                        <Switch
-                          checked={ps.state}
-                          onCheckedChange={(checked) => {
-                            ps.setter(checked);
-                            localStorage.setItem(item.key, checked ? "true" : "false");
-                          }}
-                        />
-                      </div>
-                    );
-                  });
-                })()}
-              </div>
-            </div>
-
-            {/* 知识库设置 */}
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <Database className="h-4 w-4 text-indigo-500" />
-                知识库与学习
-              </div>
-              <div className="flex items-center justify-between py-1.5 px-3 border rounded-lg">
-                <div>
-                  <div className="text-xs font-medium">启用知识库（雨途斩棘录）</div>
-                  <div className="text-[10px] text-gray-500">启用后智能体会阅读历史错误经验</div>
-                </div>
-                <Switch
-                  checked={knowledgeBaseEnabled}
-                  onCheckedChange={(checked) => {
-                    setKnowledgeBaseEnabled(checked);
-                    localStorage.setItem("knowledgeBaseEnabled", checked ? "true" : "false");
-                    toast({ description: checked ? "知识库已启用" : "知识库已停用" });
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* 输出格式说明 */}
-            <div className="p-3 bg-gray-50 dark:bg-gray-900/30 rounded-lg">
-              <div className="text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5">输出规范</div>
-              <ul className="text-[10px] text-gray-500 space-y-0.5">
-                <li>• 所有分析输出使用简体中文</li>
-                <li>• 报告支持 PDF、DOCX、PPTX 三种格式导出</li>
-                <li>• 图表统一使用 seaborn 专业风格</li>
-                <li>• 数据类型自动检测与校验</li>
-                <li>• 机器学习模型附带特征重要性分析</li>
-              </ul>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setShowSettingsDialog(false)}>
-              关闭
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 编辑记录对话框 - 超级用户专用 */}
-      {currentUser === "rainforgrain" && (
-        <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
-          <DialogContent className="sm:max-w-[600px]">
-            <DialogHeader>
-              <DialogTitle>编辑错误记录</DialogTitle>
-            </DialogHeader>
-            <div className="space-y-4 py-4 max-h-[70vh] overflow-y-auto">
-              <div className="space-y-2">
-                <label className="text-sm font-medium">错误类型</label>
-                <Input
-                  value={editRecord?.error_type || ""}
-                  onChange={(e) => setEditRecord({ ...editRecord, error_type: e.target.value })}
-                  placeholder="例如: ImportError"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">错误哈希</label>
-                <Input
-                  value={editRecord?.error_hash || ""}
-                  disabled
-                  className="bg-gray-100 dark:bg-gray-800"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">错误消息</label>
-                <textarea
-                  value={editRecord?.error_message || ""}
-                  onChange={(e) => setEditRecord({ ...editRecord, error_message: e.target.value })}
-                  className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-h-[80px]"
-                  placeholder="错误消息..."
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">解决方案</label>
-                <textarea
-                  value={editRecord?.solution || ""}
-                  onChange={(e) => setEditRecord({ ...editRecord, solution: e.target.value })}
-                  className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-h-[100px]"
-                  placeholder="解决方案描述..."
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">解决方案代码</label>
-                <textarea
-                  value={editRecord?.solution_code || ""}
-                  onChange={(e) => setEditRecord({ ...editRecord, solution_code: e.target.value })}
-                  className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-h-[120px] font-mono text-xs"
-                  placeholder="解决方案代码..."
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm font-medium">置信度 (0-1)</label>
-                <Input
-                  type="number"
-                  min="0"
-                  max="1"
-                  step="0.1"
-                  value={editRecord?.confidence || 0}
-                  onChange={(e) => setEditRecord({ ...editRecord, confidence: parseFloat(e.target.value) || 0 })}
-                />
-              </div>
-            </div>
-            <AlertDialogFooter>
-              <AlertDialogCancel onClick={() => setShowEditDialog(false)}>取消</AlertDialogCancel>
-              <AlertDialogAction
-                onClick={() => {
-                  handleUpdateYutuRecord(editRecord);
-                  setShowEditDialog(false);
-                }}
-              >
-                保存修改
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </DialogContent>
-        </Dialog>
-      )}
-
-      {/* 删除确认对话框 */}
-      {currentUser === "rainforgrain" && (
-        <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>确认删除记录？</AlertDialogTitle>
-              <AlertDialogDescription>
-                这将软删除该错误记录，使其在界面中不再显示。此操作可逆（通过数据库恢复）。
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>取消</AlertDialogCancel>
-              <AlertDialogAction
-                className="bg-red-600 hover:bg-red-700"
-                onClick={() => {
-                  if (editRecord?.error_hash) {
-                    handleDeleteYutuRecord(editRecord.error_hash);
-                  }
-                  setShowDeleteConfirm(false);
-                }}
-              >
-                确认删除
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      )}
+      {/* 编辑/删除记录由 KnowledgeSettingsDialog 内部管理 */}
+      <KnowledgeSettingsDialog
+        showKnowledgeSettings={showKnowledgeSettings}
+        setShowKnowledgeSettings={setShowKnowledgeSettings}
+        knowledgeBaseEnabled={knowledgeBaseEnabled}
+        setKnowledgeBaseEnabled={setKnowledgeBaseEnabled}
+        currentUser={currentUser}
+        showEditDialog={showEditDialog}
+        setShowEditDialog={setShowEditDialog}
+        editRecord={editRecord}
+        setEditRecord={setEditRecord}
+        showDeleteConfirm={showDeleteConfirm}
+        setShowDeleteConfirm={setShowDeleteConfirm}
+        onUpdateRecord={handleUpdateYutuRecord}
+        onDeleteRecord={handleDeleteYutuRecord}
+      />
 
       {/* 智能体介绍对话框 */}
-      <Dialog open={showAgentIntro} onOpenChange={setShowAgentIntro}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Bot className="h-5 w-5 text-blue-600" />
-              智能体介绍
-            </DialogTitle>
-          </DialogHeader>
-          <div className="py-4 space-y-4 text-sm leading-relaxed">
-            <div className="space-y-3">
-              <div>
-                <h3 className="font-semibold text-blue-600 dark:text-blue-400 mb-1">角色定位</h3>
-                <p className="text-gray-600 dark:text-gray-300">
-                  我是DeepAnalyze，一位精通Python和R语言的数据科学家，同时也是专注于中国海关风险管理和风险防控的数据分析专家。我的核心使命是忠于国家安全，服务海关履行职责，通过大数据分析协助维护贸易秩序。
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-blue-600 dark:text-blue-400 mb-1">特点特长</h3>
-                <p className="text-gray-600 dark:text-gray-300">
-                  基于数据统计、比较、相关性和逻辑推理，深入分析进出口业务主体行为。运用规律分析、统计分析、对比分析、关联分析等方法挖掘走私违规、逃证逃税、违反安全准入等潜在风险。支持三种分析策略：聚焦诉求（直击要点）、适度扩展（适量关联）、广泛延展（深度发散），灵活调整分析深度。
-                </p>
-              </div>
-              <div>
-                <h3 className="font-semibold text-blue-600 dark:text-blue-400 mb-1">处理问题原则</h3>
-                <p className="text-gray-600 dark:text-gray-300">
-                  严格遵循分析报告规范结构：分析思路→主体分析内容→分析小结。根据数据特性和时间跨度自动调整分析维度，确保结论准确可靠。以风险识别为核心，提供明确的风险点和推理依据，协助风控专家做出精准决策。
-                </p>
-              </div>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <AgentIntroDialog open={showAgentIntro} onOpenChange={setShowAgentIntro} />
 
       {/* 风调雨顺 - 过程指导对话框 */}
-      <Dialog open={sideGuidanceOpen} onOpenChange={setSideGuidanceOpen}>
-        <DialogContent className="sm:max-w-[500px]">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Sparkles className="h-5 w-5 text-blue-600" />
-              风调雨顺 - 过程指导
-            </DialogTitle>
-          </DialogHeader>
-          <div className="py-2 text-sm text-gray-500 dark:text-gray-400 leading-relaxed">
-            在智能体分析过程中，您可以随时提交新的需求、方法或条件。
-            这些信息将与当前任务结合，指导智能体的下一步动作。
-          </div>
+      <SideGuidanceDialog
+        open={sideGuidanceOpen}
+        onOpenChange={setSideGuidanceOpen}
+        text={sideGuidanceText}
+        onTextChange={setSideGuidanceText}
+        history={sideGuidanceHistory}
+        isSubmitting={isSubmittingGuidance}
+        onSubmit={handleSendGuidance}
+      />
 
-          {sideGuidanceHistory.length > 0 && (
-            <div className="flex flex-wrap items-center gap-1.5 pt-2 pb-1 border-t border-gray-100 dark:border-gray-800">
-              <span className="text-xs text-gray-400 mr-1">历史指导:</span>
-              {sideGuidanceHistory.map((h, i) => (
-                <Button
-                  key={i}
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setSideGuidanceText(h)}
-                  className={cn(
-                    "h-6 px-2 text-xs border border-gray-200 dark:border-gray-700 hover:bg-blue-50 dark:hover:bg-blue-900/20 hover:text-blue-600 dark:hover:text-blue-400",
-                    sideGuidanceText === h && "bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 border-blue-200 dark:border-blue-800"
-                  )}
-                  title={h.substring(0, 50) + (h.length > 50 ? "..." : "")}
-                >
-                  &lt;{i + 1}&gt;
-                </Button>
-              ))}
-            </div>
-          )}
-
-          <div className="py-4">
-            <Textarea
-              value={sideGuidanceText}
-              onChange={(e) => setSideGuidanceText(e.target.value)}
-              placeholder="请输入您的过程指导要求或 Side Task..."
-              className="min-h-[150px] resize-none focus-visible:ring-blue-500"
-            />
-          </div>
-          <DialogFooter className="gap-2 sm:gap-0">
-            <Button
-              variant="outline"
-              onClick={() => {
-                setSideGuidanceOpen(false);
-                setSideGuidanceText("");
-              }}
-            >
-              取消
-            </Button>
-            <Button
-              onClick={handleSendGuidance}
-              disabled={isSubmittingGuidance || !sideGuidanceText.trim()}
-              className="bg-blue-600 hover:bg-blue-700 text-white"
-            >
-              {isSubmittingGuidance ? (
-                <>
-                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  提交中...
-                </>
-              ) : (
-                "确认提交"
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={showSystemSettings} onOpenChange={setShowSystemSettings}>
-        <DialogContent className="dialog-page-like max-w-none w-auto h-auto p-0 overflow-hidden flex flex-col">
-          <DialogHeader className="px-6 py-4 border-b">
-            <DialogTitle className="flex items-center gap-2">
-              <Database className="h-5 w-5 text-blue-600" />
-              系统设置
-            </DialogTitle>
-            <DialogDescription>
-              统一管理模型配置、数据库连接和知识库设置。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
-            <Tabs value={systemSettingsTab} onValueChange={(value) => setSystemSettingsTab(value as "model" | "database" | "knowledge")} className="h-full flex flex-col">
-              <TabsList className="grid w-full grid-cols-3 max-w-[520px]">
-                <TabsTrigger value="model">模型设置</TabsTrigger>
-                <TabsTrigger value="database">数据库设置</TabsTrigger>
-                <TabsTrigger value="knowledge">知识库设置</TabsTrigger>
-              </TabsList>
-
-              <TabsContent value="model" className="mt-4 flex-1 overflow-y-auto space-y-6">
-                <section className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="model-preset">预设模型</Label>
-                      <Select
-                        value={modelProviderConfig.id}
-                        onValueChange={applyModelPreset}
-                      >
-                        <SelectTrigger id="model-preset">
-                          <SelectValue placeholder="选择模型预设" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {MODEL_PROVIDER_PRESETS.map((preset) => (
-                            <SelectItem key={preset.id} value={preset.id}>
-                              {preset.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="model-provider-type">Provider 类型</Label>
-                      <Input
-                        id="model-provider-type"
-                        value={modelProviderConfig.providerType}
-                        onChange={(e) =>
-                          setModelProviderConfig((prev) => ({
-                            ...prev,
-                            providerType: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="model-label">显示名称</Label>
-                      <Input
-                        id="model-label"
-                        value={modelProviderConfig.label}
-                        onChange={(e) =>
-                          setModelProviderConfig((prev) => ({ ...prev, label: e.target.value }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="model-name">模型名</Label>
-                      <Input
-                        id="model-name"
-                        value={modelProviderConfig.model}
-                        onChange={(e) =>
-                          setModelProviderConfig((prev) => ({ ...prev, model: e.target.value }))
-                        }
-                      />
-                      {availableModels.length > 0 ? (
-                        <Select
-                          value={modelProviderConfig.model}
-                          onValueChange={(value) =>
-                            setModelProviderConfig((prev) => ({ ...prev, model: value }))
-                          }
-                        >
-                          <SelectTrigger className="mt-2">
-                            <SelectValue placeholder="从已获取模型列表中选择" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {availableModels.map((modelName) => (
-                              <SelectItem key={modelName} value={modelName}>
-                                {modelName}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      ) : null}
-                    </div>
-                    <div className="col-span-2 space-y-1.5">
-                      <Label htmlFor="model-description">描述</Label>
-                      <Input
-                        id="model-description"
-                        value={modelProviderConfig.description}
-                        onChange={(e) =>
-                          setModelProviderConfig((prev) => ({ ...prev, description: e.target.value }))
-                        }
-                      />
-                    </div>
-                    <div className="col-span-2 space-y-1.5">
-                      <Label htmlFor="model-base-url">Base URL</Label>
-                      <Input
-                        id="model-base-url"
-                        value={modelProviderConfig.baseUrl}
-                        onChange={(e) =>
-                          setModelProviderConfig((prev) => ({ ...prev, baseUrl: e.target.value }))
-                        }
-                      />
-                    </div>
-                    <div className="col-span-2 space-y-1.5">
-                      <Label htmlFor="model-api-key">API Key</Label>
-                      <Input
-                        id="model-api-key"
-                        type="password"
-                        value={modelProviderConfig.apiKey}
-                        onChange={(e) =>
-                          setModelProviderConfig((prev) => ({ ...prev, apiKey: e.target.value }))
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  <div className="rounded-lg border p-4 space-y-3 bg-gray-50 dark:bg-gray-900/30">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <div className="text-sm font-medium">自定义请求头</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">
-                          用于兼容自定义 OpenAI 接口、网关或厂商额外认证头。
-                        </div>
-                      </div>
-                      <Button variant="outline" size="sm" onClick={() => setShowRawModelHeaders((prev) => !prev)}>
-                        {showRawModelHeaders ? "收起" : "展开"}
-                      </Button>
-                    </div>
-                    {showRawModelHeaders ? (
-                      <Textarea
-                        value={modelHeadersInput}
-                        onChange={(e) => {
-                          const nextValue = e.target.value;
-                          setModelHeadersInput(nextValue);
-                          setModelProviderConfig((prev) => ({
-                            ...prev,
-                            headers: parseModelHeadersInput(nextValue),
-                          }));
-                        }}
-                        className="min-h-[120px] font-mono text-xs"
-                        placeholder={"Authorization: Bearer xxx\nX-Trace-Id: demo"}
-                      />
-                    ) : null}
-                  </div>
-
-                  <div className="rounded-lg border p-4 space-y-4 bg-white dark:bg-gray-950">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <div className="text-sm font-medium">模型配置测试</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">
-                          获取当前提供商可用模型名称，并从列表中确认实际使用的模型。
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={handleFetchModelList}
-                          disabled={isFetchingModelList}
-                        >
-                          {isFetchingModelList ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
-                          获取模型名称
-                        </Button>
-                        <Button size="sm" onClick={handleSaveModelConfig}>
-                          保存模型配置
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="rounded-md border bg-gray-50 dark:bg-gray-900/30 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
-                      <div>状态：{modelTestStatus.status}</div>
-                      <div>结果：{modelTestStatus.message}</div>
-                      <div>时间：{modelTestStatus.testedAt || "-"}</div>
-                      <div>当前生效模型：{modelProviderConfig.model || "-"}</div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-lg border p-4 space-y-2 bg-blue-50 dark:bg-blue-950/20 text-sm">
-                    <div className="font-medium text-blue-700 dark:text-blue-300">当前分析参数</div>
-                    <div className="text-xs text-blue-700 dark:text-blue-300">分析策略与温度仍保留在聊天输入区，不从那里移除，避免影响现有分析流程。</div>
-                    <div className="text-xs text-gray-600 dark:text-gray-300">当前模型：{modelProviderConfig.model}</div>
-                    <div className="text-xs text-gray-600 dark:text-gray-300">当前分析策略：{analysisStrategy}</div>
-                    <div className="text-xs text-gray-600 dark:text-gray-300">当前温度：{temperature ?? "自动"}</div>
-                  </div>
-                </section>
-              </TabsContent>
-
-              <TabsContent value="database" className="mt-4 flex-1 overflow-y-auto">
-                <div className="h-full min-h-0 overflow-hidden rounded-lg border">
-                  <ResizablePanelGroup direction="horizontal" className="h-full min-h-[560px]">
-                    <ResizablePanel defaultSize={20} minSize={15} className="bg-gray-50 dark:bg-gray-900/20 border-r">
-                      <div className="p-4 space-y-4">
-                        <Label className="text-sm font-semibold">选择数据库类型</Label>
-                        <RadioGroup value={dbType} onValueChange={handleDbTypeChange} className="space-y-2">
-                          {[
-                            { id: "mysql", label: "MySQL", icon: "🐬" },
-                            { id: "mssql", label: "SQL Server", icon: "🪟" },
-                            { id: "postgresql", label: "PostgreSQL", icon: "🐘" },
-                            { id: "oracle", label: "Oracle", icon: "🏢" },
-                            { id: "sqlite", label: "SQLite", icon: "📂" },
-                          ].map((item) => (
-                            <div key={item.id} className="flex items-center space-x-2 p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
-                              <RadioGroupItem value={item.id} id={`system-${item.id}`} />
-                              <Label htmlFor={`system-${item.id}`} className="flex-1 cursor-pointer flex items-center gap-2">
-                                <span>{item.icon}</span>
-                                <span>{item.label}</span>
-                              </Label>
-                            </div>
-                          ))}
-                        </RadioGroup>
-                      </div>
-                    </ResizablePanel>
-
-                    <ResizableHandle withHandle />
-
-                    <ResizablePanel defaultSize={80} minSize={50}>
-                      <div className="h-full flex flex-col overflow-hidden">
-                        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                          <section className="space-y-3">
-                            <h3 className="text-sm font-semibold flex items-center gap-2">
-                              <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">1</span>
-                              配置连接信息
-                            </h3>
-                            <div className="grid grid-cols-2 gap-4">
-                              <div className="space-y-1.5">
-                                <Label htmlFor="system-db-host">主机名 / 地址</Label>
-                                <Input id="system-db-host" placeholder="localhost" value={dbConfig.host} onChange={(e) => setDbConfig({ ...dbConfig, host: e.target.value })} />
-                              </div>
-                              <div className="space-y-1.5">
-                                <Label htmlFor="system-db-port">端口</Label>
-                                <Input id="system-db-port" placeholder={getDefaultPortForDbType(dbType)} value={dbConfig.port} onChange={(e) => setDbConfig({ ...dbConfig, port: e.target.value })} />
-                              </div>
-                              <div className="space-y-1.5">
-                                <Label htmlFor="system-db-user">用户名</Label>
-                                <Input id="system-db-user" value={dbConfig.user} onChange={(e) => setDbConfig({ ...dbConfig, user: e.target.value })} />
-                              </div>
-                              <div className="space-y-1.5">
-                                <Label htmlFor="system-db-pass">密码</Label>
-                                <Input id="system-db-pass" type="password" value={dbConfig.password} onChange={(e) => setDbConfig({ ...dbConfig, password: e.target.value })} />
-                              </div>
-                              <div className="col-span-2 space-y-1.5">
-                                <Label htmlFor="system-db-name">{dbType === "sqlite" ? "SQLite 文件绝对路径" : "数据库名称"}</Label>
-                                <Input id="system-db-name" value={dbConfig.database} onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })} />
-                              </div>
-                            </div>
-                            <div className="flex gap-2 justify-end">
-                              <Button variant="outline" size="sm" onClick={handleTestConnection} disabled={isTestingDb}>
-                                {isTestingDb ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
-                                测试连接
-                              </Button>
-                            </div>
-                          </section>
-
-                          <section className={`space-y-3 transition-opacity ${!isDbTested ? "opacity-50 pointer-events-none" : ""}`}>
-                            <h3 className="text-sm font-semibold flex items-center gap-2">
-                              <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">2</span>
-                              智能生成查询语句
-                              {!isDbTested && <span className="text-xs font-normal text-amber-600 ml-2">(请先完成步骤 1 测试连接)</span>}
-                            </h3>
-                            <div className="space-y-2">
-                              <Textarea
-                                placeholder="描述您的查询需求，例如：统计过去三个月每个月的进出口额总计，并按月份排序"
-                                className="min-h-[80px] resize-none"
-                                value={dbPrompt}
-                                onChange={(e) => setDbPrompt(e.target.value)}
-                              />
-                              <div className="flex justify-end">
-                                <Button size="sm" className="bg-blue-600 hover:bg-blue-700" onClick={handleGenerateSql} disabled={isGeneratingSql || !dbPrompt.trim()}>
-                                  {isGeneratingSql ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : <Sparkles className="mr-2 h-3 w-3" />}
-                                  生成 SQL
-                                </Button>
-                              </div>
-                            </div>
-                          </section>
-
-                          <section className={`space-y-3 transition-opacity ${!isDbTested ? "opacity-50 pointer-events-none" : ""}`}>
-                            <h3 className="text-sm font-semibold flex items-center gap-2">
-                              <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">3</span>
-                              预览并执行 SQL
-                            </h3>
-                            <div className="space-y-2">
-                              <Textarea className="min-h-[120px] font-mono text-sm" value={dbGeneratedSql} onChange={(e) => setDbGeneratedSql(e.target.value)} spellCheck={false} />
-                              <div className="grid grid-cols-2 gap-4 items-end bg-gray-50 dark:bg-gray-900/40 p-4 rounded-lg border">
-                                <div className="space-y-1.5">
-                                  <Label htmlFor="system-dataset-name">保存为数据集名称</Label>
-                                  <Input id="system-dataset-name" value={dbDatasetName} onChange={(e) => setDbDatasetName(e.target.value)} />
-                                </div>
-                                <div className="space-y-1.5">
-                                  <Label>执行模式</Label>
-                                  <Select value={dbExecuteMode} onValueChange={(v: any) => setDbExecuteMode(v)}>
-                                    <SelectTrigger>
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem value="overwrite">覆盖现有文件</SelectItem>
-                                      <SelectItem value="append">追加到现有文件</SelectItem>
-                                    </SelectContent>
-                                  </Select>
-                                </div>
-                              </div>
-                            </div>
-                          </section>
-                        </div>
-
-                        <div className="px-6 py-4 border-t bg-gray-50 dark:bg-gray-950 flex justify-end gap-3">
-                          <Button
-                            className="bg-green-600 hover:bg-green-700 text-white min-w-[120px]"
-                            onClick={handleExecuteDbSql}
-                            disabled={isExecutingDbSql || !dbGeneratedSql.trim()}
-                          >
-                            {isExecutingDbSql ? (
-                              <>
-                                <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                                正在导入...
-                              </>
-                            ) : (
-                              <>
-                                <Play className="mr-2 h-4 w-4" />
-                                立即执行并导入
-                              </>
-                            )}
-                          </Button>
-                        </div>
-                      </div>
-                    </ResizablePanel>
-                  </ResizablePanelGroup>
-                </div>
-              </TabsContent>
-
-              <TabsContent value="knowledge" className="mt-4 flex-1 overflow-y-auto space-y-6">
-                <section className="space-y-6">
-                  <div className="rounded-lg border p-4 bg-white dark:bg-gray-950 space-y-4">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <div className="text-sm font-medium">内部知识库（雨途斩棘录）</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">保留当前 Yutu 注入与右上角独立入口。这里负责正式配置与状态查看。</div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {isLoadingKnowledgeConfig ? <RefreshCw className="h-4 w-4 animate-spin text-gray-400" /> : null}
-                        <Button variant="outline" size="sm" onClick={loadKnowledgeConfig} disabled={isLoadingKnowledgeConfig}>
-                          刷新配置
-                        </Button>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="flex items-center justify-between p-4 border rounded-lg">
-                        <div>
-                          <div className="text-sm font-medium">启用内部知识库</div>
-                          <div className="text-xs text-gray-500 dark:text-gray-400">控制当前会话是否继续使用雨途知识注入。</div>
-                        </div>
-                        <Switch checked={knowledgeBaseEnabled} onCheckedChange={setKnowledgeBaseEnabled} />
-                      </div>
-                      <div className="rounded-lg border p-4 space-y-2 bg-gray-50 dark:bg-gray-900/30">
-                        <div className="text-sm font-medium">当前状态摘要</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">内部知识库：{knowledgeBaseEnabled ? "已启用" : "已停用"}</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">雨途记录数：{yutuRecords.length}</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">当前用户：{currentUser === "rainforgrain" ? "超级用户" : "普通用户"}</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">知识记录中：{isRecordingKnowledge ? "是" : "否"}</div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1.5">
-                        <Label>默认知识库视图</Label>
-                        <Select value={knowledgePreferredView} onValueChange={(value: "html" | "table") => setKnowledgePreferredView(value)}>
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="html">HTML 视图</SelectItem>
-                            <SelectItem value="table">表格视图</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="rounded-md border p-3 space-y-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <div className="text-sm font-medium">显示知识提示</div>
-                            <div className="text-[11px] text-gray-500 dark:text-gray-400">仅影响前端提示文案显示。</div>
-                          </div>
-                          <Switch checked={showKnowledgeHints} onCheckedChange={setShowKnowledgeHints} />
-                        </div>
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <div className="text-sm font-medium">分析后提示打开雨途</div>
-                            <div className="text-[11px] text-gray-500 dark:text-gray-400">仅影响界面提示，不强制自动打开。</div>
-                          </div>
-                          <Switch checked={autoOpenYutuAfterAnalysis} onCheckedChange={setAutoOpenYutuAfterAnalysis} />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-lg border p-4 bg-white dark:bg-gray-950 space-y-5">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <div className="text-sm font-medium">外部知识服务（本地 Docker）</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400">正式保存并测试本地 Docker 下的 Onyx 与 Dify Workflow 配置。</div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <span className="text-xs text-gray-500 dark:text-gray-400">启用外部知识服务</span>
-                        <Switch checked={externalKnowledgeEnabled} onCheckedChange={setExternalKnowledgeEnabled} />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="rounded-lg border p-4 space-y-4">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <div className="text-sm font-medium">Onyx</div>
-                            <div className="text-[11px] text-gray-500 dark:text-gray-400">测试服务可达性 + 检索接口。</div>
-                          </div>
-                          <Switch checked={onyxConfig.enabled} onCheckedChange={(checked) => setOnyxConfig((prev) => ({ ...prev, enabled: checked }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Base URL</Label>
-                          <Input value={onyxConfig.base_url} onChange={(e) => setOnyxConfig((prev) => ({ ...prev, base_url: e.target.value }))} placeholder="http://localhost:3000" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>API Key</Label>
-                          <Input
-                            type="password"
-                            value={onyxConfig.api_key}
-                            onChange={(e) => setOnyxConfig((prev) => ({ ...prev, api_key: e.target.value, has_api_key: prev.has_api_key || Boolean(e.target.value) }))}
-                            placeholder={onyxConfig.has_api_key ? "已保存，留空则保持不变" : "按需填写 API Key"}
-                          />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>检索路径</Label>
-                          <Input value={onyxConfig.search_path} onChange={(e) => setOnyxConfig((prev) => ({ ...prev, search_path: e.target.value }))} placeholder="/api/chat/search" />
-                        </div>
-                        <div className="rounded-md border bg-gray-50 dark:bg-gray-900/30 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
-                          <div>状态：{knowledgeTestResults.onyx?.status || "never_tested"}</div>
-                          <div>结果：{knowledgeTestResults.onyx?.message || "尚未测试"}</div>
-                          <div>时间：{knowledgeTestResults.onyx?.tested_at || "-"}</div>
-                        </div>
-                        <div className="flex justify-end">
-                          <Button variant="outline" size="sm" onClick={() => handleTestKnowledgeProvider("onyx")} disabled={knowledgeTestTarget !== null || isSavingKnowledgeConfig}>
-                            {knowledgeTestTarget === "onyx" ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
-                            测试 Onyx
-                          </Button>
-                        </div>
-                      </div>
-
-                      <div className="rounded-lg border p-4 space-y-4">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <div className="text-sm font-medium">Dify Workflow</div>
-                            <div className="text-[11px] text-gray-500 dark:text-gray-400">测试 Workflow API、鉴权和 workflow_id。</div>
-                          </div>
-                          <Switch checked={difyConfig.enabled} onCheckedChange={(checked) => setDifyConfig((prev) => ({ ...prev, enabled: checked }))} />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Base URL</Label>
-                          <Input value={difyConfig.base_url} onChange={(e) => setDifyConfig((prev) => ({ ...prev, base_url: e.target.value }))} placeholder="http://localhost:5000" />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>API Key</Label>
-                          <Input
-                            type="password"
-                            value={difyConfig.api_key}
-                            onChange={(e) => setDifyConfig((prev) => ({ ...prev, api_key: e.target.value, has_api_key: prev.has_api_key || Boolean(e.target.value) }))}
-                            placeholder={difyConfig.has_api_key ? "已保存，留空则保持不变" : "请输入 Dify API Key"}
-                          />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label>Workflow ID</Label>
-                          <Input value={difyConfig.workflow_id} onChange={(e) => setDifyConfig((prev) => ({ ...prev, workflow_id: e.target.value }))} placeholder="workflow-xxxx" />
-                        </div>
-                        <div className="rounded-md border bg-gray-50 dark:bg-gray-900/30 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
-                          <div>状态：{knowledgeTestResults.dify?.status || "never_tested"}</div>
-                          <div>结果：{knowledgeTestResults.dify?.message || "尚未测试"}</div>
-                          <div>时间：{knowledgeTestResults.dify?.tested_at || "-"}</div>
-                        </div>
-                        <div className="flex justify-end">
-                          <Button variant="outline" size="sm" onClick={() => handleTestKnowledgeProvider("dify")} disabled={knowledgeTestTarget !== null || isSavingKnowledgeConfig}>
-                            {knowledgeTestTarget === "dify" ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
-                            测试 Dify
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {showKnowledgeHints ? (
-                      <div className="rounded-lg border border-dashed p-4 text-xs text-gray-500 dark:text-gray-400">
-                        建议先保存，再分别测试 Onyx 与 Dify。保存成功不代表可用，只有测试通过才会更新最近测试状态。
-                      </div>
-                    ) : null}
-                  </div>
-                </section>
-              </TabsContent>
-            </Tabs>
-          </div>
-          <DialogFooter className="px-6 py-4 border-t justify-between">
-            <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-              {systemSettingsTab === "model"
-                ? `当前模型：${modelProviderConfig.model || "-"}`
-                : systemSettingsTab === "database"
-                  ? `数据库测试状态：${isDbTested ? "已通过" : "未测试"}`
-                  : knowledgeSettingsLoaded
-                    ? "配置已加载"
-                    : "尚未加载配置"}
-            </div>
-            <div className="flex items-center gap-2">
-              {systemSettingsTab === "model" ? (
-                <Button onClick={handleSaveModelConfig}>保存模型配置</Button>
-              ) : null}
-              {systemSettingsTab === "database" ? (
-                <Button onClick={handleSaveDatabaseConfig}>保存数据库配置</Button>
-              ) : null}
-              {systemSettingsTab === "knowledge" ? (
-                <Button onClick={handleSaveKnowledgeConfig} disabled={isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
-                  {isSavingKnowledgeConfig ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  保存知识库配置
-                </Button>
-              ) : null}
-              <Button variant="outline" onClick={() => setShowSystemSettings(false)}>关闭</Button>
-            </div>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <SystemSettingsDialog
+        open={showSystemSettings}
+        onOpenChange={setShowSystemSettings}
+        systemSettingsTab={systemSettingsTab}
+        setSystemSettingsTab={setSystemSettingsTab}
+        modelProviderConfig={modelProviderConfig}
+        setModelProviderConfig={setModelProviderConfig}
+        applyModelPreset={applyModelPreset}
+        showRawModelHeaders={showRawModelHeaders}
+        setShowRawModelHeaders={setShowRawModelHeaders}
+        modelHeadersInput={modelHeadersInput}
+        setModelHeadersInput={setModelHeadersInput}
+        handleFetchModelList={handleFetchModelList}
+        isFetchingModelList={isFetchingModelList}
+        handleSaveModelConfig={handleSaveModelConfig}
+        modelTestStatus={modelTestStatus}
+        availableModels={availableModels}
+        analysisStrategy={analysisStrategy}
+        temperature={temperature}
+        dbType={dbType}
+        handleDbTypeChange={handleDbTypeChange}
+        dbConfig={dbConfig}
+        setDbConfig={setDbConfig}
+        getDefaultPort={getDefaultPortForDbType}
+        handleTestConnection={handleTestConnection}
+        isTestingDb={isTestingDb}
+        isDbTested={isDbTested}
+        dbPrompt={dbPrompt}
+        setDbPrompt={setDbPrompt}
+        handleGenerateSql={handleGenerateSql}
+        isGeneratingSql={isGeneratingSql}
+        dbGeneratedSql={dbGeneratedSql}
+        setDbGeneratedSql={setDbGeneratedSql}
+        dbDatasetName={dbDatasetName}
+        setDbDatasetName={setDbDatasetName}
+        dbExecuteMode={dbExecuteMode}
+        setDbExecuteMode={setDbExecuteMode}
+        handleExecuteDbSql={handleExecuteDbSql}
+        isExecutingDbSql={isExecutingDbSql}
+        handleSaveDatabaseConfig={handleSaveDatabaseConfig}
+        isLoadingKnowledgeConfig={isLoadingKnowledgeConfig}
+        loadKnowledgeConfig={loadKnowledgeConfig}
+        knowledgeBaseEnabled={knowledgeBaseEnabled}
+        setKnowledgeBaseEnabled={setKnowledgeBaseEnabled}
+        yutuRecords={yutuRecords}
+        currentUser={currentUser}
+        isRecordingKnowledge={isRecordingKnowledge}
+        knowledgePreferredView={knowledgePreferredView}
+        setKnowledgePreferredView={setKnowledgePreferredView}
+        showKnowledgeHints={showKnowledgeHints}
+        setShowKnowledgeHints={setShowKnowledgeHints}
+        autoOpenYutuAfterAnalysis={autoOpenYutuAfterAnalysis}
+        setAutoOpenYutuAfterAnalysis={setAutoOpenYutuAfterAnalysis}
+        externalKnowledgeEnabled={externalKnowledgeEnabled}
+        setExternalKnowledgeEnabled={setExternalKnowledgeEnabled}
+        onyxConfig={onyxConfig}
+        setOnyxConfig={setOnyxConfig}
+        difyConfig={difyConfig}
+        setDifyConfig={setDifyConfig}
+        knowledgeTestResults={knowledgeTestResults}
+        handleTestKnowledgeProvider={handleTestKnowledgeProvider}
+        knowledgeTestTarget={knowledgeTestTarget}
+        isSavingKnowledgeConfig={isSavingKnowledgeConfig}
+        handleSaveKnowledgeConfig={handleSaveKnowledgeConfig}
+        knowledgeSettingsLoaded={knowledgeSettingsLoaded}
+      />
 
       {/* 数据库连接对话框 */}
-      <Dialog open={showDatabaseDialog} onOpenChange={setShowDatabaseDialog}>
-        <DialogContent className="max-w-[95vw] w-[1400px] h-[75vh] p-0 overflow-hidden flex flex-col">
-          <DialogHeader className="px-6 py-4 border-b">
-            <DialogTitle className="flex items-center gap-2">
-              <Database className="h-5 w-5 text-blue-600" />
-              连接数据库并查询数据
-            </DialogTitle>
-          </DialogHeader>
-
-          <div className="flex-1 min-h-0 overflow-hidden">
-            <ResizablePanelGroup direction="horizontal" className="h-full">
-              {/* 左侧：数据库类型选择 */}
-              <ResizablePanel defaultSize={20} minSize={15} className="bg-gray-50 dark:bg-gray-900/20 border-r">
-                <div className="p-4 space-y-4">
-                  <Label className="text-sm font-semibold">选择数据库类型</Label>
-                  <RadioGroup value={dbType} onValueChange={handleDbTypeChange} className="space-y-2">
-                    {[
-                      { id: "mysql", label: "MySQL", icon: "🐬" },
-                      { id: "mssql", label: "SQL Server", icon: "🪟" },
-                      { id: "postgresql", label: "PostgreSQL", icon: "🐘" },
-                      { id: "oracle", label: "Oracle", icon: "🏢" },
-                      { id: "sqlite", label: "SQLite", icon: "📂" },
-                    ].map((item) => (
-                      <div key={item.id} className="flex items-center space-x-2 p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
-                        <RadioGroupItem value={item.id} id={item.id} />
-                        <Label htmlFor={item.id} className="flex-1 cursor-pointer flex items-center gap-2">
-                          <span>{item.icon}</span>
-                          <span>{item.label}</span>
-                        </Label>
-                      </div>
-                    ))}
-                  </RadioGroup>
-                </div>
-              </ResizablePanel>
-
-              <ResizableHandle withHandle />
-
-              {/* 右侧：配置、NL输入、SQL编辑器 */}
-              <ResizablePanel defaultSize={80} minSize={50}>
-                <div className="h-full flex flex-col overflow-hidden">
-                  <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                    {/* 1. 配置连接 */}
-                    <section className="space-y-3">
-                      <h3 className="text-sm font-semibold flex items-center gap-2">
-                        <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">1</span>
-                        配置连接信息
-                      </h3>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-1.5">
-                          <Label htmlFor="db-host">主机名 / 地址</Label>
-                          <Input
-                            id="db-host"
-                            placeholder="localhost"
-                            value={dbConfig.host}
-                            onChange={(e) => setDbConfig({ ...dbConfig, host: e.target.value })}
-                          />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label htmlFor="db-port">端口</Label>
-                          <Input
-                            id="db-port"
-                            placeholder={getDefaultPortForDbType(dbType)}
-                            value={dbConfig.port}
-                            onChange={(e) => setDbConfig({ ...dbConfig, port: e.target.value })}
-                          />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label htmlFor="db-user">用户名</Label>
-                          <Input
-                            id="db-user"
-                            value={dbConfig.user}
-                            onChange={(e) => setDbConfig({ ...dbConfig, user: e.target.value })}
-                          />
-                        </div>
-                        <div className="space-y-1.5">
-                          <Label htmlFor="db-pass">密码</Label>
-                          <Input
-                            id="db-pass"
-                            type="password"
-                            value={dbConfig.password}
-                            onChange={(e) => setDbConfig({ ...dbConfig, password: e.target.value })}
-                          />
-                        </div>
-                        <div className="col-span-2 space-y-1.5">
-                          <Label htmlFor="db-name">{dbType === "sqlite" ? "SQLite 文件绝对路径" : "数据库名称"}</Label>
-                          <Input
-                            id="db-name"
-                            value={dbConfig.database}
-                            onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })}
-                          />
-                        </div>
-                      </div>
-                      <div className="flex gap-2 justify-end">
-                        <Button variant="outline" size="sm" onClick={handleTestConnection} disabled={isTestingDb}>
-                          {isTestingDb ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
-                          测试连接
-                        </Button>
-                      </div>
-                    </section>
-
-                    {/* 2. 自然语言生成 SQL */}
-                    <section className={`space-y-3 transition-opacity ${!isDbTested ? 'opacity-50 pointer-events-none' : ''}`}>
-                      <h3 className="text-sm font-semibold flex items-center gap-2">
-                        <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">2</span>
-                        智能生成查询语句
-                        {!isDbTested && <span className="text-xs font-normal text-amber-600 ml-2">(请先完成步骤 1 测试连接)</span>}
-                      </h3>
-                      <div className="space-y-2">
-                        <Textarea
-                          placeholder="描述您的查询需求，例如：'统计过去三个月每个月的进出口额总计，并按月份排序'"
-                          className="min-h-[80px] resize-none"
-                          value={dbPrompt}
-                          onChange={(e) => setDbPrompt(e.target.value)}
-                        />
-                        <div className="flex justify-end">
-                          <Button size="sm" className="bg-blue-600 hover:bg-blue-700" onClick={handleGenerateSql} disabled={isGeneratingSql || !dbPrompt.trim()}>
-                            {isGeneratingSql ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : <Sparkles className="mr-2 h-3 w-3" />}
-                            生成 SQL
-                          </Button>
-                        </div>
-                      </div>
-                    </section>
-
-                    {/* 3. SQL 编辑与执行 */}
-                    <section className={`space-y-3 transition-opacity ${!isDbTested ? 'opacity-50 pointer-events-none' : ''}`}>
-                      <h3 className="text-sm font-semibold flex items-center gap-2">
-                        <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center text-[10px]">3</span>
-                        预览并执行 SQL
-                      </h3>
-                      <div className="space-y-2">
-                        <Textarea
-                          className="min-h-[120px] font-mono text-sm"
-                          value={dbGeneratedSql}
-                          onChange={(e) => setDbGeneratedSql(e.target.value)}
-                          spellCheck={false}
-                        />
-                        <div className="grid grid-cols-2 gap-4 items-end bg-gray-50 dark:bg-gray-900/40 p-4 rounded-lg border">
-                          <div className="space-y-1.5">
-                            <Label htmlFor="dataset-name">保存为数据集名称</Label>
-                            <Input
-                              id="dataset-name"
-                              value={dbDatasetName}
-                              onChange={(e) => setDbDatasetName(e.target.value)}
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <Label>执行模式</Label>
-                            <Select value={dbExecuteMode} onValueChange={(v: any) => setDbExecuteMode(v)}>
-                              <SelectTrigger>
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="overwrite">覆盖现有文件</SelectItem>
-                                <SelectItem value="append">追加到现有文件</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        </div>
-                      </div>
-                    </section>
-                  </div>
-
-                  <div className="px-6 py-4 border-t bg-gray-50 dark:bg-gray-950 flex justify-end gap-3">
-                    <Button variant="ghost" onClick={() => setShowDatabaseDialog(false)}>
-                      关闭
-                    </Button>
-                    <Button
-                      className="bg-green-600 hover:bg-green-700 text-white min-w-[120px]"
-                      onClick={handleExecuteDbSql}
-                      disabled={isExecutingDbSql || !dbGeneratedSql.trim()}
-                    >
-                      {isExecutingDbSql ? (
-                        <>
-                          <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                          正在导入...
-                        </>
-                      ) : (
-                        <>
-                          <Play className="mr-2 h-4 w-4" />
-                          立即执行并导入
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </div>
-              </ResizablePanel>
-            </ResizablePanelGroup>
-          </div>
-        </DialogContent>
-      </Dialog>
+      <DatabaseDialog
+        open={showDatabaseDialog}
+        onOpenChange={setShowDatabaseDialog}
+        dbType={dbType}
+        onDbTypeChange={handleDbTypeChange}
+        dbConfig={dbConfig}
+        setDbConfig={setDbConfig}
+        getDefaultPort={getDefaultPortForDbType}
+        onTestConnection={handleTestConnection}
+        isTestingDb={isTestingDb}
+        isDbTested={isDbTested}
+        dbPrompt={dbPrompt}
+        setDbPrompt={setDbPrompt}
+        onGenerateSql={handleGenerateSql}
+        isGeneratingSql={isGeneratingSql}
+        dbGeneratedSql={dbGeneratedSql}
+        setDbGeneratedSql={setDbGeneratedSql}
+        dbDatasetName={dbDatasetName}
+        setDbDatasetName={setDbDatasetName}
+        dbExecuteMode={dbExecuteMode}
+        setDbExecuteMode={setDbExecuteMode}
+        onExecuteSql={handleExecuteDbSql}
+        isExecutingDbSql={isExecutingDbSql}
+      />
     </>
   );
 }

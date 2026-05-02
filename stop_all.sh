@@ -43,7 +43,7 @@ pkill -f "mlx_lm.server" 2>/dev/null || true
 pkill -f "vllm" 2>/dev/null || true
 
 # Backend (FastAPI/uvicorn)
-pkill -f "backend.py" 2>/dev/null || true
+pkill -f "main.py" 2>/dev/null || true
 
 # Frontend (Next.js dev server) - be specific to avoid killing other node processes
 pkill -f "next dev" 2>/dev/null || true

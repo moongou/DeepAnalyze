@@ -5,6 +5,7 @@ import { GeistMono } from "geist/font/mono";
 import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
+import { Providers } from "@/components/providers";
 import { Suspense } from "react";
 import { Toaster } from "@/components/ui/toaster";
 
@@ -46,8 +47,10 @@ export default function RootLayout({
       <body suppressHydrationWarning>
         <Suspense fallback={<div>Loading...</div>}>
           <ThemeProvider defaultTheme="light" storageKey="theme">
-            {children}
-            <Toaster />
+            <Providers>
+              {children}
+              <Toaster />
+            </Providers>
           </ThemeProvider>
         </Suspense>
         <Analytics />
