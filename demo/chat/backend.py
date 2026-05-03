@@ -533,6 +533,46 @@ PROJECTS_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pr
 CONFIG_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepanalyze.db")
 
+# Built-in superuser credentials can be configured via environment variables.
+# Default keeps backward compatibility with existing empty-password local setups.
+BUILTIN_SUPERUSER_USERNAME = os.getenv("DEEPANALYZE_SUPERUSER_USERNAME", "rainforgrain").strip() or "rainforgrain"
+BUILTIN_SUPERUSER_PASSWORD_HASH = os.getenv("DEEPANALYZE_SUPERUSER_PASSWORD_HASH", "").strip()
+if not BUILTIN_SUPERUSER_PASSWORD_HASH:
+    _builtin_superuser_password = os.getenv("DEEPANALYZE_SUPERUSER_PASSWORD")
+    if _builtin_superuser_password is not None:
+        BUILTIN_SUPERUSER_PASSWORD_HASH = hashlib.sha256(_builtin_superuser_password.encode()).hexdigest()
+
+
+def is_builtin_superuser(username: Optional[str]) -> bool:
+    return (username or "").strip() == BUILTIN_SUPERUSER_USERNAME
+
+
+def verify_builtin_superuser_password(password: str) -> bool:
+    if BUILTIN_SUPERUSER_PASSWORD_HASH:
+        return hash_password(password or "") == BUILTIN_SUPERUSER_PASSWORD_HASH
+    return (password or "") == ""
+
+
+def ensure_builtin_superuser(cursor: sqlite3.Cursor) -> None:
+    cursor.execute(
+        "SELECT username, password_hash FROM users WHERE username = ?",
+        (BUILTIN_SUPERUSER_USERNAME,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        cursor.execute(
+            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+            (BUILTIN_SUPERUSER_USERNAME, BUILTIN_SUPERUSER_PASSWORD_HASH),
+        )
+        return
+
+    stored_hash = row["password_hash"] if isinstance(row, sqlite3.Row) else row[1]
+    if stored_hash != BUILTIN_SUPERUSER_PASSWORD_HASH:
+        cursor.execute(
+            "UPDATE users SET password_hash = ? WHERE username = ?",
+            (BUILTIN_SUPERUSER_PASSWORD_HASH, BUILTIN_SUPERUSER_USERNAME),
+        )
+
 
 def _get_user_config_dir(username: str) -> str:
     d = os.path.join(CONFIG_BASE_DIR, username)
@@ -602,6 +642,7 @@ def init_db():
             password_hash TEXT NOT NULL
         )
     ''')
+    ensure_builtin_superuser(cursor)
     # Projects table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS projects (
@@ -1584,8 +1625,8 @@ def uniquify_path(target: Path) -> Path:
 @app.post("/api/auth/register")
 async def register(username: str = Form(...), password: str = Form("")):
     print(f"Registering user: {username}")
-    # rainforgrain 允许空密码
-    if username != "rainforgrain" and len(password) < 8:
+    # Built-in superuser registration compatibility: allow short password only for superuser.
+    if not is_builtin_superuser(username) and len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
 
     try:
@@ -1607,20 +1648,19 @@ async def register(username: str = Form(...), password: str = Form("")):
 @app.post("/api/auth/login")
 async def login(username: str = Form(...), password: str = Form("")):
     print(f"Login attempt: {username}")
-    if username == "rainforgrain":
-        # Superuser skip password check (even if password is empty)
+    if is_builtin_superuser(username):
+        if not verify_builtin_superuser_password(password):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
         # Ensure superuser exists in the DB for foreign key constraints
         try:
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
-            if not cursor.fetchone():
-                cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
-                               (username, hash_password("internal_bypass_value")))
-                conn.commit()
+            ensure_builtin_superuser(cursor)
+            conn.commit()
             conn.close()
-            return {"username": "rainforgrain", "is_superuser": True}
+            return {"username": BUILTIN_SUPERUSER_USERNAME, "is_superuser": True}
         except Exception as e:
             print(f"Superuser login error: {e}")
             traceback.print_exc()
@@ -1737,6 +1777,25 @@ async def v1_login(request: Request):
     username = body.get("username", "").strip()
     password = body.get("password", "")
 
+    if is_builtin_superuser(username):
+        if not verify_builtin_superuser_password(password):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        ensure_builtin_superuser(cursor)
+        conn.commit()
+        conn.close()
+
+        token = create_jwt_token(BUILTIN_SUPERUSER_USERNAME)
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "username": BUILTIN_SUPERUSER_USERNAME,
+            "is_superuser": True,
+        }
+
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -1753,7 +1812,12 @@ async def v1_login(request: Request):
             raise HTTPException(status_code=401, detail="Invalid username or password")
 
     token = create_jwt_token(username)
-    return {"access_token": token, "token_type": "bearer", "username": username}
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "username": username,
+        "is_superuser": is_builtin_superuser(username),
+    }
 
 
 @app.get("/v1/auth/users")
@@ -1761,6 +1825,8 @@ async def v1_list_users():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
+    ensure_builtin_superuser(cursor)
+    conn.commit()
     cursor.execute("SELECT username FROM users ORDER BY username")
     users = [row["username"] for row in cursor.fetchall()]
     conn.close()
@@ -1780,7 +1846,11 @@ async def v1_get_me(request: Request):
     conn.close()
     if not row:
         raise HTTPException(status_code=401, detail="User not found")
-    return {"username": username, "created_at": 0}
+    return {
+        "username": username,
+        "created_at": 0,
+        "is_superuser": is_builtin_superuser(username),
+    }
 
 
 @app.get("/workspace/files")
@@ -4349,6 +4419,8 @@ async def list_users():
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
+        ensure_builtin_superuser(cursor)
+        conn.commit()
         cursor.execute("SELECT username FROM users ORDER BY username ASC")
         rows = cursor.fetchall()
         conn.close()
@@ -4696,7 +4768,7 @@ async def add_yutu_record(body: dict = Body(...), username: str = Query("default
     """
     try:
         # 检查是否为超级用户
-        if username != "rainforgrain":
+        if not is_builtin_superuser(username):
             raise HTTPException(status_code=403, detail="Only superuser can add records")
 
         error_type = body.get("error_type", "Unknown")
@@ -4734,7 +4806,7 @@ async def update_yutu_record(body: dict = Body(...), username: str = Query("defa
     """
     try:
         # 检查是否为超级用户
-        if username != "rainforgrain":
+        if not is_builtin_superuser(username):
             raise HTTPException(status_code=403, detail="Only superuser can update records")
 
         error_hash = body.get("error_hash")
@@ -4771,7 +4843,7 @@ async def delete_yutu_record(body: dict = Body(...), username: str = Query("defa
     """
     try:
         # 检查是否为超级用户
-        if username != "rainforgrain":
+        if not is_builtin_superuser(username):
             raise HTTPException(status_code=403, detail="Only superuser can delete records")
 
         error_hash = body.get("error_hash")
@@ -4832,7 +4904,7 @@ async def organize_yutu_api(body: dict, username: str = ""):
     """整理雨途斩棘录 - 使用VLLM AI重新组织所有记录（超级用户专用）"""
     print(f"[DEBUG] organize_yutu_api called with username={username}, body keys={list(body.keys()) if body else 'None'}")
     # 验证超级用户
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以整理笔记")
 
     records = body.get("records", [])
@@ -4948,7 +5020,7 @@ async def organize_yutu_api(body: dict, username: str = ""):
 @app.get("/api/yutu/backup/list")
 async def list_yutu_backups(username: str = Query("default")):
     """列出所有备份文件"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以查看备份列表")
 
     try:
@@ -4964,7 +5036,7 @@ async def list_yutu_backups(username: str = Query("default")):
 @app.post("/api/yutu/backup/create")
 async def create_yutu_backup(data: dict = Body(...), username: str = Query("default")):
     """手动创建雨途斩棘录备份"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以创建备份")
 
     custom_name = data.get("filename")
@@ -4981,7 +5053,7 @@ async def create_yutu_backup(data: dict = Body(...), username: str = Query("defa
 @app.delete("/api/yutu/backup/delete")
 async def delete_yutu_backup(filename: str = Query(...), username: str = Query("default")):
     """删除备份文件"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以删除备份")
 
     try:
@@ -4996,7 +5068,7 @@ async def delete_yutu_backup(filename: str = Query(...), username: str = Query("
 @app.post("/api/yutu/backup/restore")
 async def restore_yutu_backup(data: dict, username: str = Query("default")):
     """从备份恢复"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以恢复备份")
 
     filename = data.get("filename")
@@ -5018,7 +5090,7 @@ async def restore_yutu_backup(data: dict, username: str = Query("default")):
 @app.post("/api/yutu/organize/confirm")
 async def confirm_organize(data: dict, username: str = ""):
     """确认整理结果：应用改进后的方案"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以确认")
 
     improved_records = data.get("records", [])
@@ -5042,7 +5114,7 @@ async def confirm_organize(data: dict, username: str = ""):
 @app.post("/api/yutu/organize/cancel")
 async def cancel_organize(data: dict, username: str = ""):
     """取消整理：恢复到原始备份"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以取消")
 
     # 取消操作不需要实际恢复，因为原始数据未修改
@@ -5385,7 +5457,12 @@ async def test_kb_settings(body: dict = Body(...)):
 async def get_user_model_configs(username: str = Query("default")):
     """获取用户保存的模型提供商配置列表"""
     data = _load_user_config(username, "model_providers.json", {"providers": []})
-    return {"success": True, "providers": data.get("providers", [])}
+    providers = data.get("providers", [])
+    selected_id = str(data.get("selected_id", "") or "").strip()
+    if not selected_id and isinstance(providers, list) and providers:
+        first = providers[0] if isinstance(providers[0], dict) else {}
+        selected_id = str(first.get("id", "") or "").strip()
+    return {"success": True, "providers": providers, "selected_id": selected_id}
 
 
 @app.post("/api/config/models")
@@ -5393,10 +5470,23 @@ async def save_user_model_config(body: dict = Body(...)):
     """保存用户的模型提供商配置"""
     username = body.get("username", "default")
     providers = body.get("providers", [])
+    selected_id = str(body.get("selected_id", "") or "").strip()
     existing = _load_user_config(username, "model_providers.json", {"providers": []})
     existing["providers"] = providers
+    if not selected_id and isinstance(providers, list) and providers:
+        first = providers[0] if isinstance(providers[0], dict) else {}
+        selected_id = str(first.get("id", "") or "").strip()
+    if selected_id:
+        existing["selected_id"] = selected_id
+    elif not providers:
+        existing["selected_id"] = ""
     path = _save_user_config(username, "model_providers.json", existing)
-    return {"success": True, "path": path, "message": "模型配置已保存到本地"}
+    return {
+        "success": True,
+        "path": path,
+        "selected_id": str(existing.get("selected_id", "") or ""),
+        "message": "模型配置已保存到本地",
+    }
 
 
 @app.delete("/api/config/models")

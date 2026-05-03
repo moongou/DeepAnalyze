@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.4 - 2026-05-03
+
+### Added (v1.1.4)
+
+- Added configurable built-in superuser credentials via `DEEPANALYZE_SUPERUSER_USERNAME`, `DEEPANALYZE_SUPERUSER_PASSWORD`, and `DEEPANALYZE_SUPERUSER_PASSWORD_HASH`.
+- Added model-provider selection persistence with `selected_id` across backend config APIs and frontend local storage.
+
+### Changed (v1.1.4)
+
+- Changed superuser authorization checks to use unified helper logic instead of hardcoded username comparisons across Yutu governance endpoints.
+- Changed frontend model-provider management to maintain a provider library, preserve selected provider ordering, and support robust fallback normalization.
+- Changed root startup script UX with backend profile banner, safer warning confirmations, richer GPU runtime detection output, and `--backend=<value>` argument compatibility.
+
+### Fixed (v1.1.4)
+
+- Fixed superuser login flow to require password verification instead of unconditional bypass for the built-in account.
+- Fixed SQL generation request payload construction in DB UI to reuse normalized payload fields and prevent invalid requests.
+
 ## v1.1.3 - 2026-05-03
 
 ### Added (v1.1.3)

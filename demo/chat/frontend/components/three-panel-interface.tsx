@@ -157,6 +157,70 @@ const createClientId = () =>
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+const MODEL_PROVIDER_STORE_KEY = "modelProviderStore";
+
+const getPresetByProviderId = (id?: string) => {
+  if (!id) return undefined;
+  return MODEL_PROVIDER_PRESETS.find((item) => item.id === id);
+};
+
+const getPresetByProviderType = (providerType?: string) => {
+  if (!providerType) return undefined;
+  return MODEL_PROVIDER_PRESETS.find((item) => item.providerType === providerType);
+};
+
+const normalizeModelProviderEntry = (
+  input?: Partial<ModelProviderConfig> | null
+): ModelProviderConfig => {
+  const source = input && typeof input === "object" ? input : {};
+  const preset =
+    getPresetByProviderId(source.id) ||
+    getPresetByProviderType(source.providerType) ||
+    MODEL_PROVIDER_PRESETS[0];
+
+  const rawHeaders =
+    source.headers && typeof source.headers === "object"
+      ? (source.headers as Record<string, string>)
+      : {};
+
+  return cloneModelProviderConfig({
+    ...preset,
+    ...source,
+    id: source.id || preset.id,
+    headers: {
+      ...(preset.headers || {}),
+      ...rawHeaders,
+    },
+  });
+};
+
+const buildModelProviderLibrary = (
+  providers: Array<Partial<ModelProviderConfig>>
+): Record<string, ModelProviderConfig> => {
+  const library: Record<string, ModelProviderConfig> = {};
+  providers.forEach((item) => {
+    if (!item || typeof item !== "object") return;
+    const normalized = normalizeModelProviderEntry(item);
+    if (!normalized.id) return;
+    library[normalized.id] = normalized;
+  });
+  return library;
+};
+
+const orderModelProviders = (
+  library: Record<string, ModelProviderConfig>,
+  selectedId?: string
+): ModelProviderConfig[] => {
+  const providers = Object.values(library);
+  if (!providers.length) return [];
+  if (!selectedId) return providers;
+
+  const selected = providers.find((item) => item.id === selectedId);
+  if (!selected) return providers;
+
+  return [selected, ...providers.filter((item) => item.id !== selectedId)];
+};
+
 type CodeBlockViewProps = {
   language: string;
   code: string;
@@ -552,6 +616,7 @@ export function ThreePanelInterface() {
   const [modelProviderConfig, setModelProviderConfig] = useState<ModelProviderConfig>(
     cloneModelProviderConfig()
   );
+  const [modelProviderLibrary, setModelProviderLibrary] = useState<Record<string, ModelProviderConfig>>({});
   const [modelHeadersInput, setModelHeadersInput] = useState("");
   const [showRawModelHeaders, setShowRawModelHeaders] = useState(false);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
@@ -680,11 +745,14 @@ export function ThreePanelInterface() {
   });
 
   const applyModelPreset = (presetId: string) => {
-    const preset = cloneModelProviderConfig(
-      MODEL_PROVIDER_PRESETS.find((item) => item.id === presetId) || MODEL_PROVIDER_PRESETS[0]
-    );
-    setModelProviderConfig(preset);
-    setModelHeadersInput(stringifyModelHeaders(preset.headers));
+    const nextConfig = modelProviderLibrary[presetId]
+      ? cloneModelProviderConfig(modelProviderLibrary[presetId])
+      : normalizeModelProviderEntry(
+        MODEL_PROVIDER_PRESETS.find((item) => item.id === presetId) || MODEL_PROVIDER_PRESETS[0]
+      );
+
+    setModelProviderConfig(nextConfig);
+    setModelHeadersInput(stringifyModelHeaders(nextConfig.headers));
   };
 
   const handleFetchModelList = async () => {
@@ -734,22 +802,42 @@ export function ThreePanelInterface() {
 
   const handleSaveModelConfig = async () => {
     // 同时保存到 localStorage（快速恢复）和后端（永久持久化）
+    const normalizedCurrent = normalizeModelProviderEntry(modelProviderConfig);
+    const nextLibrary = {
+      ...modelProviderLibrary,
+      [normalizedCurrent.id]: normalizedCurrent,
+    };
+    const providers = orderModelProviders(nextLibrary, normalizedCurrent.id);
+
+    setModelProviderLibrary(nextLibrary);
+    setModelProviderConfig(normalizedCurrent);
+
     if (typeof window !== "undefined") {
-      localStorage.setItem("modelProviderConfig", JSON.stringify(modelProviderConfig));
+      localStorage.setItem("modelProviderConfig", JSON.stringify(normalizedCurrent));
+      localStorage.setItem(
+        MODEL_PROVIDER_STORE_KEY,
+        JSON.stringify({
+          selectedId: normalizedCurrent.id,
+          providers,
+        })
+      );
     }
     try {
-      const providers = [modelProviderConfig];
       await fetch(
         `${API_URLS.CONFIG_MODELS_SAVE}?username=${currentUser || "default"}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username: currentUser || "default", providers }),
+          body: JSON.stringify({
+            username: currentUser || "default",
+            selected_id: normalizedCurrent.id,
+            providers,
+          }),
         }
       );
-      toast({ description: `当前分析模型已设置为 ${modelProviderConfig.model} 并保存到本地` });
+      toast({ description: `当前分析模型已设置为 ${normalizedCurrent.model} 并保存到本地` });
     } catch {
-      toast({ description: `当前分析模型已设置为 ${modelProviderConfig.model}（仅浏览器保存）` });
+      toast({ description: `当前分析模型已设置为 ${normalizedCurrent.model}（仅浏览器保存）` });
     }
   };
 
@@ -1836,24 +1924,52 @@ ${analysisContent}
       }
     }
 
-    const savedModelProvider = localStorage.getItem("modelProviderConfig");
-    if (savedModelProvider) {
+    let hasLoadedModelProvider = false;
+    const savedModelProviderStore = localStorage.getItem(MODEL_PROVIDER_STORE_KEY);
+    if (savedModelProviderStore) {
       try {
-        const parsed = JSON.parse(savedModelProvider);
-        const nextConfig = cloneModelProviderConfig({
-          ...MODEL_PROVIDER_PRESETS[0],
-          ...parsed,
-          headers: { ...(parsed.headers || {}) },
-        });
-        setModelProviderConfig(nextConfig);
-        setModelHeadersInput(stringifyModelHeaders(nextConfig.headers));
+        const parsedStore = JSON.parse(savedModelProviderStore);
+        const providers = Array.isArray(parsedStore?.providers)
+          ? parsedStore.providers
+          : [];
+        if (providers.length > 0) {
+          const library = buildModelProviderLibrary(providers);
+          const selectedId =
+            typeof parsedStore?.selectedId === "string"
+              ? parsedStore.selectedId
+              : providers[0]?.id;
+
+          const ordered = orderModelProviders(library, selectedId);
+          const selected = ordered[0] || normalizeModelProviderEntry();
+          setModelProviderLibrary(library);
+          setModelProviderConfig(selected);
+          setModelHeadersInput(stringifyModelHeaders(selected.headers));
+          hasLoadedModelProvider = true;
+        }
       } catch {
-        const fallback = cloneModelProviderConfig();
-        setModelProviderConfig(fallback);
-        setModelHeadersInput(stringifyModelHeaders(fallback.headers));
+        // ignore invalid store cache
       }
-    } else {
-      const fallback = cloneModelProviderConfig();
+    }
+
+    if (!hasLoadedModelProvider) {
+      const savedModelProvider = localStorage.getItem("modelProviderConfig");
+      if (savedModelProvider) {
+        try {
+          const parsed = JSON.parse(savedModelProvider);
+          const nextConfig = normalizeModelProviderEntry(parsed);
+          setModelProviderLibrary({ [nextConfig.id]: nextConfig });
+          setModelProviderConfig(nextConfig);
+          setModelHeadersInput(stringifyModelHeaders(nextConfig.headers));
+          hasLoadedModelProvider = true;
+        } catch {
+          // ignore invalid legacy cache
+        }
+      }
+    }
+
+    if (!hasLoadedModelProvider) {
+      const fallback = normalizeModelProviderEntry();
+      setModelProviderLibrary({ [fallback.id]: fallback });
       setModelProviderConfig(fallback);
       setModelHeadersInput(stringifyModelHeaders(fallback.headers));
     }
@@ -1878,15 +1994,32 @@ ${analysisContent}
         );
         if (modelRes.ok) {
           const modelData = await modelRes.json();
-          if (modelData.providers && modelData.providers.length > 0) {
-            const saved = modelData.providers[0];
-            const nextConfig = cloneModelProviderConfig({
-              ...MODEL_PROVIDER_PRESETS[0],
-              ...saved,
-              headers: { ...(saved.headers || {}) },
-            });
+          const providers = Array.isArray(modelData?.providers)
+            ? modelData.providers
+            : [];
+          if (providers.length > 0) {
+            const library = buildModelProviderLibrary(providers);
+            const selectedId =
+              typeof modelData?.selected_id === "string"
+                ? modelData.selected_id
+                : providers[0]?.id;
+            const ordered = orderModelProviders(library, selectedId);
+            const nextConfig = ordered[0] || normalizeModelProviderEntry();
+
+            setModelProviderLibrary(library);
             setModelProviderConfig(nextConfig);
             setModelHeadersInput(stringifyModelHeaders(nextConfig.headers));
+
+            if (typeof window !== "undefined") {
+              localStorage.setItem("modelProviderConfig", JSON.stringify(nextConfig));
+              localStorage.setItem(
+                MODEL_PROVIDER_STORE_KEY,
+                JSON.stringify({
+                  selectedId: nextConfig.id,
+                  providers: ordered,
+                })
+              );
+            }
           }
         }
 
@@ -1945,9 +2078,37 @@ ${analysisContent}
   }, [knowledgePreferredView, showKnowledgeHints, autoOpenYutuAfterAnalysis]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    localStorage.setItem("modelProviderConfig", JSON.stringify(modelProviderConfig));
+    const normalizedCurrent = normalizeModelProviderEntry(modelProviderConfig);
+    setModelProviderLibrary((prev) => {
+      const existing = prev[normalizedCurrent.id];
+      if (existing && JSON.stringify(existing) === JSON.stringify(normalizedCurrent)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [normalizedCurrent.id]: normalizedCurrent,
+      };
+    });
   }, [modelProviderConfig]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const normalizedCurrent = normalizeModelProviderEntry(modelProviderConfig);
+    const nextLibrary = {
+      ...modelProviderLibrary,
+      [normalizedCurrent.id]: normalizedCurrent,
+    };
+    const ordered = orderModelProviders(nextLibrary, normalizedCurrent.id);
+
+    localStorage.setItem("modelProviderConfig", JSON.stringify(normalizedCurrent));
+    localStorage.setItem(
+      MODEL_PROVIDER_STORE_KEY,
+      JSON.stringify({
+        selectedId: normalizedCurrent.id,
+        providers: ordered,
+      })
+    );
+  }, [modelProviderConfig, modelProviderLibrary]);
 
   useEffect(() => {
     setAvailableModels([]);
@@ -3147,14 +3308,26 @@ ${analysisContent}
       }
 
       const parts: React.ReactNode[] = [];
+      const sectionTypeAliasMap: Record<string, StructuredSectionType> = {
+        analyze: "Analyze",
+        understand: "Understand",
+        code: "Code",
+        execute: "Execute",
+        answer: "Answer",
+        file: "File",
+        tasktree: "TaskTree",
+      };
       const openRe = /<(Analyze|Understand|Code|Execute|Answer|File|TaskTree)>/gi;
       let cursor = 0;
       let sectionIndex = 0;
       let m: RegExpExecArray | null;
 
       while ((m = openRe.exec(content)) !== null) {
-        const rawType = m[1] || "";
-        const type = `${rawType.charAt(0).toUpperCase()}${rawType.slice(1).toLowerCase()}` as StructuredSectionType;
+        const rawType = (m[1] || "").trim();
+        const type = sectionTypeAliasMap[rawType.toLowerCase()];
+        if (!type) {
+          continue;
+        }
         const start = m.index;
 
         if (start > cursor) {
@@ -3187,6 +3360,7 @@ ${analysisContent}
           (collapsedSections as any)[msgKey] ??
           (collapsedSections as any)[baseKey] ??
           false;
+        const sectionConfig = sectionConfigs[type] || sectionConfigs.Analyze;
 
         const toggleSection = () => {
           setCollapsedSections((prev) => {
@@ -3201,7 +3375,7 @@ ${analysisContent}
         parts.push(
           <div
             key={`stream-section-${sectionKey}`}
-            className={`mb-4 border rounded-lg overflow-hidden ${sectionConfigs[type].color}`}
+            className={`mb-4 border rounded-lg overflow-hidden ${sectionConfig.color}`}
             data-section={type}
             data-section-key={sectionKey}
           >
@@ -3219,7 +3393,7 @@ ${analysisContent}
                     <ChevronDown className="h-3 w-3" />
                   )}
                 </Button>
-                <span className="text-sm">{sectionConfigs[type].icon}</span>
+                <span className="text-sm">{sectionConfig.icon}</span>
                 <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
                   {type}
                 </span>

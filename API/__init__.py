@@ -3,7 +3,7 @@ DeepAnalyze API Package
 OpenAI-compatible API server for DeepAnalyze model
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.4"
 __title__ = "DeepAnalyze OpenAI-Compatible API"
 
 __all__ = ["create_app", "main"]

@@ -2,6 +2,46 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+print_banner() {
+	echo "╔══════════════════════════════════════════════════╗"
+	echo "║                                                  ║"
+	echo "║              🔬  D e e p A n a l y z e           ║"
+	echo "║                                                  ║"
+	echo "║       Intelligent Analysis Platform              ║"
+	echo "║       智能分析平台                                ║"
+	echo "║                                                  ║"
+	echo "╚══════════════════════════════════════════════════╝"
+	echo ""
+}
+
+ask_continue() {
+	local msg="$1"
+	local confirm
+
+	if [[ "${DEEPANALYZE_ASSUME_YES:-}" == "1" ]]; then
+		echo "Warning: $msg"
+		echo "Auto-continue enabled by DEEPANALYZE_ASSUME_YES=1"
+		return 0
+	fi
+
+	if [[ ! -t 0 ]]; then
+		echo "Warning: $msg"
+		echo "Non-interactive shell detected, continue by default."
+		return 0
+	fi
+
+	echo ""
+	echo "⚠️  WARNING / 警告: $msg"
+	read -r -p "Continue anyway? / 是否仍然继续？ (y/N): " confirm
+	confirm="${confirm:-N}"
+	if [[ "$confirm" =~ ^[Yy]$ ]]; then
+		return 0
+	fi
+
+	echo "Aborted. / 已取消。"
+	return 1
+}
+
 normalize_backend() {
 	local raw="${1:-}"
 	raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
@@ -63,17 +103,25 @@ print_profile_summary() {
 warn_if_backend_mismatch() {
 	if [[ "$DEEPANALYZE_COMPUTE_BACKEND" == "mlx" ]]; then
 		if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
-			echo "Warning: MLX profile is best for Apple Silicon (Darwin arm64)."
+			ask_continue "MLX profile is best for Apple Silicon (Darwin arm64)." || exit 1
 		fi
 	else
 		local gpu_detected="false"
+		local cuda_version=""
 		if command -v nvidia-smi >/dev/null 2>&1; then
 			gpu_detected="true"
+			cuda_version="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -1)"
+			echo "Detected NVIDIA GPU via nvidia-smi${cuda_version:+ (CUDA $cuda_version)}"
+			nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null | head -5 || true
 		elif command -v clinfo >/dev/null 2>&1; then
 			gpu_detected="true"
+			echo "Detected OpenCL runtime via clinfo"
+		elif [[ -d "/usr/lib/wsl" || -f "/usr/lib/libdirectml.so" ]]; then
+			gpu_detected="true"
+			echo "Detected DirectML (WSL) runtime"
 		fi
 		if [[ "$gpu_detected" == "false" ]]; then
-			echo "Warning: No CUDA/OpenCL tool detected. GPU profile may still work with remote endpoints."
+			ask_continue "No CUDA/OpenCL/DirectML tool detected. GPU profile may still work with remote endpoints." || exit 1
 		fi
 	fi
 }
@@ -81,6 +129,8 @@ warn_if_backend_mismatch() {
 BACKEND_ARG=""
 if [[ "${1:-}" == "--backend" ]]; then
 	BACKEND_ARG="$(normalize_backend "${2:-}")"
+elif [[ "${1:-}" == --backend=* ]]; then
+	BACKEND_ARG="$(normalize_backend "${1#--backend=}")"
 fi
 
 SELECTED_BACKEND=""
@@ -91,6 +141,7 @@ elif [[ -n "${DEEPANALYZE_COMPUTE_BACKEND:-}" ]]; then
 fi
 
 if [[ -z "$SELECTED_BACKEND" ]]; then
+	print_banner
 	DEFAULT_BACKEND="$(detect_default_backend)"
 	echo "DeepAnalyze startup profile selection"
 	echo "1) Apple Silicon / MLX"

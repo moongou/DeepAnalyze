@@ -121,13 +121,14 @@ export function useDatabase({ sessionId, currentUser, modelProviderConfig, onRef
 
   const generateSqlMutation = useMutation({
     mutationFn: async () => {
+      const payload = buildPayload();
+      if (!payload) throw new Error("invalid_payload");
       const res = await fetch(API_URLS.DB_GENERATE_SQL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          db_type: normalizeDbType(dbType),
+          ...payload,
           prompt: dbPrompt,
-          schema_info: "",
           model_provider: modelProviderConfig,
         }),
       });
