@@ -19,6 +19,9 @@ from functools import partial
 import socketserver
 import sqlite3
 import hashlib
+import secrets
+import time as time_module
+import jwt
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Depends, Request
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -66,6 +69,7 @@ if os.path.exists(_FONT_DIR):
 import chardet
 from docx import Document
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL
 import pandas as pd
 from datetime import datetime
 
@@ -495,28 +499,103 @@ def execute_code_safe(
 
 
 # API endpoint and model path
-API_BASE = "http://localhost:8000/v1"  # this localhost is for vllm api, do not change
-MODEL_PATH = "DeepAnalyze-8B"  # replace to your path to DeepAnalyze-8B
+DEFAULT_COMPUTE_BACKEND = (os.getenv("DEEPANALYZE_COMPUTE_BACKEND", "auto") or "auto").strip().lower()
+API_BASE = os.getenv("DEEPANALYZE_DEFAULT_MODEL_BASE_URL", "http://localhost:8000/v1")
+MODEL_PATH = os.getenv("DEEPANALYZE_DEFAULT_MODEL_NAME", "DeepAnalyze-8B")
+DEFAULT_PROVIDER_TYPE = (os.getenv("DEEPANALYZE_DEFAULT_PROVIDER_TYPE", "deepanalyze") or "deepanalyze").strip()
+DEFAULT_PROVIDER_LABEL = (os.getenv("DEEPANALYZE_DEFAULT_PROVIDER_LABEL", "DeepAnalyze 默认") or "DeepAnalyze 默认").strip()
+DEFAULT_PROVIDER_DESCRIPTION = (os.getenv("DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION", "项目默认本地 vLLM 服务") or "项目默认本地 vLLM 服务").strip()
+DEFAULT_PROVIDER_API_KEY = (os.getenv("DEEPANALYZE_DEFAULT_MODEL_API_KEY", "") or "").strip()
+MAX_AGENT_ROUNDS = 30
+LLM_RETRY_MAX_ATTEMPTS = 3
+LLM_RETRY_BACKOFF_SECONDS = [0.4, 0.8]
+LLM_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 # Initialize OpenAI client
-client = openai.OpenAI(base_url=API_BASE, api_key="dummy")
+client = openai.OpenAI(base_url=API_BASE, api_key=DEFAULT_PROVIDER_API_KEY or "dummy")
 DEFAULT_MODEL_PROVIDER_CONFIG = {
     "id": "deepanalyze-default",
-    "providerType": "deepanalyze",
-    "label": "DeepAnalyze 默认",
-    "description": "项目默认本地 vLLM 服务",
+    "providerType": DEFAULT_PROVIDER_TYPE,
+    "label": DEFAULT_PROVIDER_LABEL,
+    "description": DEFAULT_PROVIDER_DESCRIPTION,
     "baseUrl": API_BASE,
     "model": MODEL_PATH,
-    "apiKey": "",
+    "apiKey": DEFAULT_PROVIDER_API_KEY,
     "headers": {},
     "supportsOpenAICompatible": True,
 }
 
 # Workspace directory
+REPO_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 WORKSPACE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace")
 PROJECTS_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects")
+CONFIG_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepanalyze.db")
+
+# Built-in superuser credentials can be configured via environment variables.
+# Default keeps backward compatibility with existing empty-password local setups.
+BUILTIN_SUPERUSER_USERNAME = os.getenv("DEEPANALYZE_SUPERUSER_USERNAME", "rainforgrain").strip() or "rainforgrain"
+BUILTIN_SUPERUSER_PASSWORD_HASH = os.getenv("DEEPANALYZE_SUPERUSER_PASSWORD_HASH", "").strip()
+if not BUILTIN_SUPERUSER_PASSWORD_HASH:
+    _builtin_superuser_password = os.getenv("DEEPANALYZE_SUPERUSER_PASSWORD")
+    if _builtin_superuser_password is not None:
+        BUILTIN_SUPERUSER_PASSWORD_HASH = hashlib.sha256(_builtin_superuser_password.encode()).hexdigest()
+
+
+def is_builtin_superuser(username: Optional[str]) -> bool:
+    return (username or "").strip() == BUILTIN_SUPERUSER_USERNAME
+
+
+def verify_builtin_superuser_password(password: str) -> bool:
+    if BUILTIN_SUPERUSER_PASSWORD_HASH:
+        return hash_password(password or "") == BUILTIN_SUPERUSER_PASSWORD_HASH
+    return (password or "") == ""
+
+
+def ensure_builtin_superuser(cursor: sqlite3.Cursor) -> None:
+    cursor.execute(
+        "SELECT username, password_hash FROM users WHERE username = ?",
+        (BUILTIN_SUPERUSER_USERNAME,),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        cursor.execute(
+            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+            (BUILTIN_SUPERUSER_USERNAME, BUILTIN_SUPERUSER_PASSWORD_HASH),
+        )
+        return
+
+    stored_hash = row["password_hash"] if isinstance(row, sqlite3.Row) else row[1]
+    if stored_hash != BUILTIN_SUPERUSER_PASSWORD_HASH:
+        cursor.execute(
+            "UPDATE users SET password_hash = ? WHERE username = ?",
+            (BUILTIN_SUPERUSER_PASSWORD_HASH, BUILTIN_SUPERUSER_USERNAME),
+        )
+
+
+def _get_user_config_dir(username: str) -> str:
+    d = os.path.join(CONFIG_BASE_DIR, username)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _load_user_config(username: str, filename: str, default=None):
+    path = os.path.join(_get_user_config_dir(username), filename)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default if default is not None else {}
+
+
+def _save_user_config(username: str, filename: str, data) -> str:
+    path = os.path.join(_get_user_config_dir(username), filename)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return path
 KB_MASK = "••••••••"
 KB_DEFAULT_SETTINGS = {
     "knowledge_base_enabled": True,
@@ -563,6 +642,7 @@ def init_db():
             password_hash TEXT NOT NULL
         )
     ''')
+    ensure_builtin_superuser(cursor)
     # Projects table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS projects (
@@ -630,6 +710,38 @@ def normalize_base_url(value: str) -> str:
     return base_url
 
 
+def _is_local_model_endpoint(base_url: str) -> bool:
+    lowered = (base_url or "").strip().lower()
+    return "localhost:" in lowered or "127.0.0.1:" in lowered
+
+
+def _resolve_local_mlx_model_name(model_name: str, base_url: str) -> str:
+    text = (model_name or "").strip()
+    if not text:
+        return text
+
+    if DEFAULT_COMPUTE_BACKEND not in {"mlx", "apple", "apple_silicon"}:
+        return text
+
+    if not _is_local_model_endpoint(base_url):
+        return text
+
+    if os.path.isabs(text):
+        return text
+
+    candidate = os.path.abspath(os.path.join(REPO_ROOT_DIR, text))
+    if os.path.isdir(candidate):
+        return candidate
+
+    configured_mlx_dir = (os.getenv("DEEPANALYZE_MLX_MODEL_DIR", "") or "").strip()
+    if configured_mlx_dir and os.path.isdir(configured_mlx_dir):
+        configured_name = os.path.basename(configured_mlx_dir.rstrip(os.sep))
+        if configured_name == text:
+            return configured_mlx_dir
+
+    return text
+
+
 def normalize_optional_path(value: str, default: str) -> str:
     path = (value or default).strip()
     if not path.startswith("/"):
@@ -654,8 +766,10 @@ def redact_provider(provider: Dict[str, Any]) -> Dict[str, Any]:
 def normalize_model_provider_config(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     incoming = payload if isinstance(payload, dict) else {}
     merged = deep_merge_dict(DEFAULT_MODEL_PROVIDER_CONFIG, incoming)
+    merged["providerType"] = (merged.get("providerType") or DEFAULT_PROVIDER_TYPE).strip() or DEFAULT_PROVIDER_TYPE
     merged["baseUrl"] = normalize_base_url(merged.get("baseUrl") or API_BASE)
-    merged["model"] = (merged.get("model") or MODEL_PATH).strip() or MODEL_PATH
+    raw_model = (merged.get("model") or MODEL_PATH).strip() or MODEL_PATH
+    merged["model"] = _resolve_local_mlx_model_name(raw_model, merged["baseUrl"])
     merged["apiKey"] = (merged.get("apiKey") or "").strip()
     raw_headers = merged.get("headers") or {}
     normalized_headers: Dict[str, str] = {}
@@ -693,6 +807,102 @@ def get_runtime_llm(model_provider: Optional[Dict[str, Any]] = None) -> Tuple[op
         default_headers=extra_headers or None,
     )
     return runtime_client, normalized["model"], normalized
+
+
+def _provider_supports_vllm_controls(provider_cfg: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(provider_cfg, dict):
+        return False
+    provider_type = str(provider_cfg.get("providerType") or "").strip().lower()
+    if provider_type in {"deepanalyze", "vllm"}:
+        return True
+    base_url = str(provider_cfg.get("baseUrl") or "").strip().lower()
+    return "localhost:8000" in base_url or "127.0.0.1:8000" in base_url
+
+
+def _build_streaming_answer_error(message: str) -> str:
+    safe_message = (str(message or "未知错误").strip() or "未知错误")[:1000]
+    return (
+        "<Answer>\n"
+        "模型服务调用失败，当前分析已中止。\n"
+        f"错误详情：{safe_message}\n"
+        "建议：\n"
+        "1. 检查模型服务是否正常（例如本地 vLLM 端口 8000）。\n"
+        "2. 若使用第三方模型，请检查 baseUrl、模型名与 API Key。\n"
+        "3. 修复后重新发送同一问题继续分析。\n"
+        "</Answer>\n"
+    )
+
+
+def _extract_llm_error_status(exc: Exception) -> Optional[int]:
+    for attr in ("status_code", "status", "http_status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    msg = str(exc)
+    match = re.search(r"\b(429|500|502|503|504)\b", msg)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _is_retryable_llm_exception(exc: Exception) -> bool:
+    known_retryable_types = tuple(
+        exc_type
+        for exc_type in (
+            getattr(openai, "APIConnectionError", None),
+            getattr(openai, "APITimeoutError", None),
+            getattr(openai, "RateLimitError", None),
+            getattr(openai, "InternalServerError", None),
+        )
+        if exc_type is not None
+    )
+    if known_retryable_types and isinstance(exc, known_retryable_types):
+        return True
+    status_code = _extract_llm_error_status(exc)
+    if status_code in LLM_RETRYABLE_STATUS_CODES:
+        return True
+    msg = str(exc).lower()
+    return any(
+        key in msg
+        for key in (
+            "timed out",
+            "timeout",
+            "temporarily",
+            "overload",
+            "connection",
+            "service unavailable",
+            "bad gateway",
+        )
+    )
+
+
+def _create_chat_completion_with_retry(llm_client: openai.OpenAI, request_kwargs: Dict[str, Any]):
+    active_kwargs = dict(request_kwargs)
+    dropped_extra_body = False
+    for attempt in range(1, LLM_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return llm_client.chat.completions.create(**active_kwargs)
+        except Exception as exc:
+            if "extra_body" in active_kwargs and not dropped_extra_body:
+                active_kwargs = dict(active_kwargs)
+                active_kwargs.pop("extra_body", None)
+                dropped_extra_body = True
+                print("[LLM] Request failed with extra_body, retrying without provider-specific controls")
+                continue
+
+            if attempt >= LLM_RETRY_MAX_ATTEMPTS or not _is_retryable_llm_exception(exc):
+                raise
+
+            delay = LLM_RETRY_BACKOFF_SECONDS[min(attempt - 1, len(LLM_RETRY_BACKOFF_SECONDS) - 1)]
+            status_code = _extract_llm_error_status(exc)
+            print(f"[LLM] Transient error (status={status_code}) on attempt {attempt}, retrying in {delay:.1f}s")
+            time_module.sleep(delay)
+
+    raise RuntimeError("LLM request failed after retries")
 
 
 def fetch_model_names(model_provider: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -962,6 +1172,33 @@ def run_kb_provider_test(provider: str, settings: Dict[str, Any]) -> Dict[str, A
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
+
+def normalize_analysis_language(raw_language: Optional[str]) -> str:
+    normalized = str(raw_language or "").strip().lower().replace("_", "-")
+    if normalized in {"en", "en-us", "en-gb", "english"}:
+        return "en"
+    return "zh-CN"
+
+
+def build_analysis_language_prompt(analysis_language: str) -> str:
+    if analysis_language == "en":
+        return (
+            "\n\n**Output language override (highest priority): English**"
+            "\n- This preference overrides default language rules in the base prompt."
+            "\n- All user-facing narrative text must be in English, including `<Analyze>`, `<Understand>`, `<Answer>`, and report body text."
+            "\n- In interactive mode, task names/descriptions in `<TaskTree>` and all follow-up user guidance text must also be in English."
+            "\n- Keep structural tags unchanged (`<Analyze>`, `<Code>`, `<TaskTree>`, etc.); only change natural-language content."
+            "\n- Do not output Chinese characters in user-facing text. If any Chinese appears, rewrite it in English before continuing."
+        )
+
+    return (
+        "\n\n**输出语言覆盖规则（最高优先级）：中文（简体）**"
+        "\n- 本规则覆盖基础提示词中的默认语言描述。"
+        "\n- 所有面向用户的自然语言内容必须使用简体中文，包括 `<Analyze>`、`<Understand>`、`<Answer>` 和最终报告正文。"
+        "\n- 在交互模式下，`<TaskTree>` 中任务名称/描述与后续引导文案也必须使用简体中文。"
+        "\n- 结构化标签保持不变（如 `<Analyze>`、`<Code>`、`<TaskTree>` 等），仅改变自然语言内容。"
+    )
+
 HTTP_SERVER_PORT = 8100
 HTTP_SERVER_BASE = (
     f"http://localhost:{HTTP_SERVER_PORT}"  # you can replace localhost to your local ip
@@ -998,6 +1235,79 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- v1 path rewrite map (frontend expects /v1/*, backend has legacy paths) ---
+_V1_REWRITE = {
+    "/v1/chat/completions":       "/chat/completions",
+    "/v1/models":                 "/api/model/models",
+    "/v1/files":                  "/workspace/files",
+    "/v1/files/tree":             "/workspace/tree",
+    "/v1/files/upload-to":        "/workspace/upload-to",
+    # user config persistence
+    "/v1/config/models":          "/api/config/models",
+    "/v1/config/databases":       "/api/config/databases",
+    "/v1/config/knowledge":       "/api/config/knowledge",
+    "/v1/config/export":          "/api/config/export",
+    "/v1/knowledge/settings":     "/api/kb/settings",
+    "/v1/knowledge/test":         "/api/kb/test",
+    "/v1/knowledge/entries":      "/api/yutu/search",
+    "/v1/knowledge/entries/search":"/api/yutu/search",
+    # yutu nested routes: frontend kebab-case → backend slash-separated
+    "/v1/knowledge/yutu/organize-confirm": "/api/yutu/organize/confirm",
+    "/v1/knowledge/yutu/organize-cancel":  "/api/yutu/organize/cancel",
+    "/v1/knowledge/yutu/backup-list":     "/api/yutu/backup/list",
+    "/v1/knowledge/yutu/backup-create":   "/api/yutu/backup/create",
+    "/v1/knowledge/yutu/backup-delete":   "/api/yutu/backup/delete",
+    "/v1/knowledge/yutu/backup-restore":  "/api/yutu/backup/restore",
+    "/v1/projects/save":          "/api/projects/save",
+    "/v1/projects/list":          "/api/projects/list",
+    "/v1/projects/load":          "/api/projects/load",
+    "/v1/projects/check-name":    "/api/projects/check-name",
+    "/v1/projects/restore-files": "/api/projects/restore-files",
+    "/v1/projects/restore-to-workspace": "/api/projects/restore-to-workspace",
+    "/v1/database/test":          "/api/db/test",
+    "/v1/database/generate-sql":  "/api/db/generate-sql",
+    "/v1/database/execute":       "/api/db/execute",
+    "/v1/export/report":          "/export/report",
+    "/v1/chat/guidance":          "/api/chat/guidance",
+    "/v1/code/execute":           "/execute",
+}
+_V1_PREFIX_REWRITE = {
+    "/v1/knowledge/yutu/":  "/api/yutu/",
+    "/v1/projects/":        "/api/projects/",
+    "/v1/files/":           "/workspace/",
+}
+
+
+class V1PathRewriteMiddleware:
+    """Pure ASGI middleware that rewrites /v1/* paths to legacy equivalents."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            # Exact match first
+            if path in _V1_REWRITE:
+                scope = {**scope, "path": _V1_REWRITE[path]}
+            else:
+                # Prefix match
+                for v1_prefix, legacy_prefix in _V1_PREFIX_REWRITE.items():
+                    if path.startswith(v1_prefix):
+                        suffix = path[len(v1_prefix):]
+                        scope = {**scope, "path": f"{legacy_prefix}{suffix}"}
+                        break
+                else:
+                    # DELETE /v1/projects?id=... → /api/projects/delete
+                    if path == "/v1/projects" and scope.get("method", "").upper() == "DELETE":
+                        qs = scope.get("query_string", b"").decode("latin-1")
+                        scope = {**scope, "path": "/api/projects/delete", "query_string": qs.encode("latin-1")}
+
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(V1PathRewriteMiddleware)
 
 @app.get("/proxy")
 async def proxy_url(url: str = Query(...)):
@@ -1087,12 +1397,20 @@ async def settings_hardware():
 @app.get("/api/settings/defaults")
 async def settings_defaults():
     """返回前端默认设置"""
+    if DEFAULT_COMPUTE_BACKEND in {"mlx", "apple", "apple_silicon"}:
+        model_version = "mlx"
+    elif DEFAULT_COMPUTE_BACKEND in {"gpu", "cuda", "nvidia"}:
+        model_version = "gpu"
+    else:
+        model_version = "mlx" if "mlx" in MODEL_PATH.lower() else "gpu"
+
     return {
         "analysis_mode": "full_agent",
         "analysis_strategy": "聚焦诉求",
         "temperature": None,
         "knowledge_base_enabled": True,
-        "model_version": "mlx",
+        "model_version": model_version,
+        "compute_backend": DEFAULT_COMPUTE_BACKEND,
         "self_correction_enabled": True,
         "short_test_enabled": True,
         "task_decomposition_enabled": True,
@@ -1334,8 +1652,8 @@ def uniquify_path(target: Path) -> Path:
 @app.post("/api/auth/register")
 async def register(username: str = Form(...), password: str = Form("")):
     print(f"Registering user: {username}")
-    # rainforgrain 允许空密码
-    if username != "rainforgrain" and len(password) < 8:
+    # Built-in superuser registration compatibility: allow short password only for superuser.
+    if not is_builtin_superuser(username) and len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
 
     try:
@@ -1357,20 +1675,19 @@ async def register(username: str = Form(...), password: str = Form("")):
 @app.post("/api/auth/login")
 async def login(username: str = Form(...), password: str = Form("")):
     print(f"Login attempt: {username}")
-    if username == "rainforgrain":
-        # Superuser skip password check (even if password is empty)
+    if is_builtin_superuser(username):
+        if not verify_builtin_superuser_password(password):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
         # Ensure superuser exists in the DB for foreign key constraints
         try:
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
-            if not cursor.fetchone():
-                cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
-                               (username, hash_password("internal_bypass_value")))
-                conn.commit()
+            ensure_builtin_superuser(cursor)
+            conn.commit()
             conn.close()
-            return {"username": "rainforgrain", "is_superuser": True}
+            return {"username": BUILTIN_SUPERUSER_USERNAME, "is_superuser": True}
         except Exception as e:
             print(f"Superuser login error: {e}")
             traceback.print_exc()
@@ -1414,6 +1731,154 @@ async def login(username: str = Form(...), password: str = Form("")):
         print(f"Login error: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- JWT Auth configuration ---
+JWT_SECRET = os.getenv("DEEPANALYZE_JWT_SECRET", secrets.token_hex(32))
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = int(os.getenv("DEEPANALYZE_JWT_EXPIRATION_HOURS", "168"))
+
+
+def create_jwt_token(username: str) -> str:
+    now = int(time_module.time())
+    payload = {"sub": username, "iat": now, "exp": now + JWT_EXPIRATION_HOURS * 3600}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_jwt_token(token: str):
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        return None
+
+
+def get_current_user_from_token(request: Request) -> str | None:
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        payload = decode_jwt_token(auth_header[7:])
+        if payload:
+            return payload.get("sub")
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key:
+        payload = decode_jwt_token(api_key)
+        if payload:
+            return payload.get("sub")
+    return None
+
+
+@app.post("/v1/auth/register")
+async def v1_register(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+    if not username or len(username) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
+    if cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                   (username, hash_password(password)))
+    conn.commit()
+    conn.close()
+
+    token = create_jwt_token(username)
+    return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+@app.post("/v1/auth/login")
+async def v1_login(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+
+    if is_builtin_superuser(username):
+        if not verify_builtin_superuser_password(password):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        ensure_builtin_superuser(cursor)
+        conn.commit()
+        conn.close()
+
+        token = create_jwt_token(BUILTIN_SUPERUSER_USERNAME)
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "username": BUILTIN_SUPERUSER_USERNAME,
+            "is_superuser": True,
+        }
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, password_hash FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    stored_hash = row["password_hash"]
+    if stored_hash and stored_hash != hash_password(""):
+        if hash_password(password) != stored_hash:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    token = create_jwt_token(username)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "username": username,
+        "is_superuser": is_builtin_superuser(username),
+    }
+
+
+@app.get("/v1/auth/users")
+async def v1_list_users():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    ensure_builtin_superuser(cursor)
+    conn.commit()
+    cursor.execute("SELECT username FROM users ORDER BY username")
+    users = [row["username"] for row in cursor.fetchall()]
+    conn.close()
+    return {"users": users}
+
+
+@app.get("/v1/auth/me")
+async def v1_get_me(request: Request):
+    username = get_current_user_from_token(request)
+    if not username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, password_hash FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=401, detail="User not found")
+    return {
+        "username": username,
+        "created_at": 0,
+        "is_superuser": is_builtin_superuser(username),
+    }
+
 
 @app.get("/workspace/files")
 async def get_workspace_files(session_id: str = Query("default"), username: str = Query("default")):
@@ -2635,7 +3100,10 @@ def bot_stream(
     analysis_mode="full_agent",
     report_types=None,
     model_provider=None,
+    analysis_language="zh-CN",
 ):
+    analysis_language = normalize_analysis_language(analysis_language)
+
     # Strategy-specific prompts and default temperature
     strategy_temperatures = {
         "聚焦诉求": 0.2,
@@ -2704,6 +3172,48 @@ def bot_stream(
         "full_agent": "\n\n**当前分析模式：全程代理分析**\n请自主执行全部分析任务，不需要等待用户中间确认。按照任务依赖关系有序执行，确保覆盖所有必要的分析维度。\n\n**高效完成原则（极重要）**：\n- 分析任务应在完成所有必要维度后及时终结，不要无限制地扩展分析。\n- 完成数据探测、核心分析、风险识别后，立即进入报告生成阶段。\n- 生成报告时，必须将前面所有分析步骤中产生的具体数据、结论、图表路径全部整合到报告中，不得遗漏或使用占位符。\n- 报告中每个章节都必须包含实质性的分析内容（具体数值、比例、排名、趋势描述等），而非仅写章节标题。"
     }
     selected_mode_prompt = mode_prompts.get(analysis_mode, mode_prompts["full_agent"])
+
+    if analysis_language == "en":
+        strategy_prompts_en = {
+            "聚焦诉求": "\n**Analysis strategy: Focused scope**. Follow the user's explicit request strictly, answer only directly asked questions, and avoid unnecessary expansion. Keep the response concise and high-signal.",
+            "适度扩展": "\n**Analysis strategy: Moderate extension**. Satisfy the core request first, then provide limited related analysis and lightweight risk hints where relevant, without over-expanding.",
+            "广泛延展": "\n**Analysis strategy: Broad exploration**. Perform deeper exploratory analysis, uncover latent relations, and provide multi-dimensional insights and forward-looking recommendations.",
+        }
+        selected_strategy_prompt = strategy_prompts_en.get(strategy, strategy_prompts_en["聚焦诉求"])
+
+        if effective_temperature <= 0.15:
+            temp_hint = "\n\n**Temperature hint (very low {:.2f})**: maximize efficiency, stay strictly on the user's explicit objective, and avoid exploratory detours.".format(effective_temperature)
+        elif effective_temperature <= 0.3:
+            temp_hint = "\n\n**Temperature hint (low {:.2f})**: prioritize efficient execution and focus on directly relevant dimensions only.".format(effective_temperature)
+        elif effective_temperature <= 0.5:
+            temp_hint = "\n\n**Temperature hint (medium {:.2f})**: after covering core requirements, you may extend to one or two closely related angles.".format(effective_temperature)
+        else:
+            temp_hint = "\n\n**Temperature hint (high {:.2f})**: broader exploratory analysis is allowed when it improves insight quality.".format(effective_temperature)
+
+        report_types_prompt = "\n\n**Required final report formats (critical)**: {}. After analysis, generate all required report files and confirm completion in `<Answer>`.".format(", ".join([t.upper() for t in report_types]))
+
+        mode_prompts_en = {
+            "interactive": (
+                "\n\n**Current mode: Interactive analysis (strictly required)**"
+                "\nYou must follow this workflow and do not skip steps:"
+                "\n1) Data exploration and data dictionary."
+                "\n2) Planning and user confirmation. You MUST output the plan using `<TaskTree>`."
+                "\n- Inside `<TaskTree>`, output only one valid JSON object."
+                "\n- Do not repeat the task tree JSON outside `<TaskTree>`."
+                "\n- After outputting `<TaskTree>`, stop immediately."
+                "\n- Before user selection arrives, do not execute analysis code."
+                "\n3) Execute only tasks selected by the user."
+                "\n4) Deliver final report files in the required formats."
+            ),
+            "full_agent": (
+                "\n\n**Current mode: Full-agent analysis**"
+                "\nRun end-to-end analysis autonomously without intermediate user confirmation."
+                "\nFinish after necessary dimensions are covered, then move to report generation."
+                "\nReports must include concrete findings from earlier steps (numbers, rankings, trend evidence, chart references), not placeholders."
+            ),
+        }
+        selected_mode_prompt = mode_prompts_en.get(analysis_mode, mode_prompts_en["full_agent"])
+
     requested_report_types = [
         item.strip().lower()
         for item in (report_types or ["pdf"])
@@ -2711,18 +3221,47 @@ def bot_stream(
     ]
     if not requested_report_types:
         requested_report_types = ["pdf"]
-    report_prompt = (
-        "\n\n**报告输出要求（必须遵守）**："
-        f"\n- 用户选定的最终报告类型为：{', '.join(requested_report_types).upper()}。"
-        "\n- 如果进入报告生成阶段，必须输出以上全部选定格式，不得只生成其中一部分。"
-        "\n- 生成报告前请记住该要求，并在完成分析后产出对应成果文件。"
-    )
+    if analysis_language == "en":
+        report_prompt = (
+            "\n\n**Report output requirements (mandatory)**:"
+            f"\n- Selected formats: {', '.join(requested_report_types).upper()}."
+            "\n- In report generation stage, output all selected formats (not a subset)."
+            "\n- Keep this requirement throughout the run and produce all required artifacts."
+        )
+    else:
+        report_prompt = (
+            "\n\n**报告输出要求（必须遵守）**："
+            f"\n- 用户选定的最终报告类型为：{', '.join(requested_report_types).upper()}。"
+            "\n- 如果进入报告生成阶段，必须输出以上全部选定格式，不得只生成其中一部分。"
+            "\n- 生成报告前请记住该要求，并在完成分析后产出对应成果文件。"
+        )
+    language_prompt = build_analysis_language_prompt(analysis_language)
     signature_safety_prompt = (
         "\n\n**函数与方法调用安全规则（必须遵守）**："
         "\n- 定义自定义函数后，调用时必须逐一核对参数数量、参数名称、默认值和返回值。"
         "\n- 遇到 pandas、matplotlib、reportlab、docx、pptx 等库方法时，必须按当前版本支持的签名调用，不得臆造参数。"
         "\n- 执行前先自查一遍：是否存在 missing positional argument、unexpected keyword argument、takes N positional arguments 等风险。"
         "\n- 如需复用辅助函数，先统一函数定义，再统一所有调用点，避免同名函数签名不一致。"
+    )
+    methodology_integration_prompt = (
+        "\n\n**AI数据分析师方法论增强层（新增注入，不替代你已有的方法与规则）**："
+        "\n你必须将以下方法论与现有分析流程高度融合、贯穿执行全过程："
+        "\n1) CRISP-DM 改进框架：业务理解→数据理解→数据准备→建模分析→评估验证→部署应用。"
+        "\n2) 迭代循环：探索→假设→验证→优化→报告，并根据反馈进入下一轮循环。"
+        "\n3) 分析哲学：数据驱动决策、假设驱动探索、多维交叉验证、可解释性优先、实用价值导向。"
+        "\n4) 质量原则：完整性、一致性、准确性、时效性检查为刚性步骤。"
+        "\n5) 分析视角：时间、空间/区域、用户/对象、业务指标四类视角应按需组合使用。"
+        "\n6) 分析深度：浅层（快速洞察）→中层（交叉探索）→深层（预测/归因/优化）渐进推进。"
+        "\n7) 工具策略：SQL优先、可视化驱动、分析过程文档化与可复现。"
+        "\n\n**每一轮输出的执行约束（必须遵守）**："
+        "\n- 每个 `<Analyze>` 必须明确写出：当前CRISP-DM阶段、当前迭代环节、核心假设、验证与交叉验证计划、质量检查点、业务价值。"
+        "\n- 每个 `<Code>` 必须对应可验证的分析动作，不得跳过关键质量检查与验证环节。"
+        "\n- 在 `<Answer>` 中必须包含：关键洞察、可解释依据、业务建议优先级、后续行动计划。"
+        "\n- 若因数据限制无法执行某阶段，必须显式说明影响、替代方案与风险。"
+        "\n\n**工作流程融合要求**："
+        "\n- 标准作业流程按 准备(20%)→执行(50%)→交付(30%) 推进。"
+        "\n- 使用敏捷模式：快速原型→反馈调整→深度扩展→最终交付。"
+        "\n- 每次分析结束后进行简短复盘，说明方法是否有效、下一轮如何优化。"
     )
 
     # 使用动态生成的 system prompt（已包含完整内容）
@@ -2750,10 +3289,24 @@ def bot_stream(
     system_prompt += temp_hint
     system_prompt += report_types_prompt
     system_prompt += signature_safety_prompt
+    system_prompt += methodology_integration_prompt
+    system_prompt += report_prompt
+    system_prompt += language_prompt
+
+    language_enforcer_prompt = (
+        "CRITICAL OUTPUT RULE: Respond in English only for all user-facing narrative text. "
+        "Do not output Chinese characters in Analyze/Understand/Answer/TaskTree/report text. "
+        "Keep structural tags unchanged."
+        if analysis_language == "en"
+        else "关键输出规则：所有面向用户的自然语言文本必须使用简体中文（包括 Analyze/Understand/Answer/TaskTree/报告正文）。结构化标签保持不变。"
+    )
 
     # Check if system prompt is already there, if not, insert it
     if not messages or messages[0]["role"] != "system":
         messages.insert(0, {"role": "system", "content": system_prompt})
+
+    if len(messages) < 2 or messages[1].get("role") != "system" or messages[1].get("content") != language_enforcer_prompt:
+        messages.insert(1, {"role": "system", "content": language_enforcer_prompt})
 
     original_cwd = os.getcwd()
     WORKSPACE_DIR = get_session_workspace(session_id, username)
@@ -2786,8 +3339,10 @@ def bot_stream(
     assistant_reply = ""
     finished = False
     exe_output = None
-    llm_client, llm_model, _ = get_runtime_llm(model_provider)
-    while not finished:
+    llm_client, llm_model, runtime_provider = get_runtime_llm(model_provider)
+    round_count = 0
+    while not finished and round_count < MAX_AGENT_ROUNDS:
+        round_count += 1
         # 在每次 LLM 生成前，检查是否有用户提交的“过程指导/Side Task”
         guidance = SESSION_GUIDANCE.pop(session_id, None)
         if guidance:
@@ -2798,37 +3353,63 @@ def bot_stream(
             messages.append(guidance_msg)
             print(f"[Side Guidance] Injecting guidance into session {session_id}")
 
-        response = llm_client.chat.completions.create(
-            model=llm_model,
-            messages=messages,
-            temperature=effective_temperature,
-            stream=True,
-            stop=["</Code>", "</TaskTree>", "</s>", "<|endoftext|>", "<|im_end|>"],
-            extra_body={
+        request_kwargs: Dict[str, Any] = {
+            "model": llm_model,
+            "messages": messages,
+            "temperature": effective_temperature,
+            "stream": True,
+            "stop": [
+                "</Code>",
+                "</code>",
+                "</TaskTree>",
+                "</tasktree>",
+                "</s>",
+                "<|endoftext|>",
+                "<|im_end|>",
+            ],
+        }
+        if _provider_supports_vllm_controls(runtime_provider):
+            request_kwargs["extra_body"] = {
                 "add_generation_prompt": False,
                 "max_new_tokens": 32768,
-            },
-        )
+            }
+
+        try:
+            response = _create_chat_completion_with_retry(llm_client, request_kwargs)
+        except Exception as create_exc:
+            error_block = _build_streaming_answer_error(str(create_exc))
+            assistant_reply += error_block
+            yield error_block
+            break
+
         cur_res = ""
+        last_finish_reason = None
         for chunk in response:
-            if chunk.choices and chunk.choices[0].delta.content is not None:
-                delta = chunk.choices[0].delta.content
-                cur_res += delta
-                assistant_reply += delta
-                yield delta
-            if "</Answer>" in cur_res:
+            if chunk.choices:
+                choice = chunk.choices[0]
+                last_finish_reason = choice.finish_reason
+                if choice.delta.content is not None:
+                    delta = choice.delta.content
+                    cur_res += delta
+                    assistant_reply += delta
+                    yield delta
+
+            if re.search(r"</answer>", cur_res, re.IGNORECASE):
                 finished = True
                 break
             # ---- TaskTree 检测（流式中途发现完整闭合标签） ----
-            if "</TaskTree>" in cur_res:
+            if re.search(r"</tasktree>", cur_res, re.IGNORECASE):
                 messages.append({"role": "assistant", "content": cur_res})
                 finished = True
                 break
         if finished:
             # 已因 </Answer> 或 </TaskTree> 结束，跳过后续代码执行逻辑
             continue
+
         # ---- TaskTree 检测（stop sequence 截断时，LLM 输出了 <TaskTree> 但未闭合） ----
-        if "<TaskTree>" in cur_res and "</TaskTree>" not in cur_res:
+        has_tasktree_open = re.search(r"<tasktree>", cur_res, re.IGNORECASE) is not None
+        has_tasktree_close = re.search(r"</tasktree>", cur_res, re.IGNORECASE) is not None
+        if has_tasktree_open and not has_tasktree_close:
             # stop sequence 截断了 </TaskTree>，手动补上闭合标签
             closing_tag = "</TaskTree>"
             cur_res += closing_tag
@@ -2837,19 +3418,33 @@ def bot_stream(
             messages.append({"role": "assistant", "content": cur_res})
             finished = True
             continue
-        if chunk.choices[0].finish_reason == "stop" and not finished:
-            if not cur_res.endswith("</Code>"):
+
+        has_code_open = re.search(r"<code>", cur_res, re.IGNORECASE) is not None
+        has_code_close = re.search(r"</code>", cur_res, re.IGNORECASE) is not None
+
+        if last_finish_reason == "stop" and not finished and has_code_open and not has_code_close:
+            if not re.search(r"</code>\s*$", cur_res, re.IGNORECASE):
                 missing_tag = "</Code>"
                 cur_res += missing_tag
                 assistant_reply += missing_tag
                 yield missing_tag
-        if "</Code>" in cur_res and not finished:
+            has_code_close = True
+
+        if has_code_open and has_code_close and not finished:
             messages.append({"role": "assistant", "content": cur_res})
-            code_match = re.search(r"<Code>(.*?)</Code>", cur_res, re.DOTALL)
+            code_match = re.search(r"<code>(.*?)</code>", cur_res, re.DOTALL | re.IGNORECASE)
+            code_str = None
             if code_match:
-                code_content = code_match.group(1).strip()
-                md_match = re.search(r"```(?:python)?(.*?)```", code_content, re.DOTALL)
+                code_content = (code_match.group(1) or "").strip()
+                md_match = re.search(r"```(?:python)?(.*?)```", code_content, re.DOTALL | re.IGNORECASE)
                 code_str = md_match.group(1).strip() if md_match else code_content
+            else:
+                # 对通用模型兜底：即使没用 <Code> 标签，也尝试提取 fenced code
+                md_match = re.search(r"```(?:python)?(.*?)```", cur_res, re.DOTALL | re.IGNORECASE)
+                if md_match:
+                    code_str = md_match.group(1).strip()
+
+            if code_str:
                 code_str = Chinese_matplot_str + "\n" + code_str
                 # 自动将用户提及的原始文件名映射为 converted/ 目录下的实际文件
                 code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
@@ -2967,6 +3562,23 @@ def bot_stream(
                 if new_files:
                     workspace.extend(new_files)
                     initial_workspace.update(new_files)
+
+            continue
+
+        # 无代码时也要保留本轮输出，允许模型进入下一轮（例如先 Analyze 再 Code）
+        if cur_res.strip():
+            messages.append({"role": "assistant", "content": cur_res})
+
+    if not finished and round_count >= MAX_AGENT_ROUNDS:
+        limit_block = (
+            "<Answer>\n"
+            f"已达到最大分析轮次（{MAX_AGENT_ROUNDS}轮），为避免无限循环已自动停止。\n"
+            "请提供更具体的下一步指令，或缩小分析范围后继续。\n"
+            "</Answer>\n"
+        )
+        assistant_reply += limit_block
+        yield limit_block
+
     os.chdir(original_cwd)
 
 
@@ -2979,6 +3591,7 @@ async def chat(body: dict = Body(...)):
     strategy = body.get("strategy", "聚焦诉求")
     temperature = body.get("temperature", None)  # Optional: user can override temperature
     analysis_mode = body.get("analysis_mode", "full_agent")
+    analysis_language = normalize_analysis_language(body.get("analysis_language", "zh-CN"))
     report_types = body.get("report_types", ["pdf"])
     model_provider = body.get("model_provider")
     model_name = MODEL_PATH
@@ -2999,6 +3612,7 @@ async def chat(body: dict = Body(...)):
             analysis_mode,
             report_types,
             model_provider,
+            analysis_language,
         ):
             # print(delta_content)
             chunk = {
@@ -3845,6 +4459,7 @@ async def export_report(body: dict = Body(...)):
         title = (body.get("title") or "").strip()
         session_id = body.get("session_id", "default")
         username = body.get("username", "default")
+        analysis_language = normalize_analysis_language(body.get("analysis_language", "zh-CN"))
         workspace_dir = get_session_workspace(session_id, username)
 
         if not isinstance(messages, list):
@@ -3852,11 +4467,15 @@ async def export_report(body: dict = Body(...)):
 
         md_text = _extract_sections_from_messages(messages)
         if not md_text:
-            md_text = "(No <Analyze>/<Understand>/<Code>/<Execute>/<Answer> sections found.)"
+            if analysis_language == "en":
+                md_text = "(No <Analyze>/<Understand>/<Code>/<Execute>/<Answer> sections found.)"
+            else:
+                md_text = "（未找到可导出的 <Analyze>/<Understand>/<Code>/<Execute>/<Answer> 内容。）"
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_title = re.sub(r"[^\w\-_.]+", "_", title) if title else "Report"
-        base_name = f"{safe_title}_{ts}" if title else f"Report_{ts}"
+        default_title = "Report" if analysis_language == "en" else "报告"
+        safe_title = re.sub(r"[^\w\-_.]+", "_", title) if title else default_title
+        base_name = f"{safe_title}_{ts}"
 
         export_dir = os.path.join(workspace_dir, "generated")
         os.makedirs(export_dir, exist_ok=True)
@@ -3874,6 +4493,7 @@ async def export_report(body: dict = Body(...)):
 
         result = {
             "message": "exported",
+            "analysis_language": analysis_language,
             "md": md_path.name,
             "pdf": pdf_path.name if pdf_path else None,
             "docx": docx_path.name if docx_path else None,
@@ -3901,6 +4521,8 @@ async def list_users():
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
+        ensure_builtin_superuser(cursor)
+        conn.commit()
         cursor.execute("SELECT username FROM users ORDER BY username ASC")
         rows = cursor.fetchall()
         conn.close()
@@ -4248,7 +4870,7 @@ async def add_yutu_record(body: dict = Body(...), username: str = Query("default
     """
     try:
         # 检查是否为超级用户
-        if username != "rainforgrain":
+        if not is_builtin_superuser(username):
             raise HTTPException(status_code=403, detail="Only superuser can add records")
 
         error_type = body.get("error_type", "Unknown")
@@ -4286,7 +4908,7 @@ async def update_yutu_record(body: dict = Body(...), username: str = Query("defa
     """
     try:
         # 检查是否为超级用户
-        if username != "rainforgrain":
+        if not is_builtin_superuser(username):
             raise HTTPException(status_code=403, detail="Only superuser can update records")
 
         error_hash = body.get("error_hash")
@@ -4323,7 +4945,7 @@ async def delete_yutu_record(body: dict = Body(...), username: str = Query("defa
     """
     try:
         # 检查是否为超级用户
-        if username != "rainforgrain":
+        if not is_builtin_superuser(username):
             raise HTTPException(status_code=403, detail="Only superuser can delete records")
 
         error_hash = body.get("error_hash")
@@ -4384,7 +5006,7 @@ async def organize_yutu_api(body: dict, username: str = ""):
     """整理雨途斩棘录 - 使用VLLM AI重新组织所有记录（超级用户专用）"""
     print(f"[DEBUG] organize_yutu_api called with username={username}, body keys={list(body.keys()) if body else 'None'}")
     # 验证超级用户
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以整理笔记")
 
     records = body.get("records", [])
@@ -4500,7 +5122,7 @@ async def organize_yutu_api(body: dict, username: str = ""):
 @app.get("/api/yutu/backup/list")
 async def list_yutu_backups(username: str = Query("default")):
     """列出所有备份文件"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以查看备份列表")
 
     try:
@@ -4516,7 +5138,7 @@ async def list_yutu_backups(username: str = Query("default")):
 @app.post("/api/yutu/backup/create")
 async def create_yutu_backup(data: dict = Body(...), username: str = Query("default")):
     """手动创建雨途斩棘录备份"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以创建备份")
 
     custom_name = data.get("filename")
@@ -4533,7 +5155,7 @@ async def create_yutu_backup(data: dict = Body(...), username: str = Query("defa
 @app.delete("/api/yutu/backup/delete")
 async def delete_yutu_backup(filename: str = Query(...), username: str = Query("default")):
     """删除备份文件"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以删除备份")
 
     try:
@@ -4548,7 +5170,7 @@ async def delete_yutu_backup(filename: str = Query(...), username: str = Query("
 @app.post("/api/yutu/backup/restore")
 async def restore_yutu_backup(data: dict, username: str = Query("default")):
     """从备份恢复"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以恢复备份")
 
     filename = data.get("filename")
@@ -4570,7 +5192,7 @@ async def restore_yutu_backup(data: dict, username: str = Query("default")):
 @app.post("/api/yutu/organize/confirm")
 async def confirm_organize(data: dict, username: str = ""):
     """确认整理结果：应用改进后的方案"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以确认")
 
     improved_records = data.get("records", [])
@@ -4594,7 +5216,7 @@ async def confirm_organize(data: dict, username: str = ""):
 @app.post("/api/yutu/organize/cancel")
 async def cancel_organize(data: dict, username: str = ""):
     """取消整理：恢复到原始备份"""
-    if username != "rainforgrain":
+    if not is_builtin_superuser(username):
         raise HTTPException(status_code=403, detail="只有超级用户可以取消")
 
     # 取消操作不需要实际恢复，因为原始数据未修改
@@ -4602,27 +5224,129 @@ async def cancel_organize(data: dict, username: str = ""):
 
 
 # ========== 数据库连接与查询 API ==========
-def build_db_url(db_type: str, config: dict) -> str:
-    """构建 SQLAlchemy 连接字符串"""
-    user = config.get("user", "")
-    password = config.get("password", "")
-    host = config.get("host", "localhost")
-    port = config.get("port", "")
-    database = config.get("database", "")
+DB_TYPE_ALIASES = {
+    "postgres": "postgresql",
+    "postgresql": "postgresql",
+    "mysql": "mysql",
+    "mssql": "mssql",
+    "sqlserver": "mssql",
+    "sqlite": "sqlite",
+    "oracle": "oracle",
+}
 
-    if db_type == "mysql":
-        return f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}?charset=utf8mb4"
-    elif db_type == "postgresql":
-        return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}"
-    elif db_type == "mssql":
-        return f"mssql+pymssql://{user}:{password}@{host}:{port}/{database}"
-    elif db_type == "sqlite":
-        return f"sqlite:///{database}"
-    elif db_type == "oracle":
-        # 注意：oracle 可能需要 cx_oracle 或 oracledb
-        return f"oracle+cx_oracle://{user}:{password}@{host}:{port}/{database}"
+DB_DEFAULT_PORTS = {
+    "mysql": 3306,
+    "postgresql": 5432,
+    "mssql": 1433,
+    "oracle": 1521,
+}
+
+DB_DRIVER_NAMES = {
+    "mysql": "mysql+pymysql",
+    "postgresql": "postgresql+psycopg2",
+    "mssql": "mssql+pymssql",
+    "oracle": "oracle+cx_oracle",
+}
+
+DB_DRIVER_PACKAGES = {
+    "mysql": "pymysql",
+    "postgresql": "psycopg2-binary",
+    "mssql": "pymssql",
+    "oracle": "cx_Oracle",
+}
+
+
+def normalize_db_type(db_type: Optional[str]) -> str:
+    normalized = str(db_type or "").strip().lower()
+    if not normalized:
+        raise ValueError("缺少 db_type，请选择数据库类型")
+    resolved = DB_TYPE_ALIASES.get(normalized)
+    if not resolved:
+        supported = ", ".join(sorted(set(DB_TYPE_ALIASES.values())))
+        raise ValueError(f"不支持的数据库类型: {db_type}。支持: {supported}")
+    return resolved
+
+
+def build_db_url(db_type: str, config: dict) -> str:
+    """构建 SQLAlchemy 连接字符串（使用 URL.create，避免特殊字符导致解析错误）"""
+    db_type = normalize_db_type(db_type)
+    config = config or {}
+
+    if db_type == "sqlite":
+        database = str(config.get("database", "")).strip()
+        if not database:
+            raise ValueError("SQLite 连接需要提供数据库文件路径")
+        if database == ":memory:":
+            return "sqlite:///:memory:"
+        return URL.create(drivername="sqlite", database=database).render_as_string(hide_password=False)
+
+    drivername = DB_DRIVER_NAMES[db_type]
+    host = str(config.get("host", "localhost") or "localhost").strip() or "localhost"
+    database = str(config.get("database", "")).strip()
+    if not database:
+        raise ValueError("请填写数据库名称")
+
+    port_raw = str(config.get("port", "") or "").strip()
+    if port_raw:
+        if not port_raw.isdigit():
+            raise ValueError("端口必须为数字")
+        port = int(port_raw)
     else:
-        raise ValueError(f"Unsupported database type: {db_type}")
+        port = DB_DEFAULT_PORTS.get(db_type)
+
+    user = str(config.get("user", "") or "").strip() or None
+    password_raw = config.get("password", None)
+    password = None if password_raw in (None, "") else str(password_raw)
+    query = {"charset": "utf8mb4"} if db_type == "mysql" else None
+
+    return URL.create(
+        drivername=drivername,
+        username=user,
+        password=password,
+        host=host,
+        port=port,
+        database=database,
+        query=query,
+    ).render_as_string(hide_password=False)
+
+
+def build_db_engine(db_type: str, config: dict):
+    db_type = normalize_db_type(db_type)
+    url = build_db_url(db_type, config)
+
+    connect_args = {}
+    if db_type in ("mysql", "postgresql"):
+        connect_args["connect_timeout"] = 5
+    elif db_type == "mssql":
+        connect_args["login_timeout"] = 5
+
+    engine_kwargs = {"pool_pre_ping": True}
+    if connect_args:
+        engine_kwargs["connect_args"] = connect_args
+    return create_engine(url, **engine_kwargs)
+
+
+def format_db_error(exc: Exception, db_type: Optional[str]) -> str:
+    raw_message = str(exc).strip() or exc.__class__.__name__
+    # 避免把连接串中的明文密码返回前端
+    safe_message = re.sub(r"://([^:/@]+):([^@]+)@", r"://\1:***@", raw_message)
+    lower = safe_message.lower()
+
+    try:
+        normalized_type = normalize_db_type(db_type)
+    except Exception:
+        normalized_type = str(db_type or "").strip().lower()
+
+    driver_pkg = DB_DRIVER_PACKAGES.get(normalized_type)
+    if driver_pkg and ("no module named" in lower or "can't load plugin" in lower):
+        return f"缺少数据库驱动，请安装 `{driver_pkg}` 后重试。原始错误: {safe_message}"
+    if "password authentication failed" in lower or "access denied" in lower:
+        return "数据库账号或密码错误，请检查连接配置"
+    if "connection refused" in lower or "can't connect" in lower:
+        return "无法连接到数据库服务，请确认主机、端口和数据库服务状态"
+    if "could not translate host name" in lower or "name or service not known" in lower:
+        return "数据库主机名无法解析，请检查主机地址配置"
+    return safe_message
 
 
 @app.post("/api/db/test")
@@ -4631,37 +5355,65 @@ async def test_db_connection(body: dict = Body(...)):
     try:
         db_type = body.get("db_type")
         config = body.get("config", {})
-        url = build_db_url(db_type, config)
-        # SQLite 不需要超时设置，其他 DB 设置 5 秒超时
-        engine = create_engine(url, connect_args={"connect_timeout": 5} if db_type != "sqlite" else {})
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        engine = build_db_engine(db_type, config)
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        finally:
+            engine.dispose()
         return {"success": True, "message": "Connection successful"}
     except Exception as e:
         print(f"DB Test Error: {e}")
-        return {"success": False, "message": str(e)}
+        return {"success": False, "message": format_db_error(e, body.get("db_type"))}
 
 
 @app.post("/api/db/generate-sql")
 async def generate_sql(body: dict = Body(...)):
-    """自然语言生成 SQL"""
+    """自然语言生成 SQL（自动获取真实数据库 Schema）"""
     try:
         db_type = body.get("db_type", "mysql")
+        config = body.get("config", {})
         prompt = body.get("prompt", "")
-        schema_info = body.get("schema_info", "") # 可选：由前端提供或后端自动获取
         model_provider = body.get("model_provider")
 
         if not prompt:
             return {"success": False, "message": "Prompt is required"}
 
-        system_msg = f"""你是一个精通 SQL 的专家。请根据用户的需求，生成适用于 {db_type} 数据库的 SQL 查询语句。
-如果提供了表结构信息，请严格按照表结构生成。
+        # 尝试连接数据库，获取真实 schema
+        schema_info = ""
+        try:
+            from sqlalchemy import inspect
+            normalized_type = normalize_db_type(db_type)
+            engine = build_db_engine(normalized_type, config)
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+            schema_lines = []
+            for table_name in tables:
+                columns = inspector.get_columns(table_name)
+                col_defs = []
+                for col in columns:
+                    col_type = str(col.get("type", "unknown"))
+                    nullable = "NULL" if col.get("nullable", True) else "NOT NULL"
+                    default = f" DEFAULT {col['default']}" if col.get("default") else ""
+                    col_defs.append(f"  {col['name']} {col_type} {nullable}{default}")
+                pk = inspector.get_pk_constraint(table_name)
+                if pk and pk.get("constrained_columns"):
+                    col_defs.append(f"  PRIMARY KEY ({', '.join(pk['constrained_columns'])})")
+                schema_lines.append(f"CREATE TABLE {table_name} (\n" + ",\n".join(col_defs) + "\n);")
+            schema_info = "\n\n".join(schema_lines)
+            engine.dispose()
+        except Exception as e:
+            print(f"Could not fetch schema from DB: {e}")
+            schema_info = "(无法自动获取表结构，请确保连接信息正确)"
+
+        system_msg = f"""你是一个精通 SQL 的专家。请根据以下数据库 Schema 和用户需求，生成适用于 {db_type} 数据库的 SQL 查询语句。
+严格基于所提供的 Schema 生成查询，不要虚构不存在的表或列。
 只返回 SQL 代码块，不要有任何其他文字解释。
 代码块格式如下：
 ```sql
 SELECT ...
 ```"""
-        user_msg = f"需求：{prompt}\n表结构信息：{schema_info}"
+        user_msg = f"数据库 Schema：\n{schema_info}\n\n用户需求：{prompt}"
 
         llm_client, llm_model, _ = get_runtime_llm(model_provider)
         response = llm_client.chat.completions.create(
@@ -4704,11 +5456,12 @@ async def execute_db_sql(body: dict = Body(...)):
         if not sql:
             return {"success": False, "message": "SQL is required"}
 
-        url = build_db_url(db_type, config)
-        engine = create_engine(url)
-
-        # 使用 pandas 执行查询
-        df = pd.read_sql(sql, engine)
+        engine = build_db_engine(db_type, config)
+        try:
+            # 使用 pandas 执行查询
+            df = pd.read_sql(sql, engine)
+        finally:
+            engine.dispose()
 
         workspace_dir = get_session_workspace(session_id, username)
         file_ext = ".csv" if format == "csv" else ".json"
@@ -4738,7 +5491,7 @@ async def execute_db_sql(body: dict = Body(...)):
         }
     except Exception as e:
         print(f"Execute DB SQL Error: {e}")
-        return {"success": False, "message": str(e)}
+        return {"success": False, "message": format_db_error(e, body.get("db_type"))}
 
 
 @app.get("/api/kb/settings")
@@ -4798,6 +5551,125 @@ async def test_kb_settings(body: dict = Body(...)):
     except Exception as e:
         print(f"Test KB settings error: {e}")
         return {"success": False, "message": str(e)}
+
+
+# ========== 用户本地配置持久化 API ==========
+
+@app.get("/api/config/models")
+async def get_user_model_configs(username: str = Query("default")):
+    """获取用户保存的模型提供商配置列表"""
+    data = _load_user_config(username, "model_providers.json", {"providers": []})
+    providers = data.get("providers", [])
+    selected_id = str(data.get("selected_id", "") or "").strip()
+    if not selected_id and isinstance(providers, list) and providers:
+        first = providers[0] if isinstance(providers[0], dict) else {}
+        selected_id = str(first.get("id", "") or "").strip()
+    return {"success": True, "providers": providers, "selected_id": selected_id}
+
+
+@app.post("/api/config/models")
+async def save_user_model_config(body: dict = Body(...)):
+    """保存用户的模型提供商配置"""
+    username = body.get("username", "default")
+    providers = body.get("providers", [])
+    selected_id = str(body.get("selected_id", "") or "").strip()
+    existing = _load_user_config(username, "model_providers.json", {"providers": []})
+    existing["providers"] = providers
+    if not selected_id and isinstance(providers, list) and providers:
+        first = providers[0] if isinstance(providers[0], dict) else {}
+        selected_id = str(first.get("id", "") or "").strip()
+    if selected_id:
+        existing["selected_id"] = selected_id
+    elif not providers:
+        existing["selected_id"] = ""
+    path = _save_user_config(username, "model_providers.json", existing)
+    return {
+        "success": True,
+        "path": path,
+        "selected_id": str(existing.get("selected_id", "") or ""),
+        "message": "模型配置已保存到本地",
+    }
+
+
+@app.delete("/api/config/models")
+async def delete_user_model_config(body: dict = Body(...)):
+    """删除用户保存的某个模型配置"""
+    username = body.get("username", "default")
+    provider_id = body.get("id", "")
+    data = _load_user_config(username, "model_providers.json", {"providers": []})
+    data["providers"] = [p for p in data["providers"] if p.get("id") != provider_id]
+    _save_user_config(username, "model_providers.json", data)
+    return {"success": True, "message": "已删除"}
+
+
+@app.get("/api/config/databases")
+async def get_user_db_configs(username: str = Query("default")):
+    """获取用户保存的数据库连接配置列表"""
+    data = _load_user_config(username, "database_connections.json", {"connections": []})
+    return {"success": True, "connections": data.get("connections", [])}
+
+
+@app.post("/api/config/databases")
+async def save_user_db_config(body: dict = Body(...)):
+    """保存用户的数据库连接配置（添加/更新）"""
+    username = body.get("username", "default")
+    connection = body.get("connection", {})
+    conn_id = connection.get("id") or f"db_{int(time_module.time())}"
+    connection["id"] = conn_id
+
+    data = _load_user_config(username, "database_connections.json", {"connections": []})
+    idx = next((i for i, c in enumerate(data["connections"]) if c.get("id") == conn_id), None)
+    if idx is not None:
+        data["connections"][idx] = connection
+    else:
+        data["connections"].append(connection)
+
+    path = _save_user_config(username, "database_connections.json", data)
+    return {"success": True, "path": path, "connection": connection, "message": "数据库配置已保存到本地"}
+
+
+@app.delete("/api/config/databases")
+async def delete_user_db_config(body: dict = Body(...)):
+    """删除用户保存的某个数据库连接配置"""
+    username = body.get("username", "default")
+    conn_id = body.get("id", "")
+    data = _load_user_config(username, "database_connections.json", {"connections": []})
+    data["connections"] = [c for c in data["connections"] if c.get("id") != conn_id]
+    _save_user_config(username, "database_connections.json", data)
+    return {"success": True, "message": "已删除"}
+
+
+@app.get("/api/config/knowledge")
+async def get_user_knowledge_settings(username: str = Query("default")):
+    """获取用户的知识库设置（与 DB settings 合并）"""
+    global_settings = load_kb_settings(raw=False)
+    user_settings = _load_user_config(username, "knowledge_settings.json", {})
+    merged = {**global_settings, **user_settings}
+    return {"success": True, "settings": merged}
+
+
+@app.post("/api/config/knowledge")
+async def save_user_knowledge_settings(body: dict = Body(...)):
+    """保存用户的知识库设置"""
+    username = body.get("username", "default")
+    settings = body.get("settings", {})
+    _save_user_config(username, "knowledge_settings.json", settings)
+    return {"success": True, "message": "知识库配置已保存到本地"}
+
+
+@app.get("/api/config/export")
+async def export_user_config(username: str = Query("default")):
+    """导出用户所有配置为一个 JSON 文件（用于备份或迁移）"""
+    config_dir = _get_user_config_dir(username)
+    result = {"username": username, "configs": {}}
+    for fname in os.listdir(config_dir):
+        if fname.endswith(".json"):
+            try:
+                with open(os.path.join(config_dir, fname), "r", encoding="utf-8") as f:
+                    result["configs"][fname] = json.load(f)
+            except Exception:
+                result["configs"][fname] = {}
+    return result
 
 
 if __name__ == "__main__":

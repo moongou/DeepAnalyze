@@ -29,7 +29,116 @@ The API server will create a new `workspace` folder in the current directory as 
 cd example
 python exampleRequest.py          #  requests example
 python exampleOpenAI.py    # OpenAI library example
+python exampleAnalytics.py  # layered analytics API example
 ```
+
+## 🧱 Layered Analytics Architecture (Implemented)
+
+This API server now includes a built-in layered analytics pipeline:
+
+- Storage layer: local files + uploaded files + in-memory metadata records
+- Processing layer: format parsing + quality checks + grouped aggregations
+- Compute layer: shallow/standard/deep analysis (statistics, correlation, trend, anomaly scan)
+- Interaction layer: REST endpoints under `/v1/analytics`
+
+External retrieval/cache components are intentionally excluded in this implementation:
+
+- Elasticsearch: removed
+- Redis: removed
+
+### Analytics Endpoints
+
+- `POST /v1/analytics/datasets/register`
+- `GET /v1/analytics/datasets`
+- `GET /v1/analytics/datasets/{dataset_id}`
+- `POST /v1/analytics/jobs/run`
+- `GET /v1/analytics/jobs`
+- `GET /v1/analytics/jobs/{job_id}`
+
+### Analytics Quick Example
+
+```python
+import requests
+
+base = "http://localhost:8200"
+
+dataset = requests.post(
+    f"{base}/v1/analytics/datasets/register",
+    json={
+        "name": "employee_data",
+        "source_type": "local_path",
+        "path": "./example/employee_data.csv",
+        "format": "csv"
+    },
+    timeout=60,
+).json()
+
+job = requests.post(
+    f"{base}/v1/analytics/jobs/run",
+    json={
+        "dataset_id": dataset["id"],
+        "depth": "deep",
+        "group_by": ["department"],
+        "time_column": "hire_date",
+        "target_column": "salary"
+    },
+    timeout=120,
+).json()
+
+print(job["status"])
+print(job["result"].get("report_markdown", ""))
+```
+
+## 🤖 Multi-Model Gateway (Implemented)
+
+The agent can now route requests to multiple LLM providers while keeping local vLLM:
+
+- Local vLLM (built-in, default)
+- OpenAI endpoint
+- Microsoft Foundry endpoint (OpenAI-compatible)
+- GitHub Models endpoint (OpenAI-compatible)
+- Any custom OpenAI-compatible endpoint
+
+### Admin Endpoints for Model Management
+
+- `GET /v1/admin/model-providers`
+- `POST /v1/admin/model-providers`
+- `DELETE /v1/admin/model-providers/{provider_id}`
+- `GET /v1/admin/model-catalog`
+- `POST /v1/admin/model-catalog`
+- `DELETE /v1/admin/model-catalog/{model_id}`
+
+### Provider Example (OpenAI)
+
+```python
+import requests
+
+requests.post(
+    "http://localhost:8200/v1/admin/model-providers",
+    json={
+        "id": "openai",
+        "name": "OpenAI",
+        "type": "openai_compatible",
+        "base_url": "https://api.openai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "enabled": True,
+    },
+    timeout=30,
+)
+
+requests.post(
+    "http://localhost:8200/v1/admin/model-catalog",
+    json={
+        "id": "gpt-4.1",
+        "provider_id": "openai",
+        "provider_model": "gpt-4.1",
+        "enabled": True,
+    },
+    timeout=30,
+)
+```
+
+Then call chat with model id `gpt-4.1` as normal.
 
 ## 📚 API Usage
 

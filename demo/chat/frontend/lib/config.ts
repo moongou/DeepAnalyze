@@ -28,14 +28,27 @@ export interface ModelProviderConfig {
   supportsOpenAICompatible?: boolean;
 }
 
+const DEFAULT_PROVIDER_TYPE =
+  (process.env.NEXT_PUBLIC_DEFAULT_PROVIDER_TYPE as ModelProviderType) ||
+  "deepanalyze";
+const DEFAULT_PROVIDER_LABEL =
+  process.env.NEXT_PUBLIC_DEFAULT_PROVIDER_LABEL || "DeepAnalyze 默认";
+const DEFAULT_PROVIDER_DESCRIPTION =
+  process.env.NEXT_PUBLIC_DEFAULT_PROVIDER_DESCRIPTION ||
+  "项目默认本地 vLLM 服务";
+const DEFAULT_PROVIDER_BASE_URL =
+  process.env.NEXT_PUBLIC_AI_API_URL || "http://localhost:8000/v1";
+const DEFAULT_PROVIDER_MODEL =
+  process.env.NEXT_PUBLIC_DEFAULT_MODEL_NAME || "DeepAnalyze-8B";
+
 export const MODEL_PROVIDER_PRESETS: ModelProviderConfig[] = [
   {
     id: "deepanalyze-default",
-    providerType: "deepanalyze",
-    label: "DeepAnalyze 默认",
-    description: "项目默认本地 vLLM 服务",
-    baseUrl: process.env.NEXT_PUBLIC_AI_API_URL || "http://localhost:8000/v1",
-    model: "DeepAnalyze-8B",
+    providerType: DEFAULT_PROVIDER_TYPE,
+    label: DEFAULT_PROVIDER_LABEL,
+    description: DEFAULT_PROVIDER_DESCRIPTION,
+    baseUrl: DEFAULT_PROVIDER_BASE_URL,
+    model: DEFAULT_PROVIDER_MODEL,
     apiKey: "",
     isLocal: true,
     supportsOpenAICompatible: true,
@@ -215,69 +228,91 @@ export const API_CONFIG = {
   // WebSocket地址
   WEBSOCKET_URL: process.env.NEXT_PUBLIC_WEBSOCKET_URL || "ws://localhost:8001",
 
-  // API端点
+  // API端点 (Phase 1: unified /v1/ prefix)
   ENDPOINTS: {
     // 聊天
-    CHAT_COMPLETIONS: "/chat/completions",
-    CHAT_GUIDANCE: "/api/chat/guidance",
+    CHAT_COMPLETIONS: "/v1/chat/completions",
 
     // 文件管理
-    WORKSPACE_FILES: "/workspace/files",
-    WORKSPACE_TREE: "/workspace/tree",
-    WORKSPACE_UPLOAD: "/workspace/upload",
-    WORKSPACE_CLEAR: "/workspace/clear",
-    WORKSPACE_DELETE_FILE: "/workspace/file",
-    WORKSPACE_UPLOAD_TO: "/workspace/upload-to",
-    WORKSPACE_DELETE_DIR: "/workspace/dir",
+    WORKSPACE_FILES: "/v1/files",
+    WORKSPACE_TREE: "/v1/files/tree",
+    WORKSPACE_UPLOAD: "/v1/files",
+    WORKSPACE_CLEAR: "/v1/files/clear",
+    WORKSPACE_DELETE_FILE: "/v1/files/file",
+    WORKSPACE_DELETE_DIR: "/v1/files/dir",
 
     // 认证
-    AUTH_REGISTER: "/api/auth/register",
-    AUTH_LOGIN: "/api/auth/login",
+    AUTH_REGISTER: "/v1/auth/register",
+    AUTH_LOGIN: "/v1/auth/login",
 
     // 项目管理
-    PROJECTS_SAVE: "/api/projects/save",
-    PROJECTS_LIST: "/api/projects/list",
-    PROJECTS_LOAD: "/api/projects/load",
-    PROJECTS_DELETE: "/api/projects/delete",
-    PROJECTS_CHECK_NAME: "/api/projects/check-name",
-    PROJECTS_RESTORE_FILES: "/api/projects/restore-files",
-    PROJECTS_RESTORE_TO_WORKSPACE: "/api/projects/restore-to-workspace",
+    PROJECTS_SAVE: "/v1/projects/save",
+    PROJECTS_LIST: "/v1/projects/list",
+    PROJECTS_LOAD: "/v1/projects/load",
+    PROJECTS_DELETE: "/v1/projects",
+    PROJECTS_CHECK_NAME: "/v1/projects/check-name",
 
-    // 用户管理
-    USERS_LIST: "/api/users/list",
-
-    // 代码执行
-    EXECUTE_CODE: "/execute",
-
-    // 导出报告
-    EXPORT_REPORT: "/export/report",
-
-    // 雨途斩疑录
-    YUTU_HTML: "/api/yutu/html",
-    YUTU_ADD: "/api/yutu/add",
-    YUTU_UPDATE: "/api/yutu/update",
-    YUTU_DELETE: "/api/yutu/delete",
-    YUTU_SEARCH: "/api/yutu/search",
-    YUTU_INIT: "/api/yutu/init",
-    YUTU_BACKUP_CREATE: "/api/yutu/backup/create",
-    YUTU_BACKUP_LIST: "/api/yutu/backup/list",
-    YUTU_BACKUP_RESTORE: "/api/yutu/backup/restore",
-    YUTU_BACKUP_DELETE: "/api/yutu/backup/delete",
-
-    // 知识库
-    KB_SETTINGS_GET: "/api/kb/settings",
-    KB_SETTINGS_SAVE: "/api/kb/settings",
-    KB_TEST: "/api/kb/test",
+    // 知识库 (Yutu)
+    KNOWLEDGE_ENTRIES: "/v1/knowledge/entries",
+    KNOWLEDGE_SEARCH: "/v1/knowledge/entries/search",
 
     // 数据库连接
-    DB_TEST: "/api/db/test",
-    DB_GENERATE_SQL: "/api/db/generate-sql",
-    DB_EXECUTE: "/api/db/execute",
+    DB_TEST: "/v1/database/test",
+    DB_GENERATE_SQL: "/v1/database/generate-sql",
+    DB_EXECUTE: "/v1/database/execute",
+
+    // 导出报告
+    EXPORT_REPORT: "/v1/export/report",
 
     // 系统设置
-    MODEL_LIST: "/api/model/models",
-    SETTINGS_HARDWARE: "/api/settings/hardware",
-    SETTINGS_DEFAULTS: "/api/settings/defaults",
+    MODEL_LIST: "/v1/models",
+    SETTINGS_HARDWARE: "/health",
+    SETTINGS_DEFAULTS: "/health",
+
+    // 用户列表
+    USERS_LIST: "/v1/auth/users",
+
+    // 上传到指定目录
+    WORKSPACE_UPLOAD_TO: "/v1/files/upload-to",
+
+    // 代码执行
+    EXECUTE_CODE: "/v1/code/execute",
+
+    // 过程指导
+    CHAT_GUIDANCE: "/v1/chat/guidance",
+
+    // 用户本地配置持久化
+    CONFIG_MODELS_GET: "/v1/config/models",
+    CONFIG_MODELS_SAVE: "/v1/config/models",
+    CONFIG_MODELS_DELETE: "/v1/config/models",
+    CONFIG_DATABASES_GET: "/v1/config/databases",
+    CONFIG_DATABASES_SAVE: "/v1/config/databases",
+    CONFIG_DATABASES_DELETE: "/v1/config/databases",
+    CONFIG_KNOWLEDGE_GET: "/v1/config/knowledge",
+    CONFIG_KNOWLEDGE_SAVE: "/v1/config/knowledge",
+
+    // 知识库设置
+    KB_SETTINGS_GET: "/v1/knowledge/settings",
+    KB_SETTINGS_SAVE: "/v1/knowledge/settings",
+    KB_TEST: "/v1/knowledge/test",
+
+    // 项目文件恢复
+    PROJECTS_RESTORE_FILES: "/v1/projects/restore-files",
+    PROJECTS_RESTORE_TO_WORKSPACE: "/v1/projects/restore-to-workspace",
+
+    // 知识库管理（Yutu 遗留接口）
+    YUTU_HTML: "/v1/knowledge/yutu/html",
+    YUTU_SEARCH: "/v1/knowledge/yutu/search",
+    YUTU_ADD: "/v1/knowledge/yutu/add",
+    YUTU_UPDATE: "/v1/knowledge/yutu/update",
+    YUTU_DELETE: "/v1/knowledge/yutu/delete",
+    YUTU_INIT: "/v1/knowledge/yutu/init",
+    YUTU_ORGANIZE: "/v1/knowledge/yutu/organize",
+    YUTU_ORGANIZE_CONFIRM: "/v1/knowledge/yutu/organize-confirm",
+    YUTU_BACKUP_CREATE: "/v1/knowledge/yutu/backup-create",
+    YUTU_BACKUP_DELETE: "/v1/knowledge/yutu/backup-delete",
+    YUTU_BACKUP_LIST: "/v1/knowledge/yutu/backup-list",
+    YUTU_BACKUP_RESTORE: "/v1/knowledge/yutu/backup-restore",
   },
 };
 
@@ -291,45 +326,13 @@ export const buildApiUrl = (
 
 // 预定义的API URLs
 export const API_URLS = {
-  // 后端服务
+  // 聊天
+  CHAT_COMPLETIONS: buildApiUrl(API_CONFIG.ENDPOINTS.CHAT_COMPLETIONS),
+
+  // 文件管理
   WORKSPACE_FILES: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_FILES),
-  WORKSPACE_TREE: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_TREE),
   WORKSPACE_UPLOAD: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_UPLOAD),
-  WORKSPACE_CLEAR: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_CLEAR),
-  WORKSPACE_DELETE_FILE: buildApiUrl(
-    API_CONFIG.ENDPOINTS.WORKSPACE_DELETE_FILE
-  ),
-  WORKSPACE_UPLOAD_TO: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_UPLOAD_TO),
-  WORKSPACE_DELETE_DIR: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_DELETE_DIR),
-  EXECUTE_CODE: buildApiUrl(API_CONFIG.ENDPOINTS.EXECUTE_CODE),
-  EXPORT_REPORT: buildApiUrl(API_CONFIG.ENDPOINTS.EXPORT_REPORT),
-
-  // 雨途斩疑录
-  YUTU_HTML: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_HTML),
-  YUTU_ADD: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ADD),
-  YUTU_UPDATE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_UPDATE),
-  YUTU_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_DELETE),
-  YUTU_SEARCH: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_SEARCH),
-  YUTU_INIT: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_INIT),
-  YUTU_BACKUP_CREATE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_CREATE),
-  YUTU_BACKUP_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_LIST),
-  YUTU_BACKUP_RESTORE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_RESTORE),
-  YUTU_BACKUP_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_DELETE),
-
-  // 知识库
-  KB_SETTINGS_GET: buildApiUrl(API_CONFIG.ENDPOINTS.KB_SETTINGS_GET),
-  KB_SETTINGS_SAVE: buildApiUrl(API_CONFIG.ENDPOINTS.KB_SETTINGS_SAVE),
-  KB_TEST: buildApiUrl(API_CONFIG.ENDPOINTS.KB_TEST),
-
-  // 数据库连接
-  DB_TEST: buildApiUrl(API_CONFIG.ENDPOINTS.DB_TEST),
-  DB_GENERATE_SQL: buildApiUrl(API_CONFIG.ENDPOINTS.DB_GENERATE_SQL),
-  DB_EXECUTE: buildApiUrl(API_CONFIG.ENDPOINTS.DB_EXECUTE),
-
-  // 系统设置
-  MODEL_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.MODEL_LIST),
-  SETTINGS_HARDWARE: buildApiUrl(API_CONFIG.ENDPOINTS.SETTINGS_HARDWARE),
-  SETTINGS_DEFAULTS: buildApiUrl(API_CONFIG.ENDPOINTS.SETTINGS_DEFAULTS),
+  WORKSPACE_DELETE_FILE: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_DELETE_FILE),
 
   // 认证
   AUTH_REGISTER: buildApiUrl(API_CONFIG.ENDPOINTS.AUTH_REGISTER),
@@ -341,13 +344,69 @@ export const API_URLS = {
   PROJECTS_LOAD: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_LOAD),
   PROJECTS_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_DELETE),
   PROJECTS_CHECK_NAME: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_CHECK_NAME),
+
+  // 知识库
+  KNOWLEDGE_ENTRIES: buildApiUrl(API_CONFIG.ENDPOINTS.KNOWLEDGE_ENTRIES),
+  KNOWLEDGE_SEARCH: buildApiUrl(API_CONFIG.ENDPOINTS.KNOWLEDGE_SEARCH),
+
+  // 数据库
+  DB_TEST: buildApiUrl(API_CONFIG.ENDPOINTS.DB_TEST),
+  DB_GENERATE_SQL: buildApiUrl(API_CONFIG.ENDPOINTS.DB_GENERATE_SQL),
+  DB_EXECUTE: buildApiUrl(API_CONFIG.ENDPOINTS.DB_EXECUTE),
+
+  // 导出
+  EXPORT_REPORT: buildApiUrl(API_CONFIG.ENDPOINTS.EXPORT_REPORT),
+
+  // 系统
+  MODEL_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.MODEL_LIST),
+
+  // 用户列表
+  USERS_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.USERS_LIST),
+
+  // 项目文件恢复
   PROJECTS_RESTORE_FILES: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_RESTORE_FILES),
   PROJECTS_RESTORE_TO_WORKSPACE: buildApiUrl(API_CONFIG.ENDPOINTS.PROJECTS_RESTORE_TO_WORKSPACE),
 
-  // 用户管理
-  USERS_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.USERS_LIST),
+  // 工作区
+  WORKSPACE_TREE: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_TREE),
+  WORKSPACE_CLEAR: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_CLEAR),
+  WORKSPACE_DELETE_DIR: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_DELETE_DIR),
 
-  // AI服务
-  CHAT_COMPLETIONS: buildApiUrl(API_CONFIG.ENDPOINTS.CHAT_COMPLETIONS),
+  // 知识库管理（Yutu 遗留接口）
+  YUTU_HTML: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_HTML),
+  YUTU_SEARCH: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_SEARCH),
+  YUTU_ADD: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ADD),
+  YUTU_UPDATE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_UPDATE),
+  YUTU_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_DELETE),
+  YUTU_INIT: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_INIT),
+  YUTU_ORGANIZE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ORGANIZE),
+  YUTU_ORGANIZE_CONFIRM: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_ORGANIZE_CONFIRM),
+  YUTU_BACKUP_CREATE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_CREATE),
+  YUTU_BACKUP_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_DELETE),
+  YUTU_BACKUP_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_LIST),
+  YUTU_BACKUP_RESTORE: buildApiUrl(API_CONFIG.ENDPOINTS.YUTU_BACKUP_RESTORE),
+
+  // 上传到指定目录
+  WORKSPACE_UPLOAD_TO: buildApiUrl(API_CONFIG.ENDPOINTS.WORKSPACE_UPLOAD_TO),
+
+  // 代码执行
+  EXECUTE_CODE: buildApiUrl(API_CONFIG.ENDPOINTS.EXECUTE_CODE),
+
+  // 过程指导
   CHAT_GUIDANCE: buildApiUrl(API_CONFIG.ENDPOINTS.CHAT_GUIDANCE),
+
+  // 用户本地配置持久化
+  CONFIG_MODELS_GET: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_MODELS_GET),
+  CONFIG_MODELS_SAVE: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_MODELS_SAVE),
+  CONFIG_MODELS_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_MODELS_DELETE),
+  CONFIG_DATABASES_GET: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_DATABASES_GET),
+  CONFIG_DATABASES_SAVE: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_DATABASES_SAVE),
+  CONFIG_DATABASES_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_DATABASES_DELETE),
+  CONFIG_KNOWLEDGE_GET: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_KNOWLEDGE_GET),
+  CONFIG_KNOWLEDGE_SAVE: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_KNOWLEDGE_SAVE),
+
+  // 知识库设置
+  KB_SETTINGS_GET: buildApiUrl(API_CONFIG.ENDPOINTS.KB_SETTINGS_GET),
+  KB_SETTINGS_SAVE: buildApiUrl(API_CONFIG.ENDPOINTS.KB_SETTINGS_SAVE),
+  KB_TEST: buildApiUrl(API_CONFIG.ENDPOINTS.KB_TEST),
 };

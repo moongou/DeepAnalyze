@@ -4,11 +4,10 @@ Handles model listing endpoints (OpenAI compatible)
 """
 
 import time
-from typing import List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
-from config import DEFAULT_MODEL
+from model_gateway import model_gateway
 from models import ModelObject, ModelsListResponse
 
 
@@ -22,20 +21,26 @@ async def list_models():
     List available models (OpenAI compatible)
     Returns a list of models that can be used with the API
     """
-    # Define available models
-    available_models = [
-        {
-            "id": DEFAULT_MODEL,
-            "created": int(time.time()),
-            "owned_by": "deepanalyze"
-        },
-        # Add more models here if available in the future
-        # {
-        #     "id": "DeepAnalyze-8B-FineTuned",
-        #     "created": int(time.time()),
-        #     "owned_by": "deepanalyze"
-        # },
-    ]
+    available_models = []
+    for item in model_gateway.list_models(include_disabled=False):
+        available_models.append(
+            {
+                "id": item.get("id"),
+                "created": int(time.time()),
+                "owned_by": item.get("provider_id", "deepanalyze"),
+            }
+        )
+
+    if not available_models:
+        provider_defaults = model_gateway.list_providers(include_disabled=False)
+        owner = provider_defaults[0].get("id", "deepanalyze") if provider_defaults else "deepanalyze"
+        available_models.append(
+            {
+                "id": "default",
+                "created": int(time.time()),
+                "owned_by": owner,
+            }
+        )
 
     model_objects = [ModelObject(**model) for model in available_models]
 
@@ -51,18 +56,12 @@ async def retrieve_model(model_id: str):
     Retrieve a specific model (OpenAI compatible)
     Returns information about a specific model
     """
-    # For now, we only support the default model
-    if model_id == DEFAULT_MODEL:
-        return ModelObject(
-            id=model_id,
-            created=int(time.time()),
-            owned_by="deepanalyze"
-        )
+    for item in model_gateway.list_models(include_disabled=False):
+        if item.get("id") == model_id:
+            return ModelObject(
+                id=model_id,
+                created=int(time.time()),
+                owned_by=item.get("provider_id", "deepanalyze"),
+            )
 
-    # In a real implementation, you might want to validate the model exists
-    # For now, return any requested model ID as if it exists
-    return ModelObject(
-        id=model_id,
-        created=int(time.time()),
-        owned_by="deepanalyze"
-    )
+    raise HTTPException(status_code=404, detail=f"Model not found: {model_id}")
