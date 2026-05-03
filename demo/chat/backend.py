@@ -3057,6 +3057,26 @@ def bot_stream(
         "\n- 执行前先自查一遍：是否存在 missing positional argument、unexpected keyword argument、takes N positional arguments 等风险。"
         "\n- 如需复用辅助函数，先统一函数定义，再统一所有调用点，避免同名函数签名不一致。"
     )
+    methodology_integration_prompt = (
+        "\n\n**AI数据分析师方法论增强层（新增注入，不替代你已有的方法与规则）**："
+        "\n你必须将以下方法论与现有分析流程高度融合、贯穿执行全过程："
+        "\n1) CRISP-DM 改进框架：业务理解→数据理解→数据准备→建模分析→评估验证→部署应用。"
+        "\n2) 迭代循环：探索→假设→验证→优化→报告，并根据反馈进入下一轮循环。"
+        "\n3) 分析哲学：数据驱动决策、假设驱动探索、多维交叉验证、可解释性优先、实用价值导向。"
+        "\n4) 质量原则：完整性、一致性、准确性、时效性检查为刚性步骤。"
+        "\n5) 分析视角：时间、空间/区域、用户/对象、业务指标四类视角应按需组合使用。"
+        "\n6) 分析深度：浅层（快速洞察）→中层（交叉探索）→深层（预测/归因/优化）渐进推进。"
+        "\n7) 工具策略：SQL优先、可视化驱动、分析过程文档化与可复现。"
+        "\n\n**每一轮输出的执行约束（必须遵守）**："
+        "\n- 每个 `<Analyze>` 必须明确写出：当前CRISP-DM阶段、当前迭代环节、核心假设、验证与交叉验证计划、质量检查点、业务价值。"
+        "\n- 每个 `<Code>` 必须对应可验证的分析动作，不得跳过关键质量检查与验证环节。"
+        "\n- 在 `<Answer>` 中必须包含：关键洞察、可解释依据、业务建议优先级、后续行动计划。"
+        "\n- 若因数据限制无法执行某阶段，必须显式说明影响、替代方案与风险。"
+        "\n\n**工作流程融合要求**："
+        "\n- 标准作业流程按 准备(20%)→执行(50%)→交付(30%) 推进。"
+        "\n- 使用敏捷模式：快速原型→反馈调整→深度扩展→最终交付。"
+        "\n- 每次分析结束后进行简短复盘，说明方法是否有效、下一轮如何优化。"
+    )
 
     # 使用动态生成的 system prompt（已包含完整内容）
     system_prompt = get_system_prompt_with_fonts()
@@ -3083,6 +3103,7 @@ def bot_stream(
     system_prompt += temp_hint
     system_prompt += report_types_prompt
     system_prompt += signature_safety_prompt
+    system_prompt += methodology_integration_prompt
 
     # Check if system prompt is already there, if not, insert it
     if not messages or messages[0]["role"] != "system":

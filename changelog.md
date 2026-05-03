@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.1.2 - 2026-05-03
+
+### Added (v1.1.2)
+
+- Added methodology enforcement layer for demo chat agent to integrate CRISP-DM, iterative validation loops, quality controls, and business-value-oriented delivery.
+- Added API-side methodology enforcement prompt to guarantee full-flow guardrails even when custom system messages are supplied.
+
+### Changed (v1.1.2)
+
+- Changed system-prompt assembly so methodology constraints are appended as an enhancement layer instead of replacing existing agent rules.
+- Changed message preparation in API utilities to auto-inject methodology guardrails when absent.
+
+### Documentation (v1.1.2)
+
+- Updated changelog with methodology-first execution hardening for analyst behavior consistency.
+
 ## v1.1.1 - 2026-05-03
 
 ### Added (v1.1.1)

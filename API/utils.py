@@ -22,7 +22,12 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any, Tuple
 from functools import partial
 
-from config import WORKSPACE_BASE_DIR, HTTP_SERVER_PORT, ANALYST_SYSTEM_PROMPT
+from config import (
+    WORKSPACE_BASE_DIR,
+    HTTP_SERVER_PORT,
+    ANALYST_SYSTEM_PROMPT,
+    ANALYST_METHODOLOGY_ENFORCEMENT_PROMPT,
+)
 from shared_dependency_recovery import (
     build_dependency_install_block,
     extract_missing_python_packages,
@@ -616,7 +621,25 @@ def prepare_vllm_messages(
     # Inject analyst methodology as system prompt if none is present
     has_system = any(m.get("role") == "system" for m in vllm_messages)
     if not has_system:
-        vllm_messages.insert(0, {"role": "system", "content": ANALYST_SYSTEM_PROMPT})
+        combined_prompt = (
+            f"{ANALYST_SYSTEM_PROMPT}\n\n{ANALYST_METHODOLOGY_ENFORCEMENT_PROMPT}"
+        )
+        vllm_messages.insert(0, {"role": "system", "content": combined_prompt})
+    else:
+        has_methodology_guard = any(
+            m.get("role") == "system"
+            and "方法论执行强化规则" in str(m.get("content", ""))
+            for m in vllm_messages
+        )
+        if not has_methodology_guard:
+            insert_at = 1 if vllm_messages and vllm_messages[0].get("role") == "system" else 0
+            vllm_messages.insert(
+                insert_at,
+                {
+                    "role": "system",
+                    "content": ANALYST_METHODOLOGY_ENFORCEMENT_PROMPT,
+                },
+            )
 
     # Locate last user message
     last_user_idx: Optional[int] = None
