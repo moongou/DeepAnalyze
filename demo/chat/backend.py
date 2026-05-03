@@ -527,6 +527,7 @@ DEFAULT_MODEL_PROVIDER_CONFIG = {
 }
 
 # Workspace directory
+REPO_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 WORKSPACE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace")
 PROJECTS_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects")
 CONFIG_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
@@ -668,6 +669,38 @@ def normalize_base_url(value: str) -> str:
     return base_url
 
 
+def _is_local_model_endpoint(base_url: str) -> bool:
+    lowered = (base_url or "").strip().lower()
+    return "localhost:" in lowered or "127.0.0.1:" in lowered
+
+
+def _resolve_local_mlx_model_name(model_name: str, base_url: str) -> str:
+    text = (model_name or "").strip()
+    if not text:
+        return text
+
+    if DEFAULT_COMPUTE_BACKEND not in {"mlx", "apple", "apple_silicon"}:
+        return text
+
+    if not _is_local_model_endpoint(base_url):
+        return text
+
+    if os.path.isabs(text):
+        return text
+
+    candidate = os.path.abspath(os.path.join(REPO_ROOT_DIR, text))
+    if os.path.isdir(candidate):
+        return candidate
+
+    configured_mlx_dir = (os.getenv("DEEPANALYZE_MLX_MODEL_DIR", "") or "").strip()
+    if configured_mlx_dir and os.path.isdir(configured_mlx_dir):
+        configured_name = os.path.basename(configured_mlx_dir.rstrip(os.sep))
+        if configured_name == text:
+            return configured_mlx_dir
+
+    return text
+
+
 def normalize_optional_path(value: str, default: str) -> str:
     path = (value or default).strip()
     if not path.startswith("/"):
@@ -692,8 +725,10 @@ def redact_provider(provider: Dict[str, Any]) -> Dict[str, Any]:
 def normalize_model_provider_config(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     incoming = payload if isinstance(payload, dict) else {}
     merged = deep_merge_dict(DEFAULT_MODEL_PROVIDER_CONFIG, incoming)
+    merged["providerType"] = (merged.get("providerType") or DEFAULT_PROVIDER_TYPE).strip() or DEFAULT_PROVIDER_TYPE
     merged["baseUrl"] = normalize_base_url(merged.get("baseUrl") or API_BASE)
-    merged["model"] = (merged.get("model") or MODEL_PATH).strip() or MODEL_PATH
+    raw_model = (merged.get("model") or MODEL_PATH).strip() or MODEL_PATH
+    merged["model"] = _resolve_local_mlx_model_name(raw_model, merged["baseUrl"])
     merged["apiKey"] = (merged.get("apiKey") or "").strip()
     raw_headers = merged.get("headers") or {}
     normalized_headers: Dict[str, str] = {}

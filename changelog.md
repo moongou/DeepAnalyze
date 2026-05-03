@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.1.3 - 2026-05-03
+
+### Added (v1.1.3)
+
+- Added local model server autostart for demo chat when default endpoint points to localhost, including readiness checks and startup timeout controls.
+- Added model lifecycle cleanup for demo chat stop flow, including model PID tracking and model-port release.
+
+### Changed (v1.1.3)
+
+- Changed MLX startup profile to use absolute local model directory as request model name to avoid remote repository fallback on OpenAI-compatible calls.
+- Changed backend model-provider normalization to auto-resolve local MLX model aliases (e.g. `DeepAnalyze-8B-MLX-4bit`) to repository-local absolute paths.
+- Changed demo chat stop script to run from its own directory for reliable PID/log path resolution regardless of caller working directory.
+
+### Fixed (v1.1.3)
+
+- Fixed startup-time analysis failure path that previously returned 502/404 due to missing model process or mismatched MLX model identifiers.
+
 ## v1.1.2 - 2026-05-03
 
 ### Added (v1.1.2)

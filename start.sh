@@ -23,13 +23,20 @@ detect_default_backend() {
 apply_backend_profile() {
 	local backend="$1"
 	if [[ "$backend" == "mlx" ]]; then
+		local mlx_model_dir
+		mlx_model_dir="${DEEPANALYZE_MLX_MODEL_DIR:-$SCRIPT_DIR/DeepAnalyze-8B-MLX-4bit}"
+		if [[ ! -d "$mlx_model_dir" && -d "$SCRIPT_DIR/DeepAnalyze-8B-MLX-FP16" ]]; then
+			mlx_model_dir="$SCRIPT_DIR/DeepAnalyze-8B-MLX-FP16"
+		fi
+		export DEEPANALYZE_MLX_MODEL_DIR="$mlx_model_dir"
 		export DEEPANALYZE_COMPUTE_BACKEND="mlx"
 		export DEEPANALYZE_DEFAULT_PROVIDER_TYPE="${DEEPANALYZE_MLX_PROVIDER_TYPE:-openai_compatible}"
 		export DEEPANALYZE_DEFAULT_PROVIDER_LABEL="${DEEPANALYZE_MLX_PROVIDER_LABEL:-DeepAnalyze MLX}"
 		export DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION="${DEEPANALYZE_MLX_PROVIDER_DESCRIPTION:-项目默认本地 MLX 服务}"
 		export DEEPANALYZE_DEFAULT_MODEL_BASE_URL="${DEEPANALYZE_MLX_BASE_URL:-http://localhost:8000/v1}"
-		export DEEPANALYZE_DEFAULT_MODEL_NAME="${DEEPANALYZE_MLX_MODEL:-DeepAnalyze-8B-MLX-4bit}"
+		export DEEPANALYZE_DEFAULT_MODEL_NAME="${DEEPANALYZE_MLX_MODEL:-$mlx_model_dir}"
 	else
+		export DEEPANALYZE_GPU_MODEL_DIR="${DEEPANALYZE_GPU_MODEL_DIR:-$SCRIPT_DIR/DeepAnalyze-8B}"
 		export DEEPANALYZE_COMPUTE_BACKEND="gpu"
 		export DEEPANALYZE_DEFAULT_PROVIDER_TYPE="${DEEPANALYZE_GPU_PROVIDER_TYPE:-deepanalyze}"
 		export DEEPANALYZE_DEFAULT_PROVIDER_LABEL="${DEEPANALYZE_GPU_PROVIDER_LABEL:-DeepAnalyze GPU}"
