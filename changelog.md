@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.5 - 2026-05-03
+
+### Added (v1.1.5)
+
+- Added a new language selector button next to the report-type control in the main frontend header, with options for `中文（简体）` and `English`.
+- Added end-to-end `analysis_language` request propagation from frontend to backend for both chat analysis (`/chat/completions`) and report export (`/export/report`).
+- Added backend language normalization and high-priority language-control prompt injection to enforce user-selected language across analysis reasoning, interactive task guidance, and report narrative output.
+
+### Changed (v1.1.5)
+
+- Changed interactive TaskTree selection dialog copy to support localized UI text based on selected analysis language.
+- Changed interactive-mode task confirmation message payload to match selected language before continuing analysis.
+- Changed export report defaults to be language-aware (`Report`/`报告`) and to include `analysis_language` in export response metadata.
+
+### Fixed (v1.1.5)
+
+- Fixed language inconsistency risk where report type and interaction flow could not explicitly constrain analysis/report language when users expected English output.
+
 ## v1.1.4 - 2026-05-03
 
 ### Added (v1.1.4)

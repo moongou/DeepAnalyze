@@ -60,6 +60,7 @@ import {
   BookOpen,
   Bot,
   Settings,
+  Languages,
   Cpu,
   Zap,
   Monitor,
@@ -158,6 +159,38 @@ const createClientId = () =>
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
 const MODEL_PROVIDER_STORE_KEY = "modelProviderStore";
+const ANALYSIS_LANGUAGE_STORE_KEY = "analysisLanguage";
+
+type AnalysisLanguage = "zh-CN" | "en";
+
+const normalizeAnalysisLanguage = (value?: string | null): AnalysisLanguage => {
+  const normalized = String(value || "").trim().toLowerCase().replace("_", "-");
+  if (normalized === "en" || normalized === "en-us" || normalized === "en-gb" || normalized === "english") {
+    return "en";
+  }
+  return "zh-CN";
+};
+
+const ANALYSIS_LANGUAGE_OPTIONS: Array<{
+  value: AnalysisLanguage;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "zh-CN",
+    label: "中文（简体）",
+    description: "用于分析思考、交互提示与报告输出",
+  },
+  {
+    value: "en",
+    label: "English",
+    description: "Use English for analysis reasoning, interactive prompts, and report output",
+  },
+];
+
+const getAnalysisLanguageLabel = (value: AnalysisLanguage) => {
+  return value === "en" ? "English" : "中文（简体）";
+};
 
 const getPresetByProviderId = (id?: string) => {
   if (!id) return undefined;
@@ -685,6 +718,10 @@ export function ThreePanelInterface() {
   const [reportTypes, setReportTypes] = useState<string[]>(["pdf"]);
   const [showReportTypePicker, setShowReportTypePicker] = useState(false);
   const [pendingReportTypes, setPendingReportTypes] = useState<string[]>(["pdf"]);
+  // 分析语言选择状态
+  const [analysisLanguage, setAnalysisLanguage] = useState<AnalysisLanguage>("zh-CN");
+  const [showLanguagePicker, setShowLanguagePicker] = useState(false);
+  const [pendingAnalysisLanguage, setPendingAnalysisLanguage] = useState<AnalysisLanguage>("zh-CN");
   // 点击外部关闭报告类型选择器
   useEffect(() => {
     if (!showReportTypePicker) return;
@@ -697,6 +734,19 @@ export function ThreePanelInterface() {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showReportTypePicker]);
+
+  // 点击外部关闭语言选择器
+  useEffect(() => {
+    if (!showLanguagePicker) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-language-picker]')) {
+        setShowLanguagePicker(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showLanguagePicker]);
   // 雨途斩棘录知识库
   const {
     showYutuPanel, setShowYutuPanel,
@@ -949,6 +999,12 @@ export function ThreePanelInterface() {
       // 加载分析模式和模型版本设置
       const savedAnalysisMode = localStorage.getItem("analysisMode");
       if (savedAnalysisMode) setAnalysisMode(savedAnalysisMode);
+      const savedAnalysisLanguage = localStorage.getItem(ANALYSIS_LANGUAGE_STORE_KEY);
+      if (savedAnalysisLanguage) {
+        const normalizedLanguage = normalizeAnalysisLanguage(savedAnalysisLanguage);
+        setAnalysisLanguage(normalizedLanguage);
+        setPendingAnalysisLanguage(normalizedLanguage);
+      }
       const savedModelVersion = localStorage.getItem("modelVersion");
       if (savedModelVersion) setModelVersion(savedModelVersion);
       // 加载七大原则设置
@@ -1586,6 +1642,7 @@ ${analysisContent}
           messages: payloadMessages,
           title,
           session_id: sessionId,
+          analysis_language: analysisLanguage,
           report_types: reportTypes,
         }),
       });
@@ -2128,6 +2185,11 @@ ${analysisContent}
     if (typeof window === "undefined") return;
     localStorage.setItem("reportTypes", JSON.stringify(reportTypes));
   }, [reportTypes]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(ANALYSIS_LANGUAGE_STORE_KEY, analysisLanguage);
+  }, [analysisLanguage]);
 
   useEffect(() => {
     if (analysisMode !== "interactive") {
@@ -3879,6 +3941,28 @@ ${analysisContent}
     toast({ description: `报告类型已更新为 ${pendingReportTypes.map((item) => item.toUpperCase()).join(", ")}` });
   };
 
+  const openLanguagePicker = () => {
+    setPendingAnalysisLanguage(analysisLanguage);
+    setShowLanguagePicker(true);
+  };
+
+  const cancelLanguagePicker = () => {
+    setPendingAnalysisLanguage(analysisLanguage);
+    setShowLanguagePicker(false);
+  };
+
+  const confirmLanguagePicker = () => {
+    const nextLanguage = normalizeAnalysisLanguage(pendingAnalysisLanguage);
+    setAnalysisLanguage(nextLanguage);
+    setPendingAnalysisLanguage(nextLanguage);
+    setShowLanguagePicker(false);
+    if (nextLanguage === "en") {
+      toast({ description: "Analysis language switched to English." });
+      return;
+    }
+    toast({ description: "分析语言已切换为中文（简体）" });
+  };
+
   const handleSendGuidance = async () => {
     if (!sideGuidanceText.trim()) return;
     setIsSubmittingGuidance(true);
@@ -3999,6 +4083,7 @@ ${analysisContent}
           session_id: sessionId,
           strategy: analysisStrategy,
           analysis_mode: analysisMode,
+          analysis_language: analysisLanguage,
           report_types: effectiveReportTypes,
           model_provider: modelProviderConfig,
           ...(temperature !== null && { temperature }),
@@ -4209,12 +4294,14 @@ ${analysisContent}
     const items: string[] = [];
     const collect = (nodes: TaskTreeNode[]) => nodes.forEach(n => { if (selectedTasks.has(n.id)) items.push(`[${n.id}] ${n.name}`); if (n.children) collect(n.children); });
     collect(taskTreeData);
-    const msg = `用户选择了以下分析任务：${items.join("，")}`;
+    const msg = analysisLanguage === "en"
+      ? `The user selected the following analysis tasks: ${items.join(", ")}`
+      : `用户选择了以下分析任务：${items.join("，")}`;
     setShowTaskTreeDialog(false);
     setSelectedTasks(new Set());
     setTaskTreeData(null);
     handleSendMessage(msg);
-  }, [taskTreeData, selectedTasks]);
+  }, [taskTreeData, selectedTasks, analysisLanguage]);
 
   const handleFileUpload = async (
     event: React.ChangeEvent<HTMLInputElement>
@@ -4554,6 +4641,59 @@ ${analysisContent}
                               取消
                             </Button>
                             <Button size="sm" className="h-7 text-[11px]" onClick={confirmReportTypePicker}>
+                              确定
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 分析语言选择 */}
+                    <div className="relative" data-language-picker>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-[11px] px-2 gap-1 border-sky-200 text-sky-600 hover:bg-sky-50 dark:border-sky-900 dark:text-sky-400"
+                        onClick={() => {
+                          if (showLanguagePicker) {
+                            cancelLanguagePicker();
+                          } else {
+                            openLanguagePicker();
+                          }
+                        }}
+                      >
+                        <Languages className="h-3 w-3" />
+                        语言
+                      </Button>
+                      {showLanguagePicker && (
+                        <div className="absolute top-8 left-0 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 min-w-[260px] space-y-3">
+                          <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择分析与报告语言</div>
+                          {ANALYSIS_LANGUAGE_OPTIONS.map((option) => (
+                            <label
+                              key={option.value}
+                              className="flex items-start gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer"
+                            >
+                              <input
+                                type="radio"
+                                name="analysis-language"
+                                checked={pendingAnalysisLanguage === option.value}
+                                onChange={() => setPendingAnalysisLanguage(option.value)}
+                                className="mt-0.5 border-gray-300 text-blue-600 focus:ring-blue-500"
+                              />
+                              <span className="flex-1">
+                                <span className="block text-xs text-gray-700 dark:text-gray-300 font-medium">{option.label}</span>
+                                <span className="block text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{option.description}</span>
+                              </span>
+                            </label>
+                          ))}
+                          <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
+                            当前: {getAnalysisLanguageLabel(pendingAnalysisLanguage)}
+                          </div>
+                          <div className="flex justify-end gap-2">
+                            <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelLanguagePicker}>
+                              取消
+                            </Button>
+                            <Button size="sm" className="h-7 text-[11px]" onClick={confirmLanguagePicker}>
                               确定
                             </Button>
                           </div>
@@ -5449,6 +5589,7 @@ ${analysisContent}
         open={showTaskTreeDialog}
         onOpenChange={setShowTaskTreeDialog}
         taskTreeData={taskTreeData}
+        language={analysisLanguage}
         selectedTasks={selectedTasks}
         toggleTask={toggleTask}
         selectAllTasks={selectAllTasks}

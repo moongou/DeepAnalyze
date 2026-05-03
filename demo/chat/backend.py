@@ -1172,6 +1172,33 @@ def run_kb_provider_test(provider: str, settings: Dict[str, Any]) -> Dict[str, A
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
+
+def normalize_analysis_language(raw_language: Optional[str]) -> str:
+    normalized = str(raw_language or "").strip().lower().replace("_", "-")
+    if normalized in {"en", "en-us", "en-gb", "english"}:
+        return "en"
+    return "zh-CN"
+
+
+def build_analysis_language_prompt(analysis_language: str) -> str:
+    if analysis_language == "en":
+        return (
+            "\n\n**Output language override (highest priority): English**"
+            "\n- This preference overrides default language rules in the base prompt."
+            "\n- All user-facing narrative text must be in English, including `<Analyze>`, `<Understand>`, `<Answer>`, and report body text."
+            "\n- In interactive mode, task names/descriptions in `<TaskTree>` and all follow-up user guidance text must also be in English."
+            "\n- Keep structural tags unchanged (`<Analyze>`, `<Code>`, `<TaskTree>`, etc.); only change natural-language content."
+            "\n- Do not output Chinese characters in user-facing text. If any Chinese appears, rewrite it in English before continuing."
+        )
+
+    return (
+        "\n\n**输出语言覆盖规则（最高优先级）：中文（简体）**"
+        "\n- 本规则覆盖基础提示词中的默认语言描述。"
+        "\n- 所有面向用户的自然语言内容必须使用简体中文，包括 `<Analyze>`、`<Understand>`、`<Answer>` 和最终报告正文。"
+        "\n- 在交互模式下，`<TaskTree>` 中任务名称/描述与后续引导文案也必须使用简体中文。"
+        "\n- 结构化标签保持不变（如 `<Analyze>`、`<Code>`、`<TaskTree>` 等），仅改变自然语言内容。"
+    )
+
 HTTP_SERVER_PORT = 8100
 HTTP_SERVER_BASE = (
     f"http://localhost:{HTTP_SERVER_PORT}"  # you can replace localhost to your local ip
@@ -3073,7 +3100,10 @@ def bot_stream(
     analysis_mode="full_agent",
     report_types=None,
     model_provider=None,
+    analysis_language="zh-CN",
 ):
+    analysis_language = normalize_analysis_language(analysis_language)
+
     # Strategy-specific prompts and default temperature
     strategy_temperatures = {
         "聚焦诉求": 0.2,
@@ -3142,6 +3172,48 @@ def bot_stream(
         "full_agent": "\n\n**当前分析模式：全程代理分析**\n请自主执行全部分析任务，不需要等待用户中间确认。按照任务依赖关系有序执行，确保覆盖所有必要的分析维度。\n\n**高效完成原则（极重要）**：\n- 分析任务应在完成所有必要维度后及时终结，不要无限制地扩展分析。\n- 完成数据探测、核心分析、风险识别后，立即进入报告生成阶段。\n- 生成报告时，必须将前面所有分析步骤中产生的具体数据、结论、图表路径全部整合到报告中，不得遗漏或使用占位符。\n- 报告中每个章节都必须包含实质性的分析内容（具体数值、比例、排名、趋势描述等），而非仅写章节标题。"
     }
     selected_mode_prompt = mode_prompts.get(analysis_mode, mode_prompts["full_agent"])
+
+    if analysis_language == "en":
+        strategy_prompts_en = {
+            "聚焦诉求": "\n**Analysis strategy: Focused scope**. Follow the user's explicit request strictly, answer only directly asked questions, and avoid unnecessary expansion. Keep the response concise and high-signal.",
+            "适度扩展": "\n**Analysis strategy: Moderate extension**. Satisfy the core request first, then provide limited related analysis and lightweight risk hints where relevant, without over-expanding.",
+            "广泛延展": "\n**Analysis strategy: Broad exploration**. Perform deeper exploratory analysis, uncover latent relations, and provide multi-dimensional insights and forward-looking recommendations.",
+        }
+        selected_strategy_prompt = strategy_prompts_en.get(strategy, strategy_prompts_en["聚焦诉求"])
+
+        if effective_temperature <= 0.15:
+            temp_hint = "\n\n**Temperature hint (very low {:.2f})**: maximize efficiency, stay strictly on the user's explicit objective, and avoid exploratory detours.".format(effective_temperature)
+        elif effective_temperature <= 0.3:
+            temp_hint = "\n\n**Temperature hint (low {:.2f})**: prioritize efficient execution and focus on directly relevant dimensions only.".format(effective_temperature)
+        elif effective_temperature <= 0.5:
+            temp_hint = "\n\n**Temperature hint (medium {:.2f})**: after covering core requirements, you may extend to one or two closely related angles.".format(effective_temperature)
+        else:
+            temp_hint = "\n\n**Temperature hint (high {:.2f})**: broader exploratory analysis is allowed when it improves insight quality.".format(effective_temperature)
+
+        report_types_prompt = "\n\n**Required final report formats (critical)**: {}. After analysis, generate all required report files and confirm completion in `<Answer>`.".format(", ".join([t.upper() for t in report_types]))
+
+        mode_prompts_en = {
+            "interactive": (
+                "\n\n**Current mode: Interactive analysis (strictly required)**"
+                "\nYou must follow this workflow and do not skip steps:"
+                "\n1) Data exploration and data dictionary."
+                "\n2) Planning and user confirmation. You MUST output the plan using `<TaskTree>`."
+                "\n- Inside `<TaskTree>`, output only one valid JSON object."
+                "\n- Do not repeat the task tree JSON outside `<TaskTree>`."
+                "\n- After outputting `<TaskTree>`, stop immediately."
+                "\n- Before user selection arrives, do not execute analysis code."
+                "\n3) Execute only tasks selected by the user."
+                "\n4) Deliver final report files in the required formats."
+            ),
+            "full_agent": (
+                "\n\n**Current mode: Full-agent analysis**"
+                "\nRun end-to-end analysis autonomously without intermediate user confirmation."
+                "\nFinish after necessary dimensions are covered, then move to report generation."
+                "\nReports must include concrete findings from earlier steps (numbers, rankings, trend evidence, chart references), not placeholders."
+            ),
+        }
+        selected_mode_prompt = mode_prompts_en.get(analysis_mode, mode_prompts_en["full_agent"])
+
     requested_report_types = [
         item.strip().lower()
         for item in (report_types or ["pdf"])
@@ -3149,12 +3221,21 @@ def bot_stream(
     ]
     if not requested_report_types:
         requested_report_types = ["pdf"]
-    report_prompt = (
-        "\n\n**报告输出要求（必须遵守）**："
-        f"\n- 用户选定的最终报告类型为：{', '.join(requested_report_types).upper()}。"
-        "\n- 如果进入报告生成阶段，必须输出以上全部选定格式，不得只生成其中一部分。"
-        "\n- 生成报告前请记住该要求，并在完成分析后产出对应成果文件。"
-    )
+    if analysis_language == "en":
+        report_prompt = (
+            "\n\n**Report output requirements (mandatory)**:"
+            f"\n- Selected formats: {', '.join(requested_report_types).upper()}."
+            "\n- In report generation stage, output all selected formats (not a subset)."
+            "\n- Keep this requirement throughout the run and produce all required artifacts."
+        )
+    else:
+        report_prompt = (
+            "\n\n**报告输出要求（必须遵守）**："
+            f"\n- 用户选定的最终报告类型为：{', '.join(requested_report_types).upper()}。"
+            "\n- 如果进入报告生成阶段，必须输出以上全部选定格式，不得只生成其中一部分。"
+            "\n- 生成报告前请记住该要求，并在完成分析后产出对应成果文件。"
+        )
+    language_prompt = build_analysis_language_prompt(analysis_language)
     signature_safety_prompt = (
         "\n\n**函数与方法调用安全规则（必须遵守）**："
         "\n- 定义自定义函数后，调用时必须逐一核对参数数量、参数名称、默认值和返回值。"
@@ -3209,10 +3290,23 @@ def bot_stream(
     system_prompt += report_types_prompt
     system_prompt += signature_safety_prompt
     system_prompt += methodology_integration_prompt
+    system_prompt += report_prompt
+    system_prompt += language_prompt
+
+    language_enforcer_prompt = (
+        "CRITICAL OUTPUT RULE: Respond in English only for all user-facing narrative text. "
+        "Do not output Chinese characters in Analyze/Understand/Answer/TaskTree/report text. "
+        "Keep structural tags unchanged."
+        if analysis_language == "en"
+        else "关键输出规则：所有面向用户的自然语言文本必须使用简体中文（包括 Analyze/Understand/Answer/TaskTree/报告正文）。结构化标签保持不变。"
+    )
 
     # Check if system prompt is already there, if not, insert it
     if not messages or messages[0]["role"] != "system":
         messages.insert(0, {"role": "system", "content": system_prompt})
+
+    if len(messages) < 2 or messages[1].get("role") != "system" or messages[1].get("content") != language_enforcer_prompt:
+        messages.insert(1, {"role": "system", "content": language_enforcer_prompt})
 
     original_cwd = os.getcwd()
     WORKSPACE_DIR = get_session_workspace(session_id, username)
@@ -3497,6 +3591,7 @@ async def chat(body: dict = Body(...)):
     strategy = body.get("strategy", "聚焦诉求")
     temperature = body.get("temperature", None)  # Optional: user can override temperature
     analysis_mode = body.get("analysis_mode", "full_agent")
+    analysis_language = normalize_analysis_language(body.get("analysis_language", "zh-CN"))
     report_types = body.get("report_types", ["pdf"])
     model_provider = body.get("model_provider")
     model_name = MODEL_PATH
@@ -3517,6 +3612,7 @@ async def chat(body: dict = Body(...)):
             analysis_mode,
             report_types,
             model_provider,
+            analysis_language,
         ):
             # print(delta_content)
             chunk = {
@@ -4363,6 +4459,7 @@ async def export_report(body: dict = Body(...)):
         title = (body.get("title") or "").strip()
         session_id = body.get("session_id", "default")
         username = body.get("username", "default")
+        analysis_language = normalize_analysis_language(body.get("analysis_language", "zh-CN"))
         workspace_dir = get_session_workspace(session_id, username)
 
         if not isinstance(messages, list):
@@ -4370,11 +4467,15 @@ async def export_report(body: dict = Body(...)):
 
         md_text = _extract_sections_from_messages(messages)
         if not md_text:
-            md_text = "(No <Analyze>/<Understand>/<Code>/<Execute>/<Answer> sections found.)"
+            if analysis_language == "en":
+                md_text = "(No <Analyze>/<Understand>/<Code>/<Execute>/<Answer> sections found.)"
+            else:
+                md_text = "（未找到可导出的 <Analyze>/<Understand>/<Code>/<Execute>/<Answer> 内容。）"
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_title = re.sub(r"[^\w\-_.]+", "_", title) if title else "Report"
-        base_name = f"{safe_title}_{ts}" if title else f"Report_{ts}"
+        default_title = "Report" if analysis_language == "en" else "报告"
+        safe_title = re.sub(r"[^\w\-_.]+", "_", title) if title else default_title
+        base_name = f"{safe_title}_{ts}"
 
         export_dir = os.path.join(workspace_dir, "generated")
         os.makedirs(export_dir, exist_ok=True)
@@ -4392,6 +4493,7 @@ async def export_report(body: dict = Body(...)):
 
         result = {
             "message": "exported",
+            "analysis_language": analysis_language,
             "md": md_path.name,
             "pdf": pdf_path.name if pdf_path else None,
             "docx": docx_path.name if docx_path else None,

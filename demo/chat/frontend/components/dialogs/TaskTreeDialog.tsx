@@ -122,6 +122,7 @@ interface TaskTreeDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   taskTreeData: TaskTreeNode[] | null;
+  language?: "zh-CN" | "en";
   selectedTasks: Set<string>;
   toggleTask: (id: string, node: TaskTreeNode) => void;
   selectAllTasks: () => void;
@@ -130,31 +131,34 @@ interface TaskTreeDialogProps {
 }
 
 export function TaskTreeDialog({
-  open, onOpenChange, taskTreeData, selectedTasks, toggleTask,
+  open, onOpenChange, taskTreeData, language = "zh-CN", selectedTasks, toggleTask,
   selectAllTasks, deselectAllTasks, onConfirm,
 }: TaskTreeDialogProps) {
+  const isEnglish = language === "en";
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[600px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <ListTree className="h-5 w-5 text-amber-600" />
-            选择分析任务
+            {isEnglish ? "Select Analysis Tasks" : "选择分析任务"}
           </DialogTitle>
           <DialogDescription>
-            请选择您希望智能体执行的分析任务，确认后智能体将仅分析选定的任务
+            {isEnglish
+              ? "Choose the tasks you want the agent to execute. It will only run the selected tasks after confirmation."
+              : "请选择您希望智能体执行的分析任务，确认后智能体将仅分析选定的任务"}
           </DialogDescription>
         </DialogHeader>
 
         <div className="flex items-center gap-2 py-2 border-b border-gray-100 dark:border-gray-800">
           <Button variant="outline" size="sm" onClick={selectAllTasks} className="text-xs h-7">
-            全选
+            {isEnglish ? "Select all" : "全选"}
           </Button>
           <Button variant="outline" size="sm" onClick={deselectAllTasks} className="text-xs h-7">
-            取消全选
+            {isEnglish ? "Clear all" : "取消全选"}
           </Button>
           <span className="ml-auto text-xs text-gray-500 dark:text-gray-400">
-            已选 {selectedTasks.size} 项
+            {isEnglish ? `Selected ${selectedTasks.size}` : `已选 ${selectedTasks.size} 项`}
           </span>
         </div>
 
@@ -172,14 +176,14 @@ export function TaskTreeDialog({
 
         <DialogFooter className="gap-2 sm:gap-0">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            取消
+            {isEnglish ? "Cancel" : "取消"}
           </Button>
           <Button
             onClick={onConfirm}
             disabled={selectedTasks.size === 0}
             className="bg-amber-600 hover:bg-amber-700 text-white disabled:opacity-50"
           >
-            确认选择
+            {isEnglish ? "Confirm" : "确认选择"}
           </Button>
         </DialogFooter>
       </DialogContent>
