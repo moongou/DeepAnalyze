@@ -732,24 +732,50 @@ export function ThreePanelInterface() {
     }
   };
 
-  const handleSaveModelConfig = () => {
+  const handleSaveModelConfig = async () => {
+    // 同时保存到 localStorage（快速恢复）和后端（永久持久化）
     if (typeof window !== "undefined") {
       localStorage.setItem("modelProviderConfig", JSON.stringify(modelProviderConfig));
     }
-    toast({ description: `当前分析模型已设置为 ${modelProviderConfig.model}` });
+    try {
+      const providers = [modelProviderConfig];
+      await fetch(
+        `${API_URLS.CONFIG_MODELS_SAVE}?username=${currentUser || "default"}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: currentUser || "default", providers }),
+        }
+      );
+      toast({ description: `当前分析模型已设置为 ${modelProviderConfig.model} 并保存到本地` });
+    } catch {
+      toast({ description: `当前分析模型已设置为 ${modelProviderConfig.model}（仅浏览器保存）` });
+    }
   };
 
-  const handleSaveDatabaseConfig = () => {
+  const handleSaveDatabaseConfig = async () => {
     if (typeof window !== "undefined") {
       localStorage.setItem(
         "systemDbSettings",
-        JSON.stringify({
-          dbType,
-          dbConfig,
-        })
+        JSON.stringify({ dbType, dbConfig })
       );
     }
-    toast({ description: "数据库配置已保存到当前浏览器" });
+    try {
+      await fetch(
+        `${API_URLS.CONFIG_DATABASES_SAVE}?username=${currentUser || "default"}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: currentUser || "default",
+            connection: { id: `db_${dbType}`, dbType, config: dbConfig, label: `${dbType}@${dbConfig.host}` },
+          }),
+        }
+      );
+      toast({ description: "数据库配置已保存到本地" });
+    } catch {
+      toast({ description: "数据库配置已保存到当前浏览器" });
+    }
   };
 
   // 智能体介绍面板状态
@@ -1228,7 +1254,7 @@ ${analysisContent}
   // 更新分析完成状态（当有Answer区块时）
   useEffect(() => {
     const hasAnswer = messages.some(m =>
-      m.sender === "ai" && m.content && m.content.includes("<Answer>")
+      m.sender === "ai" && m.content && /<answer>/i.test(m.content)
     );
     setHasAnalysisCompleted(hasAnswer);
   }, [messages]);
@@ -1328,10 +1354,12 @@ ${analysisContent}
   const handleSaveKnowledgeConfig = async () => {
     setIsSavingKnowledgeConfig(true);
     try {
+      const payload = buildKnowledgeSettingsPayload();
+      // 保存到全局设置（兼容旧行为）
       const response = await fetch(API_URLS.KB_SETTINGS_SAVE, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(buildKnowledgeSettingsPayload()),
+        body: JSON.stringify(payload),
       });
       const data = await response.json();
       if (data.success) {
@@ -1347,6 +1375,17 @@ ${analysisContent}
             })
           );
         }
+        // 同时保存到用户本地配置文件
+        try {
+          await fetch(
+            `${API_URLS.CONFIG_KNOWLEDGE_SAVE}?username=${currentUser || "default"}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ username: currentUser || "default", settings: payload }),
+            }
+          );
+        } catch { /* non-critical */ }
         toast({ description: data.message || "知识库配置已保存" });
       } else {
         toast({ description: `保存失败: ${data.message || "未知错误"}`, variant: "destructive" });
@@ -1826,6 +1865,72 @@ ${analysisContent}
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // 仅在挂载时执行一次
+
+  // 用户登录后从后端加载持久化配置（覆盖 localStorage 缓存）
+  useEffect(() => {
+    if (!isLoggedIn || !currentUser) return;
+
+    (async () => {
+      try {
+        // 1. 加载模型配置
+        const modelRes = await fetch(
+          `${API_URLS.CONFIG_MODELS_GET}?username=${currentUser}`
+        );
+        if (modelRes.ok) {
+          const modelData = await modelRes.json();
+          if (modelData.providers && modelData.providers.length > 0) {
+            const saved = modelData.providers[0];
+            const nextConfig = cloneModelProviderConfig({
+              ...MODEL_PROVIDER_PRESETS[0],
+              ...saved,
+              headers: { ...(saved.headers || {}) },
+            });
+            setModelProviderConfig(nextConfig);
+            setModelHeadersInput(stringifyModelHeaders(nextConfig.headers));
+          }
+        }
+
+        // 2. 加载数据库配置
+        const dbRes = await fetch(
+          `${API_URLS.CONFIG_DATABASES_GET}?username=${currentUser}`
+        );
+        if (dbRes.ok) {
+          const dbData = await dbRes.json();
+          if (dbData.connections && dbData.connections.length > 0) {
+            const savedConn = dbData.connections[0];
+            if (savedConn.dbType) handleDbTypeChange(savedConn.dbType);
+            if (savedConn.config && typeof savedConn.config === "object") {
+              setDbConfig((prev) => ({
+                ...prev,
+                ...savedConn.config,
+                port: String(savedConn.config.port || prev.port),
+              }));
+            }
+          }
+        }
+
+        // 3. 加载知识库配置
+        const kbRes = await fetch(
+          `${API_URLS.CONFIG_KNOWLEDGE_GET}?username=${currentUser}`
+        );
+        if (kbRes.ok) {
+          const kbData = await kbRes.json();
+          const settings = kbData.settings || {};
+          if (typeof settings.knowledge_base_enabled === "boolean") {
+            setKnowledgeBaseEnabled(settings.knowledge_base_enabled);
+          }
+          if (settings.internal_preferences) {
+            const prefs = settings.internal_preferences;
+            if (prefs.preferred_view) setKnowledgePreferredView(prefs.preferred_view);
+            if (typeof prefs.show_hints === "boolean") setShowKnowledgeHints(prefs.show_hints);
+            if (typeof prefs.auto_open_yutu_after_analysis === "boolean") setAutoOpenYutuAfterAnalysis(prefs.auto_open_yutu_after_analysis);
+          }
+        }
+      } catch (e) {
+        console.warn("Failed to load user configs from backend:", e);
+      }
+    })();
+  }, [isLoggedIn, currentUser]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2822,7 +2927,7 @@ ${analysisContent}
     }> = [];
 
     Object.keys(sectionConfigs).forEach((type) => {
-      const regex = new RegExp(`<${type}>([\\s\\S]*?)</${type}>`, "g");
+      const regex = new RegExp(`<${type}>([\\s\\S]*?)</${type}>`, "gi");
       let match;
 
       while ((match = regex.exec(content)) !== null) {
@@ -3042,13 +3147,14 @@ ${analysisContent}
       }
 
       const parts: React.ReactNode[] = [];
-      const openRe = /<(Analyze|Understand|Code|Execute|Answer|File|TaskTree)>/g;
+      const openRe = /<(Analyze|Understand|Code|Execute|Answer|File|TaskTree)>/gi;
       let cursor = 0;
       let sectionIndex = 0;
       let m: RegExpExecArray | null;
 
       while ((m = openRe.exec(content)) !== null) {
-        const type = m[1] as StructuredSectionType;
+        const rawType = m[1] || "";
+        const type = `${rawType.charAt(0).toUpperCase()}${rawType.slice(1).toLowerCase()}` as StructuredSectionType;
         const start = m.index;
 
         if (start > cursor) {
@@ -3065,10 +3171,12 @@ ${analysisContent}
 
         const openTag = m[0];
         const openEnd = start + openTag.length;
-        const closeTag = `</${type}>`;
-        const closeIdx = content.indexOf(closeTag, openEnd);
+        const closeRe = new RegExp(`</${type}>`, "i");
+        const closeMatch = closeRe.exec(content.slice(openEnd));
+        const closeIdx = closeMatch ? openEnd + closeMatch.index : -1;
         const isComplete = closeIdx !== -1;
         const bodyEnd = isComplete ? closeIdx : content.length;
+        const closeTagLength = closeMatch ? closeMatch[0].length : (`</${type}>`).length;
         const body = content.slice(openEnd, bodyEnd).trim();
 
         const baseKey = `${type}-${sectionIndex}`;
@@ -3136,7 +3244,7 @@ ${analysisContent}
         );
 
         sectionIndex += 1;
-        cursor = isComplete ? closeIdx + closeTag.length : content.length;
+  cursor = isComplete ? closeIdx + closeTagLength : content.length;
         openRe.lastIndex = cursor;
 
         if (!isComplete) break;
@@ -3218,7 +3326,7 @@ ${analysisContent}
 
     Object.keys(sectionConfigs).forEach((type) => {
       // 使用 [\s\S]*? 以兼容不支持 s 标志的环境
-      const regex = new RegExp(`<${type}>([\\s\\S]*?)</${type}>`, "g");
+      const regex = new RegExp(`<${type}>([\\s\\S]*?)</${type}>`, "gi");
       let match;
 
       while ((match = regex.exec(content)) !== null) {
@@ -3745,7 +3853,7 @@ ${analysisContent}
           },
         ]);
         autoCollapseForContent(content, aiMessageIndex);
-        if (content.includes("<File>")) {
+        if (/<file>/i.test(content)) {
           await loadWorkspaceTree();
           await loadWorkspaceFiles();
         }
@@ -3798,7 +3906,7 @@ ${analysisContent}
           return next;
         });
 
-        if (visibleText.includes("<File>")) {
+        if (/<file>/i.test(visibleText)) {
           if (fileRefreshTimerRef.current) {
             window.clearTimeout(fileRefreshTimerRef.current);
           }
@@ -3893,8 +4001,8 @@ ${analysisContent}
       autoCollapseForContent(accumulatedMessage, aiMessageIndex);
 
       // 检测 <TaskTree> 并自动弹出交互式任务选择对话框
-      if (accumulatedMessage.includes("<TaskTree>")) {
-        const taskTreeMatch = accumulatedMessage.match(/<TaskTree>([\s\S]*?)<\/TaskTree>/);
+      if (/<tasktree>/i.test(accumulatedMessage)) {
+        const taskTreeMatch = accumulatedMessage.match(/<tasktree>([\s\S]*?)<\/tasktree>/i);
         if (taskTreeMatch) {
           const parsed = parseTaskTreeContent(taskTreeMatch[1]);
           if (parsed) {

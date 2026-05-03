@@ -28,14 +28,27 @@ export interface ModelProviderConfig {
   supportsOpenAICompatible?: boolean;
 }
 
+const DEFAULT_PROVIDER_TYPE =
+  (process.env.NEXT_PUBLIC_DEFAULT_PROVIDER_TYPE as ModelProviderType) ||
+  "deepanalyze";
+const DEFAULT_PROVIDER_LABEL =
+  process.env.NEXT_PUBLIC_DEFAULT_PROVIDER_LABEL || "DeepAnalyze 默认";
+const DEFAULT_PROVIDER_DESCRIPTION =
+  process.env.NEXT_PUBLIC_DEFAULT_PROVIDER_DESCRIPTION ||
+  "项目默认本地 vLLM 服务";
+const DEFAULT_PROVIDER_BASE_URL =
+  process.env.NEXT_PUBLIC_AI_API_URL || "http://localhost:8000/v1";
+const DEFAULT_PROVIDER_MODEL =
+  process.env.NEXT_PUBLIC_DEFAULT_MODEL_NAME || "DeepAnalyze-8B";
+
 export const MODEL_PROVIDER_PRESETS: ModelProviderConfig[] = [
   {
     id: "deepanalyze-default",
-    providerType: "deepanalyze",
-    label: "DeepAnalyze 默认",
-    description: "项目默认本地 vLLM 服务",
-    baseUrl: process.env.NEXT_PUBLIC_AI_API_URL || "http://localhost:8000/v1",
-    model: "DeepAnalyze-8B",
+    providerType: DEFAULT_PROVIDER_TYPE,
+    label: DEFAULT_PROVIDER_LABEL,
+    description: DEFAULT_PROVIDER_DESCRIPTION,
+    baseUrl: DEFAULT_PROVIDER_BASE_URL,
+    model: DEFAULT_PROVIDER_MODEL,
     apiKey: "",
     isLocal: true,
     supportsOpenAICompatible: true,
@@ -222,11 +235,11 @@ export const API_CONFIG = {
 
     // 文件管理
     WORKSPACE_FILES: "/v1/files",
-    WORKSPACE_TREE: "/v1/files",
+    WORKSPACE_TREE: "/v1/files/tree",
     WORKSPACE_UPLOAD: "/v1/files",
-    WORKSPACE_CLEAR: "/v1/files",
-    WORKSPACE_DELETE_FILE: "/v1/files",
-    WORKSPACE_DELETE_DIR: "/v1/files",
+    WORKSPACE_CLEAR: "/v1/files/clear",
+    WORKSPACE_DELETE_FILE: "/v1/files/file",
+    WORKSPACE_DELETE_DIR: "/v1/files/dir",
 
     // 认证
     AUTH_REGISTER: "/v1/auth/register",
@@ -267,6 +280,16 @@ export const API_CONFIG = {
 
     // 过程指导
     CHAT_GUIDANCE: "/v1/chat/guidance",
+
+    // 用户本地配置持久化
+    CONFIG_MODELS_GET: "/v1/config/models",
+    CONFIG_MODELS_SAVE: "/v1/config/models",
+    CONFIG_MODELS_DELETE: "/v1/config/models",
+    CONFIG_DATABASES_GET: "/v1/config/databases",
+    CONFIG_DATABASES_SAVE: "/v1/config/databases",
+    CONFIG_DATABASES_DELETE: "/v1/config/databases",
+    CONFIG_KNOWLEDGE_GET: "/v1/config/knowledge",
+    CONFIG_KNOWLEDGE_SAVE: "/v1/config/knowledge",
 
     // 知识库设置
     KB_SETTINGS_GET: "/v1/knowledge/settings",
@@ -371,6 +394,16 @@ export const API_URLS = {
 
   // 过程指导
   CHAT_GUIDANCE: buildApiUrl(API_CONFIG.ENDPOINTS.CHAT_GUIDANCE),
+
+  // 用户本地配置持久化
+  CONFIG_MODELS_GET: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_MODELS_GET),
+  CONFIG_MODELS_SAVE: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_MODELS_SAVE),
+  CONFIG_MODELS_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_MODELS_DELETE),
+  CONFIG_DATABASES_GET: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_DATABASES_GET),
+  CONFIG_DATABASES_SAVE: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_DATABASES_SAVE),
+  CONFIG_DATABASES_DELETE: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_DATABASES_DELETE),
+  CONFIG_KNOWLEDGE_GET: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_KNOWLEDGE_GET),
+  CONFIG_KNOWLEDGE_SAVE: buildApiUrl(API_CONFIG.ENDPOINTS.CONFIG_KNOWLEDGE_SAVE),
 
   // 知识库设置
   KB_SETTINGS_GET: buildApiUrl(API_CONFIG.ENDPOINTS.KB_SETTINGS_GET),

@@ -19,6 +19,9 @@ from functools import partial
 import socketserver
 import sqlite3
 import hashlib
+import secrets
+import time as time_module
+import jwt
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Depends, Request
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -496,20 +499,29 @@ def execute_code_safe(
 
 
 # API endpoint and model path
-API_BASE = "http://localhost:8000/v1"  # this localhost is for vllm api, do not change
-MODEL_PATH = "DeepAnalyze-8B"  # replace to your path to DeepAnalyze-8B
+DEFAULT_COMPUTE_BACKEND = (os.getenv("DEEPANALYZE_COMPUTE_BACKEND", "auto") or "auto").strip().lower()
+API_BASE = os.getenv("DEEPANALYZE_DEFAULT_MODEL_BASE_URL", "http://localhost:8000/v1")
+MODEL_PATH = os.getenv("DEEPANALYZE_DEFAULT_MODEL_NAME", "DeepAnalyze-8B")
+DEFAULT_PROVIDER_TYPE = (os.getenv("DEEPANALYZE_DEFAULT_PROVIDER_TYPE", "deepanalyze") or "deepanalyze").strip()
+DEFAULT_PROVIDER_LABEL = (os.getenv("DEEPANALYZE_DEFAULT_PROVIDER_LABEL", "DeepAnalyze 默认") or "DeepAnalyze 默认").strip()
+DEFAULT_PROVIDER_DESCRIPTION = (os.getenv("DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION", "项目默认本地 vLLM 服务") or "项目默认本地 vLLM 服务").strip()
+DEFAULT_PROVIDER_API_KEY = (os.getenv("DEEPANALYZE_DEFAULT_MODEL_API_KEY", "") or "").strip()
+MAX_AGENT_ROUNDS = 30
+LLM_RETRY_MAX_ATTEMPTS = 3
+LLM_RETRY_BACKOFF_SECONDS = [0.4, 0.8]
+LLM_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 # Initialize OpenAI client
-client = openai.OpenAI(base_url=API_BASE, api_key="dummy")
+client = openai.OpenAI(base_url=API_BASE, api_key=DEFAULT_PROVIDER_API_KEY or "dummy")
 DEFAULT_MODEL_PROVIDER_CONFIG = {
     "id": "deepanalyze-default",
-    "providerType": "deepanalyze",
-    "label": "DeepAnalyze 默认",
-    "description": "项目默认本地 vLLM 服务",
+    "providerType": DEFAULT_PROVIDER_TYPE,
+    "label": DEFAULT_PROVIDER_LABEL,
+    "description": DEFAULT_PROVIDER_DESCRIPTION,
     "baseUrl": API_BASE,
     "model": MODEL_PATH,
-    "apiKey": "",
+    "apiKey": DEFAULT_PROVIDER_API_KEY,
     "headers": {},
     "supportsOpenAICompatible": True,
 }
@@ -517,7 +529,32 @@ DEFAULT_MODEL_PROVIDER_CONFIG = {
 # Workspace directory
 WORKSPACE_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace")
 PROJECTS_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "projects")
+CONFIG_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deepanalyze.db")
+
+
+def _get_user_config_dir(username: str) -> str:
+    d = os.path.join(CONFIG_BASE_DIR, username)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _load_user_config(username: str, filename: str, default=None):
+    path = os.path.join(_get_user_config_dir(username), filename)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default if default is not None else {}
+
+
+def _save_user_config(username: str, filename: str, data) -> str:
+    path = os.path.join(_get_user_config_dir(username), filename)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return path
 KB_MASK = "••••••••"
 KB_DEFAULT_SETTINGS = {
     "knowledge_base_enabled": True,
@@ -694,6 +731,102 @@ def get_runtime_llm(model_provider: Optional[Dict[str, Any]] = None) -> Tuple[op
         default_headers=extra_headers or None,
     )
     return runtime_client, normalized["model"], normalized
+
+
+def _provider_supports_vllm_controls(provider_cfg: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(provider_cfg, dict):
+        return False
+    provider_type = str(provider_cfg.get("providerType") or "").strip().lower()
+    if provider_type in {"deepanalyze", "vllm"}:
+        return True
+    base_url = str(provider_cfg.get("baseUrl") or "").strip().lower()
+    return "localhost:8000" in base_url or "127.0.0.1:8000" in base_url
+
+
+def _build_streaming_answer_error(message: str) -> str:
+    safe_message = (str(message or "未知错误").strip() or "未知错误")[:1000]
+    return (
+        "<Answer>\n"
+        "模型服务调用失败，当前分析已中止。\n"
+        f"错误详情：{safe_message}\n"
+        "建议：\n"
+        "1. 检查模型服务是否正常（例如本地 vLLM 端口 8000）。\n"
+        "2. 若使用第三方模型，请检查 baseUrl、模型名与 API Key。\n"
+        "3. 修复后重新发送同一问题继续分析。\n"
+        "</Answer>\n"
+    )
+
+
+def _extract_llm_error_status(exc: Exception) -> Optional[int]:
+    for attr in ("status_code", "status", "http_status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    msg = str(exc)
+    match = re.search(r"\b(429|500|502|503|504)\b", msg)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _is_retryable_llm_exception(exc: Exception) -> bool:
+    known_retryable_types = tuple(
+        exc_type
+        for exc_type in (
+            getattr(openai, "APIConnectionError", None),
+            getattr(openai, "APITimeoutError", None),
+            getattr(openai, "RateLimitError", None),
+            getattr(openai, "InternalServerError", None),
+        )
+        if exc_type is not None
+    )
+    if known_retryable_types and isinstance(exc, known_retryable_types):
+        return True
+    status_code = _extract_llm_error_status(exc)
+    if status_code in LLM_RETRYABLE_STATUS_CODES:
+        return True
+    msg = str(exc).lower()
+    return any(
+        key in msg
+        for key in (
+            "timed out",
+            "timeout",
+            "temporarily",
+            "overload",
+            "connection",
+            "service unavailable",
+            "bad gateway",
+        )
+    )
+
+
+def _create_chat_completion_with_retry(llm_client: openai.OpenAI, request_kwargs: Dict[str, Any]):
+    active_kwargs = dict(request_kwargs)
+    dropped_extra_body = False
+    for attempt in range(1, LLM_RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return llm_client.chat.completions.create(**active_kwargs)
+        except Exception as exc:
+            if "extra_body" in active_kwargs and not dropped_extra_body:
+                active_kwargs = dict(active_kwargs)
+                active_kwargs.pop("extra_body", None)
+                dropped_extra_body = True
+                print("[LLM] Request failed with extra_body, retrying without provider-specific controls")
+                continue
+
+            if attempt >= LLM_RETRY_MAX_ATTEMPTS or not _is_retryable_llm_exception(exc):
+                raise
+
+            delay = LLM_RETRY_BACKOFF_SECONDS[min(attempt - 1, len(LLM_RETRY_BACKOFF_SECONDS) - 1)]
+            status_code = _extract_llm_error_status(exc)
+            print(f"[LLM] Transient error (status={status_code}) on attempt {attempt}, retrying in {delay:.1f}s")
+            time_module.sleep(delay)
+
+    raise RuntimeError("LLM request failed after retries")
 
 
 def fetch_model_names(model_provider: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -1000,6 +1133,79 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- v1 path rewrite map (frontend expects /v1/*, backend has legacy paths) ---
+_V1_REWRITE = {
+    "/v1/chat/completions":       "/chat/completions",
+    "/v1/models":                 "/api/model/models",
+    "/v1/files":                  "/workspace/files",
+    "/v1/files/tree":             "/workspace/tree",
+    "/v1/files/upload-to":        "/workspace/upload-to",
+    # user config persistence
+    "/v1/config/models":          "/api/config/models",
+    "/v1/config/databases":       "/api/config/databases",
+    "/v1/config/knowledge":       "/api/config/knowledge",
+    "/v1/config/export":          "/api/config/export",
+    "/v1/knowledge/settings":     "/api/kb/settings",
+    "/v1/knowledge/test":         "/api/kb/test",
+    "/v1/knowledge/entries":      "/api/yutu/search",
+    "/v1/knowledge/entries/search":"/api/yutu/search",
+    # yutu nested routes: frontend kebab-case → backend slash-separated
+    "/v1/knowledge/yutu/organize-confirm": "/api/yutu/organize/confirm",
+    "/v1/knowledge/yutu/organize-cancel":  "/api/yutu/organize/cancel",
+    "/v1/knowledge/yutu/backup-list":     "/api/yutu/backup/list",
+    "/v1/knowledge/yutu/backup-create":   "/api/yutu/backup/create",
+    "/v1/knowledge/yutu/backup-delete":   "/api/yutu/backup/delete",
+    "/v1/knowledge/yutu/backup-restore":  "/api/yutu/backup/restore",
+    "/v1/projects/save":          "/api/projects/save",
+    "/v1/projects/list":          "/api/projects/list",
+    "/v1/projects/load":          "/api/projects/load",
+    "/v1/projects/check-name":    "/api/projects/check-name",
+    "/v1/projects/restore-files": "/api/projects/restore-files",
+    "/v1/projects/restore-to-workspace": "/api/projects/restore-to-workspace",
+    "/v1/database/test":          "/api/db/test",
+    "/v1/database/generate-sql":  "/api/db/generate-sql",
+    "/v1/database/execute":       "/api/db/execute",
+    "/v1/export/report":          "/export/report",
+    "/v1/chat/guidance":          "/api/chat/guidance",
+    "/v1/code/execute":           "/execute",
+}
+_V1_PREFIX_REWRITE = {
+    "/v1/knowledge/yutu/":  "/api/yutu/",
+    "/v1/projects/":        "/api/projects/",
+    "/v1/files/":           "/workspace/",
+}
+
+
+class V1PathRewriteMiddleware:
+    """Pure ASGI middleware that rewrites /v1/* paths to legacy equivalents."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            # Exact match first
+            if path in _V1_REWRITE:
+                scope = {**scope, "path": _V1_REWRITE[path]}
+            else:
+                # Prefix match
+                for v1_prefix, legacy_prefix in _V1_PREFIX_REWRITE.items():
+                    if path.startswith(v1_prefix):
+                        suffix = path[len(v1_prefix):]
+                        scope = {**scope, "path": f"{legacy_prefix}{suffix}"}
+                        break
+                else:
+                    # DELETE /v1/projects?id=... → /api/projects/delete
+                    if path == "/v1/projects" and scope.get("method", "").upper() == "DELETE":
+                        qs = scope.get("query_string", b"").decode("latin-1")
+                        scope = {**scope, "path": "/api/projects/delete", "query_string": qs.encode("latin-1")}
+
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(V1PathRewriteMiddleware)
+
 @app.get("/proxy")
 async def proxy_url(url: str = Query(...)):
     """代理外部 URL 以解决跨域问题（特别是本地文件服务器）"""
@@ -1088,12 +1294,20 @@ async def settings_hardware():
 @app.get("/api/settings/defaults")
 async def settings_defaults():
     """返回前端默认设置"""
+    if DEFAULT_COMPUTE_BACKEND in {"mlx", "apple", "apple_silicon"}:
+        model_version = "mlx"
+    elif DEFAULT_COMPUTE_BACKEND in {"gpu", "cuda", "nvidia"}:
+        model_version = "gpu"
+    else:
+        model_version = "mlx" if "mlx" in MODEL_PATH.lower() else "gpu"
+
     return {
         "analysis_mode": "full_agent",
         "analysis_strategy": "聚焦诉求",
         "temperature": None,
         "knowledge_base_enabled": True,
-        "model_version": "mlx",
+        "model_version": model_version,
+        "compute_backend": DEFAULT_COMPUTE_BACKEND,
         "self_correction_enabled": True,
         "short_test_enabled": True,
         "task_decomposition_enabled": True,
@@ -1415,6 +1629,124 @@ async def login(username: str = Form(...), password: str = Form("")):
         print(f"Login error: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+# --- JWT Auth configuration ---
+JWT_SECRET = os.getenv("DEEPANALYZE_JWT_SECRET", secrets.token_hex(32))
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = int(os.getenv("DEEPANALYZE_JWT_EXPIRATION_HOURS", "168"))
+
+
+def create_jwt_token(username: str) -> str:
+    now = int(time_module.time())
+    payload = {"sub": username, "iat": now, "exp": now + JWT_EXPIRATION_HOURS * 3600}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def decode_jwt_token(token: str):
+    try:
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        return None
+
+
+def get_current_user_from_token(request: Request) -> str | None:
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        payload = decode_jwt_token(auth_header[7:])
+        if payload:
+            return payload.get("sub")
+    api_key = request.headers.get("X-API-Key", "")
+    if api_key:
+        payload = decode_jwt_token(api_key)
+        if payload:
+            return payload.get("sub")
+    return None
+
+
+@app.post("/v1/auth/register")
+async def v1_register(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+    if not username or len(username) < 3:
+        raise HTTPException(status_code=400, detail="Username must be at least 3 characters")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT username FROM users WHERE username = ?", (username,))
+    if cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=409, detail="Username already exists")
+
+    cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                   (username, hash_password(password)))
+    conn.commit()
+    conn.close()
+
+    token = create_jwt_token(username)
+    return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+@app.post("/v1/auth/login")
+async def v1_login(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, password_hash FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    stored_hash = row["password_hash"]
+    if stored_hash and stored_hash != hash_password(""):
+        if hash_password(password) != stored_hash:
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    token = create_jwt_token(username)
+    return {"access_token": token, "token_type": "bearer", "username": username}
+
+
+@app.get("/v1/auth/users")
+async def v1_list_users():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT username FROM users ORDER BY username")
+    users = [row["username"] for row in cursor.fetchall()]
+    conn.close()
+    return {"users": users}
+
+
+@app.get("/v1/auth/me")
+async def v1_get_me(request: Request):
+    username = get_current_user_from_token(request)
+    if not username:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, password_hash FROM users WHERE username = ?", (username,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=401, detail="User not found")
+    return {"username": username, "created_at": 0}
+
 
 @app.get("/workspace/files")
 async def get_workspace_files(session_id: str = Query("default"), username: str = Query("default")):
@@ -2787,8 +3119,10 @@ def bot_stream(
     assistant_reply = ""
     finished = False
     exe_output = None
-    llm_client, llm_model, _ = get_runtime_llm(model_provider)
-    while not finished:
+    llm_client, llm_model, runtime_provider = get_runtime_llm(model_provider)
+    round_count = 0
+    while not finished and round_count < MAX_AGENT_ROUNDS:
+        round_count += 1
         # 在每次 LLM 生成前，检查是否有用户提交的“过程指导/Side Task”
         guidance = SESSION_GUIDANCE.pop(session_id, None)
         if guidance:
@@ -2799,37 +3133,63 @@ def bot_stream(
             messages.append(guidance_msg)
             print(f"[Side Guidance] Injecting guidance into session {session_id}")
 
-        response = llm_client.chat.completions.create(
-            model=llm_model,
-            messages=messages,
-            temperature=effective_temperature,
-            stream=True,
-            stop=["</Code>", "</TaskTree>", "</s>", "<|endoftext|>", "<|im_end|>"],
-            extra_body={
+        request_kwargs: Dict[str, Any] = {
+            "model": llm_model,
+            "messages": messages,
+            "temperature": effective_temperature,
+            "stream": True,
+            "stop": [
+                "</Code>",
+                "</code>",
+                "</TaskTree>",
+                "</tasktree>",
+                "</s>",
+                "<|endoftext|>",
+                "<|im_end|>",
+            ],
+        }
+        if _provider_supports_vllm_controls(runtime_provider):
+            request_kwargs["extra_body"] = {
                 "add_generation_prompt": False,
                 "max_new_tokens": 32768,
-            },
-        )
+            }
+
+        try:
+            response = _create_chat_completion_with_retry(llm_client, request_kwargs)
+        except Exception as create_exc:
+            error_block = _build_streaming_answer_error(str(create_exc))
+            assistant_reply += error_block
+            yield error_block
+            break
+
         cur_res = ""
+        last_finish_reason = None
         for chunk in response:
-            if chunk.choices and chunk.choices[0].delta.content is not None:
-                delta = chunk.choices[0].delta.content
-                cur_res += delta
-                assistant_reply += delta
-                yield delta
-            if "</Answer>" in cur_res:
+            if chunk.choices:
+                choice = chunk.choices[0]
+                last_finish_reason = choice.finish_reason
+                if choice.delta.content is not None:
+                    delta = choice.delta.content
+                    cur_res += delta
+                    assistant_reply += delta
+                    yield delta
+
+            if re.search(r"</answer>", cur_res, re.IGNORECASE):
                 finished = True
                 break
             # ---- TaskTree 检测（流式中途发现完整闭合标签） ----
-            if "</TaskTree>" in cur_res:
+            if re.search(r"</tasktree>", cur_res, re.IGNORECASE):
                 messages.append({"role": "assistant", "content": cur_res})
                 finished = True
                 break
         if finished:
             # 已因 </Answer> 或 </TaskTree> 结束，跳过后续代码执行逻辑
             continue
+
         # ---- TaskTree 检测（stop sequence 截断时，LLM 输出了 <TaskTree> 但未闭合） ----
-        if "<TaskTree>" in cur_res and "</TaskTree>" not in cur_res:
+        has_tasktree_open = re.search(r"<tasktree>", cur_res, re.IGNORECASE) is not None
+        has_tasktree_close = re.search(r"</tasktree>", cur_res, re.IGNORECASE) is not None
+        if has_tasktree_open and not has_tasktree_close:
             # stop sequence 截断了 </TaskTree>，手动补上闭合标签
             closing_tag = "</TaskTree>"
             cur_res += closing_tag
@@ -2838,19 +3198,33 @@ def bot_stream(
             messages.append({"role": "assistant", "content": cur_res})
             finished = True
             continue
-        if chunk.choices[0].finish_reason == "stop" and not finished:
-            if not cur_res.endswith("</Code>"):
+
+        has_code_open = re.search(r"<code>", cur_res, re.IGNORECASE) is not None
+        has_code_close = re.search(r"</code>", cur_res, re.IGNORECASE) is not None
+
+        if last_finish_reason == "stop" and not finished and has_code_open and not has_code_close:
+            if not re.search(r"</code>\s*$", cur_res, re.IGNORECASE):
                 missing_tag = "</Code>"
                 cur_res += missing_tag
                 assistant_reply += missing_tag
                 yield missing_tag
-        if "</Code>" in cur_res and not finished:
+            has_code_close = True
+
+        if has_code_open and has_code_close and not finished:
             messages.append({"role": "assistant", "content": cur_res})
-            code_match = re.search(r"<Code>(.*?)</Code>", cur_res, re.DOTALL)
+            code_match = re.search(r"<code>(.*?)</code>", cur_res, re.DOTALL | re.IGNORECASE)
+            code_str = None
             if code_match:
-                code_content = code_match.group(1).strip()
-                md_match = re.search(r"```(?:python)?(.*?)```", code_content, re.DOTALL)
+                code_content = (code_match.group(1) or "").strip()
+                md_match = re.search(r"```(?:python)?(.*?)```", code_content, re.DOTALL | re.IGNORECASE)
                 code_str = md_match.group(1).strip() if md_match else code_content
+            else:
+                # 对通用模型兜底：即使没用 <Code> 标签，也尝试提取 fenced code
+                md_match = re.search(r"```(?:python)?(.*?)```", cur_res, re.DOTALL | re.IGNORECASE)
+                if md_match:
+                    code_str = md_match.group(1).strip()
+
+            if code_str:
                 code_str = Chinese_matplot_str + "\n" + code_str
                 # 自动将用户提及的原始文件名映射为 converted/ 目录下的实际文件
                 code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
@@ -2968,6 +3342,23 @@ def bot_stream(
                 if new_files:
                     workspace.extend(new_files)
                     initial_workspace.update(new_files)
+
+            continue
+
+        # 无代码时也要保留本轮输出，允许模型进入下一轮（例如先 Analyze 再 Code）
+        if cur_res.strip():
+            messages.append({"role": "assistant", "content": cur_res})
+
+    if not finished and round_count >= MAX_AGENT_ROUNDS:
+        limit_block = (
+            "<Answer>\n"
+            f"已达到最大分析轮次（{MAX_AGENT_ROUNDS}轮），为避免无限循环已自动停止。\n"
+            "请提供更具体的下一步指令，或缩小分析范围后继续。\n"
+            "</Answer>\n"
+        )
+        assistant_reply += limit_block
+        yield limit_block
+
     os.chdir(original_cwd)
 
 
@@ -4748,24 +5139,51 @@ async def test_db_connection(body: dict = Body(...)):
 
 @app.post("/api/db/generate-sql")
 async def generate_sql(body: dict = Body(...)):
-    """自然语言生成 SQL"""
+    """自然语言生成 SQL（自动获取真实数据库 Schema）"""
     try:
         db_type = body.get("db_type", "mysql")
+        config = body.get("config", {})
         prompt = body.get("prompt", "")
-        schema_info = body.get("schema_info", "") # 可选：由前端提供或后端自动获取
         model_provider = body.get("model_provider")
 
         if not prompt:
             return {"success": False, "message": "Prompt is required"}
 
-        system_msg = f"""你是一个精通 SQL 的专家。请根据用户的需求，生成适用于 {db_type} 数据库的 SQL 查询语句。
-如果提供了表结构信息，请严格按照表结构生成。
+        # 尝试连接数据库，获取真实 schema
+        schema_info = ""
+        try:
+            from sqlalchemy import inspect
+            normalized_type = normalize_db_type(db_type)
+            engine = build_db_engine(normalized_type, config)
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+            schema_lines = []
+            for table_name in tables:
+                columns = inspector.get_columns(table_name)
+                col_defs = []
+                for col in columns:
+                    col_type = str(col.get("type", "unknown"))
+                    nullable = "NULL" if col.get("nullable", True) else "NOT NULL"
+                    default = f" DEFAULT {col['default']}" if col.get("default") else ""
+                    col_defs.append(f"  {col['name']} {col_type} {nullable}{default}")
+                pk = inspector.get_pk_constraint(table_name)
+                if pk and pk.get("constrained_columns"):
+                    col_defs.append(f"  PRIMARY KEY ({', '.join(pk['constrained_columns'])})")
+                schema_lines.append(f"CREATE TABLE {table_name} (\n" + ",\n".join(col_defs) + "\n);")
+            schema_info = "\n\n".join(schema_lines)
+            engine.dispose()
+        except Exception as e:
+            print(f"Could not fetch schema from DB: {e}")
+            schema_info = "(无法自动获取表结构，请确保连接信息正确)"
+
+        system_msg = f"""你是一个精通 SQL 的专家。请根据以下数据库 Schema 和用户需求，生成适用于 {db_type} 数据库的 SQL 查询语句。
+严格基于所提供的 Schema 生成查询，不要虚构不存在的表或列。
 只返回 SQL 代码块，不要有任何其他文字解释。
 代码块格式如下：
 ```sql
 SELECT ...
 ```"""
-        user_msg = f"需求：{prompt}\n表结构信息：{schema_info}"
+        user_msg = f"数据库 Schema：\n{schema_info}\n\n用户需求：{prompt}"
 
         llm_client, llm_model, _ = get_runtime_llm(model_provider)
         response = llm_client.chat.completions.create(
@@ -4903,6 +5321,107 @@ async def test_kb_settings(body: dict = Body(...)):
     except Exception as e:
         print(f"Test KB settings error: {e}")
         return {"success": False, "message": str(e)}
+
+
+# ========== 用户本地配置持久化 API ==========
+
+@app.get("/api/config/models")
+async def get_user_model_configs(username: str = Query("default")):
+    """获取用户保存的模型提供商配置列表"""
+    data = _load_user_config(username, "model_providers.json", {"providers": []})
+    return {"success": True, "providers": data.get("providers", [])}
+
+
+@app.post("/api/config/models")
+async def save_user_model_config(body: dict = Body(...)):
+    """保存用户的模型提供商配置"""
+    username = body.get("username", "default")
+    providers = body.get("providers", [])
+    existing = _load_user_config(username, "model_providers.json", {"providers": []})
+    existing["providers"] = providers
+    path = _save_user_config(username, "model_providers.json", existing)
+    return {"success": True, "path": path, "message": "模型配置已保存到本地"}
+
+
+@app.delete("/api/config/models")
+async def delete_user_model_config(body: dict = Body(...)):
+    """删除用户保存的某个模型配置"""
+    username = body.get("username", "default")
+    provider_id = body.get("id", "")
+    data = _load_user_config(username, "model_providers.json", {"providers": []})
+    data["providers"] = [p for p in data["providers"] if p.get("id") != provider_id]
+    _save_user_config(username, "model_providers.json", data)
+    return {"success": True, "message": "已删除"}
+
+
+@app.get("/api/config/databases")
+async def get_user_db_configs(username: str = Query("default")):
+    """获取用户保存的数据库连接配置列表"""
+    data = _load_user_config(username, "database_connections.json", {"connections": []})
+    return {"success": True, "connections": data.get("connections", [])}
+
+
+@app.post("/api/config/databases")
+async def save_user_db_config(body: dict = Body(...)):
+    """保存用户的数据库连接配置（添加/更新）"""
+    username = body.get("username", "default")
+    connection = body.get("connection", {})
+    conn_id = connection.get("id") or f"db_{int(time_module.time())}"
+    connection["id"] = conn_id
+
+    data = _load_user_config(username, "database_connections.json", {"connections": []})
+    idx = next((i for i, c in enumerate(data["connections"]) if c.get("id") == conn_id), None)
+    if idx is not None:
+        data["connections"][idx] = connection
+    else:
+        data["connections"].append(connection)
+
+    path = _save_user_config(username, "database_connections.json", data)
+    return {"success": True, "path": path, "connection": connection, "message": "数据库配置已保存到本地"}
+
+
+@app.delete("/api/config/databases")
+async def delete_user_db_config(body: dict = Body(...)):
+    """删除用户保存的某个数据库连接配置"""
+    username = body.get("username", "default")
+    conn_id = body.get("id", "")
+    data = _load_user_config(username, "database_connections.json", {"connections": []})
+    data["connections"] = [c for c in data["connections"] if c.get("id") != conn_id]
+    _save_user_config(username, "database_connections.json", data)
+    return {"success": True, "message": "已删除"}
+
+
+@app.get("/api/config/knowledge")
+async def get_user_knowledge_settings(username: str = Query("default")):
+    """获取用户的知识库设置（与 DB settings 合并）"""
+    global_settings = load_kb_settings(raw=False)
+    user_settings = _load_user_config(username, "knowledge_settings.json", {})
+    merged = {**global_settings, **user_settings}
+    return {"success": True, "settings": merged}
+
+
+@app.post("/api/config/knowledge")
+async def save_user_knowledge_settings(body: dict = Body(...)):
+    """保存用户的知识库设置"""
+    username = body.get("username", "default")
+    settings = body.get("settings", {})
+    _save_user_config(username, "knowledge_settings.json", settings)
+    return {"success": True, "message": "知识库配置已保存到本地"}
+
+
+@app.get("/api/config/export")
+async def export_user_config(username: str = Query("default")):
+    """导出用户所有配置为一个 JSON 文件（用于备份或迁移）"""
+    config_dir = _get_user_config_dir(username)
+    result = {"username": username, "configs": {}}
+    for fname in os.listdir(config_dir):
+        if fname.endswith(".json"):
+            try:
+                with open(os.path.join(config_dir, fname), "r", encoding="utf-8") as f:
+                    result["configs"][fname] = json.load(f)
+            except Exception:
+                result["configs"][fname] = {}
+    return result
 
 
 if __name__ == "__main__":

@@ -1,139 +1,111 @@
 #!/bin/bash
 
-# ==============================================================================
-# DeepAnalyze Unified Startup Script / DeepAnalyze 统一启动脚本
-# ==============================================================================
-# This script provides a single entry point to launch DeepAnalyze using either:
-#   - MLX backend (Apple Silicon / M-series chips)
-#   - GPU backend (CUDA / OpenCL / DirectML)
-#
-# 本脚本提供统一入口，用于启动 DeepAnalyze：
-#   - MLX 后端（Apple Silicon / M 系列芯片）
-#   - GPU 后端（CUDA / OpenCL / DirectML）
-# ==============================================================================
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# --- Banner / 横幅 ---
-echo "╔══════════════════════════════════════════════════╗"
-echo "║                                                  ║"
-echo "║              🔬  D e e p A n a l y z e           ║"
-echo "║                                                  ║"
-echo "║       Intelligent Analysis Platform              ║"
-echo "║       智能分析平台                                ║"
-echo "║                                                  ║"
-echo "╚══════════════════════════════════════════════════╝"
-echo ""
-
-# --- Menu: Choose backend / 选择后端 ---
-echo "Please select your compute backend / 请选择计算后端:"
-echo ""
-echo "  1) MLX  - Apple Silicon (M1/M2/M3/M4) [Default / 默认]"
-echo "  2) GPU  - CUDA / OpenCL / DirectML"
-echo ""
-
-# Read user choice with a 10-second timeout; default to MLX
-# 读取用户选择，10 秒超时后默认选择 MLX
-read -t 10 -p "Enter choice / 输入选项 [1]: " CHOICE
-echo "" # newline after read
-
-# Default to 1 (MLX) on timeout or empty input
-# 超时或空输入时默认选择 1（MLX）
-CHOICE="${CHOICE:-1}"
-
-# ==============================================================================
-# Helper: Ask user to confirm continuation after a warning
-# 辅助函数：警告后询问用户是否继续
-# ==============================================================================
-ask_continue() {
-    local msg="$1"
-    echo ""
-    echo "⚠️  WARNING / 警告: $msg"
-    echo ""
-    read -p "Continue anyway? / 是否仍然继续？ (y/N): " CONFIRM
-    CONFIRM="${CONFIRM:-N}"
-    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
-        echo "Aborted. / 已取消。"
-        exit 0
-    fi
+normalize_backend() {
+	local raw="${1:-}"
+	raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+	case "$raw" in
+		1|mlx|apple|apple_silicon) echo "mlx" ;;
+		2|gpu|cuda|nvidia) echo "gpu" ;;
+		*) echo "" ;;
+	esac
 }
 
-# ==============================================================================
-# Option 1: MLX (Apple Silicon)
-# 选项 1：MLX（Apple Silicon）
-# ==============================================================================
-if [ "$CHOICE" = "1" ]; then
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Selected: MLX (Apple Silicon)"
-    echo "  已选择：MLX（Apple Silicon）"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+detect_default_backend() {
+	if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
+		echo "mlx"
+	else
+		echo "gpu"
+	fi
+}
 
-    # Check for Apple Metal support / 检测 Apple Metal 支持
-    METAL_AVAILABLE=false
-    if [[ "$(uname)" == "Darwin" ]]; then
-        # macOS: use system_profiler to check for Metal support
-        # macOS：使用 system_profiler 检测 Metal 支持
-        if command -v system_profiler >/dev/null 2>&1; then
-            if system_profiler SPDisplaysDataType 2>/dev/null | grep -qi "Metal"; then
-                METAL_AVAILABLE=true
-                echo "✅ Apple Metal support detected. / 检测到 Apple Metal 支持。"
-            fi
-        fi
-    fi
+apply_backend_profile() {
+	local backend="$1"
+	if [[ "$backend" == "mlx" ]]; then
+		export DEEPANALYZE_COMPUTE_BACKEND="mlx"
+		export DEEPANALYZE_DEFAULT_PROVIDER_TYPE="${DEEPANALYZE_MLX_PROVIDER_TYPE:-openai_compatible}"
+		export DEEPANALYZE_DEFAULT_PROVIDER_LABEL="${DEEPANALYZE_MLX_PROVIDER_LABEL:-DeepAnalyze MLX}"
+		export DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION="${DEEPANALYZE_MLX_PROVIDER_DESCRIPTION:-项目默认本地 MLX 服务}"
+		export DEEPANALYZE_DEFAULT_MODEL_BASE_URL="${DEEPANALYZE_MLX_BASE_URL:-http://localhost:8000/v1}"
+		export DEEPANALYZE_DEFAULT_MODEL_NAME="${DEEPANALYZE_MLX_MODEL:-DeepAnalyze-8B-MLX-4bit}"
+	else
+		export DEEPANALYZE_COMPUTE_BACKEND="gpu"
+		export DEEPANALYZE_DEFAULT_PROVIDER_TYPE="${DEEPANALYZE_GPU_PROVIDER_TYPE:-deepanalyze}"
+		export DEEPANALYZE_DEFAULT_PROVIDER_LABEL="${DEEPANALYZE_GPU_PROVIDER_LABEL:-DeepAnalyze GPU}"
+		export DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION="${DEEPANALYZE_GPU_PROVIDER_DESCRIPTION:-项目默认本地 GPU vLLM 服务}"
+		export DEEPANALYZE_DEFAULT_MODEL_BASE_URL="${DEEPANALYZE_GPU_BASE_URL:-http://localhost:8000/v1}"
+		export DEEPANALYZE_DEFAULT_MODEL_NAME="${DEEPANALYZE_GPU_MODEL:-DeepAnalyze-8B}"
+	fi
 
-    if [ "$METAL_AVAILABLE" = false ]; then
-        ask_continue "Apple Metal not detected. MLX requires Metal-capable Apple Silicon. / 未检测到 Apple Metal。MLX 需要支持 Metal 的 Apple Silicon。"
-    fi
+	# Frontend runtime defaults (picked up by Next.js dev server at startup)
+	export NEXT_PUBLIC_AI_API_URL="$DEEPANALYZE_DEFAULT_MODEL_BASE_URL"
+	export NEXT_PUBLIC_DEFAULT_PROVIDER_TYPE="$DEEPANALYZE_DEFAULT_PROVIDER_TYPE"
+	export NEXT_PUBLIC_DEFAULT_PROVIDER_LABEL="$DEEPANALYZE_DEFAULT_PROVIDER_LABEL"
+	export NEXT_PUBLIC_DEFAULT_PROVIDER_DESCRIPTION="$DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION"
+	export NEXT_PUBLIC_DEFAULT_MODEL_NAME="$DEEPANALYZE_DEFAULT_MODEL_NAME"
+}
 
-    echo ""
-    echo "Launching MLX startup script... / 正在启动 MLX 启动脚本..."
-    exec "$SCRIPT_DIR/start_all_mlx.sh"
+print_profile_summary() {
+	echo "Selected compute backend: $DEEPANALYZE_COMPUTE_BACKEND"
+	echo "Default model endpoint:   $DEEPANALYZE_DEFAULT_MODEL_BASE_URL"
+	echo "Default model name:       $DEEPANALYZE_DEFAULT_MODEL_NAME"
+	echo "Default provider type:    $DEEPANALYZE_DEFAULT_PROVIDER_TYPE"
+}
 
-# ==============================================================================
-# Option 2: GPU (CUDA / OpenCL / DirectML)
-# 选项 2：GPU（CUDA / OpenCL / DirectML）
-# ==============================================================================
-elif [ "$CHOICE" = "2" ]; then
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Selected: GPU (CUDA / OpenCL / DirectML)"
-    echo "  已选择：GPU（CUDA / OpenCL / DirectML）"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+warn_if_backend_mismatch() {
+	if [[ "$DEEPANALYZE_COMPUTE_BACKEND" == "mlx" ]]; then
+		if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+			echo "Warning: MLX profile is best for Apple Silicon (Darwin arm64)."
+		fi
+	else
+		local gpu_detected="false"
+		if command -v nvidia-smi >/dev/null 2>&1; then
+			gpu_detected="true"
+		elif command -v clinfo >/dev/null 2>&1; then
+			gpu_detected="true"
+		fi
+		if [[ "$gpu_detected" == "false" ]]; then
+			echo "Warning: No CUDA/OpenCL tool detected. GPU profile may still work with remote endpoints."
+		fi
+	fi
+}
 
-    # Detect available GPU frameworks / 检测可用的 GPU 框架
-    GPU_FOUND=false
-
-    # Check CUDA via nvidia-smi / 通过 nvidia-smi 检测 CUDA
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        echo "✅ CUDA (NVIDIA) detected. / 检测到 CUDA（NVIDIA）。"
-        nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -5
-        GPU_FOUND=true
-    fi
-
-    # Check OpenCL via clinfo / 通过 clinfo 检测 OpenCL
-    if command -v clinfo >/dev/null 2>&1; then
-        echo "✅ OpenCL detected. / 检测到 OpenCL。"
-        GPU_FOUND=true
-    fi
-
-    # Check DirectML (Windows/WSL) / 检测 DirectML（Windows/WSL 环境）
-    if [ -d "/usr/lib/wsl" ] || [ -f "/usr/lib/libdirectml.so" ]; then
-        echo "✅ DirectML (WSL) detected. / 检测到 DirectML（WSL）。"
-        GPU_FOUND=true
-    fi
-
-    if [ "$GPU_FOUND" = false ]; then
-        ask_continue "No GPU framework (CUDA/OpenCL/DirectML) detected. Consider using MLX instead (option 1). / 未检测到 GPU 框架（CUDA/OpenCL/DirectML）。建议使用 MLX（选项 1）。"
-    fi
-
-    echo ""
-    echo "Launching GPU startup script... / 正在启动 GPU 启动脚本..."
-    exec "$SCRIPT_DIR/start_all_gpu.sh"
-
-# ==============================================================================
-# Invalid choice / 无效选项
-# ==============================================================================
-else
-    echo "❌ Invalid choice: $CHOICE. Please enter 1 or 2."
-    echo "   无效选项：$CHOICE。请输入 1 或 2。"
-    exit 1
+BACKEND_ARG=""
+if [[ "${1:-}" == "--backend" ]]; then
+	BACKEND_ARG="$(normalize_backend "${2:-}")"
 fi
+
+SELECTED_BACKEND=""
+if [[ -n "$BACKEND_ARG" ]]; then
+	SELECTED_BACKEND="$BACKEND_ARG"
+elif [[ -n "${DEEPANALYZE_COMPUTE_BACKEND:-}" ]]; then
+	SELECTED_BACKEND="$(normalize_backend "$DEEPANALYZE_COMPUTE_BACKEND")"
+fi
+
+if [[ -z "$SELECTED_BACKEND" ]]; then
+	DEFAULT_BACKEND="$(detect_default_backend)"
+	echo "DeepAnalyze startup profile selection"
+	echo "1) Apple Silicon / MLX"
+	echo "2) GPU / CUDA/OpenCL"
+	if [[ "$DEFAULT_BACKEND" == "mlx" ]]; then
+		read -t 12 -p "Choose backend [1]: " CHOICE
+		CHOICE="${CHOICE:-1}"
+	else
+		read -t 12 -p "Choose backend [2]: " CHOICE
+		CHOICE="${CHOICE:-2}"
+	fi
+	SELECTED_BACKEND="$(normalize_backend "$CHOICE")"
+fi
+
+if [[ -z "$SELECTED_BACKEND" ]]; then
+	echo "Invalid backend choice. Use --backend mlx|gpu"
+	exit 1
+fi
+
+apply_backend_profile "$SELECTED_BACKEND"
+warn_if_backend_mismatch
+print_profile_summary
+
+cd "$SCRIPT_DIR/demo/chat" || exit 1
+exec bash start.sh
