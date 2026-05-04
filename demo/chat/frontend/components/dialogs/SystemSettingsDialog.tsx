@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -7,11 +8,21 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MODEL_PROVIDER_PRESETS, parseModelHeadersInput, type ModelProviderConfig } from "@/lib/config";
-import { Database, RefreshCw, Sparkles, Play } from "lucide-react";
+import { Database, RefreshCw, Sparkles, Play, ChevronDown, ChevronRight } from "lucide-react";
 
 interface DbConfig {
   host: string;
@@ -19,6 +30,19 @@ interface DbConfig {
   user: string;
   password: string;
   database: string;
+}
+
+interface SavedDatabaseConnection {
+  id: string;
+  dbType: string;
+  label: string;
+  config: {
+    host?: string;
+    port?: string;
+    user?: string;
+    password?: string;
+    database: string;
+  };
 }
 
 interface OnyxConfig {
@@ -94,6 +118,12 @@ interface SystemSettingsDialogProps {
   handleExecuteDbSql: () => void;
   isExecutingDbSql: boolean;
   handleSaveDatabaseConfig: () => void;
+  savedDbConnections: SavedDatabaseConnection[];
+  selectedDbSourceIds: string[];
+  handleToggleSavedDbSourceSelection: (connectionId: string, checked: boolean) => void;
+  handleApplySavedDbConnection: (connectionId: string) => void;
+  handleDeleteSavedDbConnection: (connectionId: string) => void;
+  deletingDbConnectionId: string | null;
   // Knowledge tab
   isLoadingKnowledgeConfig: boolean;
   loadKnowledgeConfig: () => void;
@@ -144,6 +174,9 @@ export function SystemSettingsDialog({
   dbGeneratedSql, setDbGeneratedSql, dbDatasetName, setDbDatasetName,
   dbExecuteMode, setDbExecuteMode, handleExecuteDbSql, isExecutingDbSql,
   handleSaveDatabaseConfig,
+  savedDbConnections, selectedDbSourceIds,
+  handleToggleSavedDbSourceSelection, handleApplySavedDbConnection, handleDeleteSavedDbConnection,
+  deletingDbConnectionId,
   isLoadingKnowledgeConfig, loadKnowledgeConfig,
   knowledgeBaseEnabled, setKnowledgeBaseEnabled,
   yutuRecords, currentUser, isRecordingKnowledge,
@@ -164,6 +197,106 @@ export function SystemSettingsDialog({
         return parsed.toLocaleString("zh-CN", { hour12: false });
       })()
     : "-";
+
+  const [expandedDbGroups, setExpandedDbGroups] = useState<Record<string, boolean>>({});
+  const [pendingDeleteConnection, setPendingDeleteConnection] = useState<SavedDatabaseConnection | null>(null);
+  const dbGroupStateStorageKey = useMemo(() => {
+    const normalizedUser = String(currentUser || "default").trim() || "default";
+    return `dbGroupExpandedState:${normalizedUser}`;
+  }, [currentUser]);
+
+  const dbTypeMeta = useMemo(() => {
+    const typeMap: Record<string, { label: string; icon: string }> = {};
+    DB_TYPES.forEach((item) => {
+      typeMap[item.id] = { label: item.label, icon: item.icon };
+    });
+    return typeMap;
+  }, []);
+
+  const groupedSavedConnections = useMemo(() => {
+    const grouped: Record<string, SavedDatabaseConnection[]> = {};
+    savedDbConnections.forEach((connection) => {
+      const key = connection.dbType || "unknown";
+      if (!grouped[key]) {
+        grouped[key] = [];
+      }
+      grouped[key].push(connection);
+    });
+
+    const order = DB_TYPES.map((item) => item.id);
+    return Object.entries(grouped).sort((left, right) => {
+      const leftIndex = order.indexOf(left[0]);
+      const rightIndex = order.indexOf(right[0]);
+      const normalizedLeft = leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex;
+      const normalizedRight = rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex;
+      if (normalizedLeft !== normalizedRight) {
+        return normalizedLeft - normalizedRight;
+      }
+      return left[0].localeCompare(right[0]);
+    });
+  }, [savedDbConnections]);
+
+  const selectedDbSourceIdSet = useMemo(() => new Set(selectedDbSourceIds), [selectedDbSourceIds]);
+
+  const isGroupExpanded = (groupType: string) => {
+    if (expandedDbGroups[groupType] !== undefined) {
+      return expandedDbGroups[groupType];
+    }
+    return groupType === dbType;
+  };
+
+  const toggleDbGroup = (groupType: string) => {
+    setExpandedDbGroups((prev) => {
+      const nextValue = !(prev[groupType] ?? groupType === dbType);
+      return {
+        ...prev,
+        [groupType]: nextValue,
+      };
+    });
+  };
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      const raw = localStorage.getItem(dbGroupStateStorageKey);
+      if (!raw) {
+        setExpandedDbGroups({});
+        return;
+      }
+
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setExpandedDbGroups({});
+        return;
+      }
+
+      const normalized: Record<string, boolean> = {};
+      Object.entries(parsed as Record<string, unknown>).forEach(([key, value]) => {
+        if (typeof value === "boolean") {
+          normalized[key] = value;
+        }
+      });
+
+      setExpandedDbGroups(normalized);
+    } catch {
+      setExpandedDbGroups({});
+    }
+  }, [dbGroupStateStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      localStorage.setItem(dbGroupStateStorageKey, JSON.stringify(expandedDbGroups));
+    } catch {
+      // 忽略浏览器存储异常，保持界面可用
+    }
+  }, [dbGroupStateStorageKey, expandedDbGroups]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -448,6 +581,108 @@ export function SystemSettingsDialog({
                               测试连接
                             </Button>
                           </div>
+                          <div className="rounded-lg border p-4 space-y-3 bg-white dark:bg-gray-950">
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <div className="text-sm font-medium">已保存连接管理</div>
+                                <div className="text-xs text-gray-500 dark:text-gray-400">
+                                  共 {savedDbConnections.length} 条连接，已勾选 {selectedDbSourceIds.length} 条作为分析数据源
+                                </div>
+                              </div>
+                              <Button size="sm" variant="outline" onClick={handleSaveDatabaseConfig}>
+                                保存当前连接
+                              </Button>
+                            </div>
+
+                            {groupedSavedConnections.length === 0 ? (
+                              <div className="text-xs text-gray-500 dark:text-gray-400">
+                                当前暂无已保存连接。可先填写上方配置并点击“保存当前连接”。
+                              </div>
+                            ) : (
+                              <div className="space-y-3">
+                                {groupedSavedConnections.map(([groupType, connections]) => {
+                                  const expanded = isGroupExpanded(groupType);
+                                  const selectedCount = connections.filter((item) => selectedDbSourceIdSet.has(item.id)).length;
+                                  const typeInfo = dbTypeMeta[groupType] || {
+                                    label: groupType.toUpperCase(),
+                                    icon: "🗂️",
+                                  };
+
+                                  return (
+                                    <div key={groupType} className="rounded-md border border-gray-200 dark:border-gray-800 overflow-hidden">
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleDbGroup(groupType)}
+                                        className="w-full flex items-center justify-between px-3 py-2 bg-gray-50 dark:bg-gray-900/40 hover:bg-gray-100 dark:hover:bg-gray-900/70 transition-colors"
+                                      >
+                                        <div className="flex items-center gap-2 text-sm font-medium text-gray-800 dark:text-gray-100">
+                                          {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                                          <span>{typeInfo.icon}</span>
+                                          <span>{typeInfo.label}</span>
+                                          <span className="text-xs text-gray-500 dark:text-gray-400">({connections.length})</span>
+                                        </div>
+                                        <span className="text-xs text-gray-500 dark:text-gray-400">已选 {selectedCount} 条</span>
+                                      </button>
+
+                                      {expanded ? (
+                                        <div className="p-3 space-y-2 border-t border-gray-200 dark:border-gray-800">
+                                          {connections.map((connection) => {
+                                            const selected = selectedDbSourceIdSet.has(connection.id);
+                                            const deleting = deletingDbConnectionId === connection.id;
+                                            const endpointText =
+                                              connection.dbType === "sqlite"
+                                                ? `文件: ${connection.config.database}`
+                                                : `用户: ${connection.config.user || "(未填写)"} | ${connection.config.host || "localhost"}:${connection.config.port || "default"}/${connection.config.database}`;
+
+                                            return (
+                                              <div
+                                                key={connection.id}
+                                                className="rounded-md border border-gray-200 dark:border-gray-800 p-3 space-y-2"
+                                              >
+                                                <div className="flex items-start justify-between gap-3">
+                                                  <div className="min-w-0">
+                                                    <div className="text-sm font-medium text-gray-800 dark:text-gray-100 break-all">
+                                                      {connection.label}
+                                                    </div>
+                                                    <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 break-all">
+                                                      {endpointText}
+                                                    </div>
+                                                  </div>
+                                                  <Switch
+                                                    checked={selected}
+                                                    onCheckedChange={(checked) =>
+                                                      handleToggleSavedDbSourceSelection(connection.id, Boolean(checked))
+                                                    }
+                                                  />
+                                                </div>
+                                                <div className="flex justify-end gap-2">
+                                                  <Button
+                                                    size="sm"
+                                                    variant="outline"
+                                                    onClick={() => handleApplySavedDbConnection(connection.id)}
+                                                  >
+                                                    应用
+                                                  </Button>
+                                                  <Button
+                                                    size="sm"
+                                                    variant="destructive"
+                                                    onClick={() => setPendingDeleteConnection(connection)}
+                                                    disabled={deleting}
+                                                  >
+                                                    {deleting ? "删除中..." : "删除"}
+                                                  </Button>
+                                                </div>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
                           {dbContextSummary ? (
                             <div className="space-y-1 text-right">
                               <div className="text-xs text-emerald-600 dark:text-emerald-400">{dbContextSummary}</div>
@@ -700,6 +935,46 @@ export function SystemSettingsDialog({
             </TabsContent>
           </Tabs>
         </div>
+        <AlertDialog
+          open={Boolean(pendingDeleteConnection)}
+          onOpenChange={(open) => {
+            if (!open) {
+              setPendingDeleteConnection(null);
+            }
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>确认删除数据库连接？</AlertDialogTitle>
+              <AlertDialogDescription>
+                将删除连接“{pendingDeleteConnection?.label || ""}”，此操作不可撤销。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>取消</AlertDialogCancel>
+              <AlertDialogAction asChild>
+                <Button
+                  variant="destructive"
+                  disabled={
+                    !pendingDeleteConnection || deletingDbConnectionId === pendingDeleteConnection.id
+                  }
+                  onClick={async () => {
+                    if (!pendingDeleteConnection) {
+                      return;
+                    }
+                    const target = pendingDeleteConnection;
+                    await handleDeleteSavedDbConnection(target.id);
+                    setPendingDeleteConnection(null);
+                  }}
+                >
+                  {pendingDeleteConnection && deletingDbConnectionId === pendingDeleteConnection.id
+                    ? "删除中..."
+                    : "确认删除"}
+                </Button>
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
         <DialogFooter className="px-6 py-4 border-t justify-between">
           <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
             {systemSettingsTab === "model"

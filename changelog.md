@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.1.7 - 2026-05-04
+
+### Added (v1.1.7)
+
+- Added saved database connection management in the system settings database tab, including grouped display by database type, apply-to-current-form actions, per-source analysis toggles, and delete confirmation.
+- Added per-user persistence for expanded/collapsed database connection groups so each user keeps their preferred settings layout across refreshes.
+
+### Changed (v1.1.7)
+
+- Changed saved database connection IDs and labels to include the database username for non-SQLite sources, allowing multiple accounts on the same database instance to coexist without overwriting one another.
+- Changed the root startup banner to use the “观雨” visual identity and centered “AI-powered Customs Risk Analysis Expert” subtitle across startup modes.
+
+### Fixed (v1.1.7)
+
+- Fixed first-login data source confirmation by passing the confirmed database source IDs directly into the outgoing chat request instead of relying on immediately updated React state.
+- Fixed saved database connection deletion state so selected analysis sources and persisted UI selection are cleaned up after removal.
+
 ## v1.1.6 - 2026-05-04
 
 ### Added (v1.1.6)

@@ -210,7 +210,8 @@ const buildDatabaseConnectionId = (
   }
   const host = sanitizeDbSourceToken(config.host);
   const port = sanitizeDbSourceToken(config.port);
-  return `db_${normalizedType}_${host || "localhost"}_${port || "default"}_${dbName || "database"}`;
+  const user = sanitizeDbSourceToken(config.user);
+  return `db_${normalizedType}_${host || "localhost"}_${port || "default"}_${user || "user"}_${dbName || "database"}`;
 };
 
 const normalizeSavedDbConnections = (connections: unknown): SavedDatabaseConnection[] => {
@@ -254,7 +255,7 @@ const normalizeSavedDbConnections = (connections: unknown): SavedDatabaseConnect
     const defaultLabel =
       dbType === "sqlite"
         ? `${dbType}@${normalizedConfig.database}`
-        : `${dbType}@${normalizedConfig.host || "localhost"}:${normalizedConfig.port || "default"}/${normalizedConfig.database}`;
+        : `${dbType}@${normalizedConfig.user || "anonymous"}@${normalizedConfig.host || "localhost"}:${normalizedConfig.port || "default"}/${normalizedConfig.database}`;
 
     normalized.push({
       id: uniqueId,
@@ -820,6 +821,7 @@ export function ThreePanelInterface() {
     allowFilesOnly: false,
   });
   const [pendingSendOverrideMessage, setPendingSendOverrideMessage] = useState<string | null>(null);
+  const [deletingDbConnectionId, setDeletingDbConnectionId] = useState<string | null>(null);
 
   const selectedDatabaseSources = useMemo(() => {
     if (!savedDbConnections.length || !selectedDbSourceIds.length) {
@@ -1089,7 +1091,7 @@ export function ThreePanelInterface() {
               label:
                 normalizedType === "sqlite"
                   ? `${normalizedType}@${normalizedConfig.database}`
-                  : `${normalizedType}@${normalizedConfig.host || "localhost"}:${normalizedConfig.port || getDefaultPortForDbType(normalizedType)}/${normalizedConfig.database}`,
+                  : `${normalizedType}@${normalizedConfig.user || "anonymous"}@${normalizedConfig.host || "localhost"}:${normalizedConfig.port || getDefaultPortForDbType(normalizedType)}/${normalizedConfig.database}`,
             },
           }),
         }
@@ -1143,6 +1145,107 @@ export function ThreePanelInterface() {
     }
     prevDbTestedRef.current = isDbTested;
   }, [isDbTested, handleSaveDatabaseConfig]);
+
+  const handleApplySavedDbConnection = useCallback((connectionId: string) => {
+    const target = savedDbConnections.find((item) => item.id === connectionId);
+    if (!target) {
+      return;
+    }
+
+    handleDbTypeChange(target.dbType);
+    setDbConfig((prev) => ({
+      ...prev,
+      host: target.config.host || "localhost",
+      port: target.config.port || getDefaultPortForDbType(target.dbType),
+      user: target.config.user || "",
+      password: target.config.password || "",
+      database: target.config.database || "",
+    }));
+
+    setSelectedDbSourceIds((prev) => {
+      if (prev.includes(connectionId)) {
+        return prev;
+      }
+      return [...prev, connectionId];
+    });
+
+    setDataSourceSelection((prev) => {
+      if (prev.selectedDbSourceIds.includes(connectionId)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        selectedDbSourceIds: [...prev.selectedDbSourceIds, connectionId],
+      };
+    });
+
+    setSourceSelectionExplicit(true);
+    toast({ description: `已切换到连接: ${target.label}` });
+  }, [savedDbConnections, handleDbTypeChange, setDbConfig, toast]);
+
+  const handleToggleSavedDbSourceSelection = useCallback((connectionId: string, checked: boolean) => {
+    setSelectedDbSourceIds((prev) => {
+      const idSet = new Set(prev);
+      if (checked) {
+        idSet.add(connectionId);
+      } else {
+        idSet.delete(connectionId);
+      }
+      return Array.from(idSet);
+    });
+
+    setDataSourceSelection((prev) => {
+      const idSet = new Set(prev.selectedDbSourceIds);
+      if (checked) {
+        idSet.add(connectionId);
+      } else {
+        idSet.delete(connectionId);
+      }
+      return {
+        ...prev,
+        selectedDbSourceIds: Array.from(idSet),
+      };
+    });
+
+    setSourceSelectionExplicit(true);
+  }, []);
+
+  const handleDeleteSavedDbConnection = useCallback(async (connectionId: string) => {
+    const username = (currentUser || "default").trim() || "default";
+    const target = savedDbConnections.find((item) => item.id === connectionId);
+
+    if (!target) {
+      return;
+    }
+
+    setDeletingDbConnectionId(connectionId);
+    try {
+      const response = await fetch(API_URLS.CONFIG_DATABASES_DELETE, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, id: connectionId }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.message || "删除连接失败");
+      }
+
+      setSavedDbConnections((prev) => prev.filter((item) => item.id !== connectionId));
+      setSelectedDbSourceIds((prev) => prev.filter((id) => id !== connectionId));
+      setDataSourceSelection((prev) => ({
+        ...prev,
+        selectedDbSourceIds: prev.selectedDbSourceIds.filter((id) => id !== connectionId),
+      }));
+
+      toast({ description: `已删除连接: ${target.label}` });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除连接失败";
+      toast({ description: message, variant: "destructive" });
+    } finally {
+      setDeletingDbConnectionId(null);
+    }
+  }, [currentUser, savedDbConnections, toast]);
 
   // 智能体介绍面板状态
   const [showAgentIntro, setShowAgentIntro] = useState(false);
@@ -4367,9 +4470,21 @@ ${analysisContent}
 
     const queuedOverride = pendingSendOverrideMessage ?? undefined;
     setPendingSendOverrideMessage(null);
+
+    const shouldSendNow =
+      typeof queuedOverride === "string"
+        ? queuedOverride.trim().length > 0
+        : inputValue.trim().length > 0 || attachments.length > 0;
+
+    if (!shouldSendNow) {
+      toast({ description: "数据源选择已生效" });
+      return;
+    }
+
     void handleSendMessage(queuedOverride, {
       bypassSourceSelectionDialog: true,
       sourceSelectionConfirmed: true,
+      confirmedSelectedDbSourceIds: nextIds,
     });
   };
 
@@ -4433,13 +4548,22 @@ ${analysisContent}
     options?: {
       bypassSourceSelectionDialog?: boolean;
       sourceSelectionConfirmed?: boolean;
+      confirmedSelectedDbSourceIds?: string[];
     }
   ) => {
     const messageText = overrideMessage ?? inputValue;
     const outgoingAttachments = overrideMessage ? [] : attachments;
     if (!messageText.trim() && outgoingAttachments.length === 0) return;
 
-    const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+    const selectedSourceIdsForRequest = (() => {
+      if (options?.confirmedSelectedDbSourceIds) {
+        const availableIds = new Set(savedDbConnections.map((item) => item.id));
+        return options.confirmedSelectedDbSourceIds.filter((id) => availableIds.has(id));
+      }
+      return effectiveSelectedDbSourceIds;
+    })();
+
+    const selectedIdSet = new Set(selectedSourceIdsForRequest);
     const selectedSourcesForRequest = savedDbConnections.filter((item) => selectedIdSet.has(item.id));
     const hasDataSource = selectedSourcesForRequest.length > 0 || hasWorkspaceDataSource;
     const shouldPromptSourceSelection =
@@ -6316,6 +6440,12 @@ ${analysisContent}
         handleExecuteDbSql={handleExecuteDbSql}
         isExecutingDbSql={isExecutingDbSql}
         handleSaveDatabaseConfig={handleSaveDatabaseConfig}
+        savedDbConnections={savedDbConnections}
+        selectedDbSourceIds={selectedDbSourceIds}
+        handleToggleSavedDbSourceSelection={handleToggleSavedDbSourceSelection}
+        handleApplySavedDbConnection={handleApplySavedDbConnection}
+        handleDeleteSavedDbConnection={handleDeleteSavedDbConnection}
+        deletingDbConnectionId={deletingDbConnectionId}
         isLoadingKnowledgeConfig={isLoadingKnowledgeConfig}
         loadKnowledgeConfig={loadKnowledgeConfig}
         knowledgeBaseEnabled={knowledgeBaseEnabled}
