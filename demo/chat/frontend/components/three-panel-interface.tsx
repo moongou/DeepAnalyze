@@ -793,11 +793,14 @@ export function ThreePanelInterface() {
     dbContextSummary,
     dbKnowledgeSummary,
     dbKnowledgeUpdatedAt,
+    dbSchemaGraph,
     testConnection: handleTestConnection,
     generateSql: handleGenerateSql,
     executeSql: handleExecuteDbSql,
     isLoadingDbContext,
     loadDbContext: handleLoadDbContext,
+    isLoadingSchemaGraph,
+    loadSchemaGraph: handleLoadSchemaGraph,
     fetchDatabaseNames: handleFetchDatabaseNames,
     buildPayload: buildDbRequestPayload,
     workspaceFilesRef,
@@ -822,6 +825,7 @@ export function ThreePanelInterface() {
   });
   const [pendingSendOverrideMessage, setPendingSendOverrideMessage] = useState<string | null>(null);
   const [deletingDbConnectionId, setDeletingDbConnectionId] = useState<string | null>(null);
+  const [isGeneratingDataProfileReport, setIsGeneratingDataProfileReport] = useState(false);
 
   const selectedDatabaseSources = useMemo(() => {
     if (!savedDbConnections.length || !selectedDbSourceIds.length) {
@@ -1246,6 +1250,70 @@ export function ThreePanelInterface() {
       setDeletingDbConnectionId(null);
     }
   }, [currentUser, savedDbConnections, toast]);
+
+  const handleGenerateDataProfileReport = useCallback(async () => {
+    if (isGeneratingDataProfileReport) {
+      return;
+    }
+
+    const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+    const databaseSourcesForReport = savedDbConnections
+      .filter((connection) => selectedIdSet.has(connection.id))
+      .map((connection) => ({
+        id: connection.id,
+        label: connection.label,
+        dbType: connection.dbType,
+        config: connection.config,
+      }));
+
+    let fallbackPayload: ReturnType<typeof buildDbRequestPayload> | null = null;
+    if (!databaseSourcesForReport.length && dbConfig.database?.trim()) {
+      fallbackPayload = buildDbRequestPayload();
+    }
+
+    if (!databaseSourcesForReport.length && !fallbackPayload && workspaceFiles.length === 0) {
+      toast({ description: "请先连接数据库或上传数据文件后再生成数据探查报告", variant: "destructive" });
+      return;
+    }
+
+    setIsGeneratingDataProfileReport(true);
+    try {
+      const response = await fetch(API_URLS.DATA_PROFILE_REPORT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          username: currentUser || "default",
+          selected_database_sources: databaseSourcesForReport,
+          db_type: fallbackPayload?.db_type,
+          config: fallbackPayload?.config,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.message || payload?.detail || "数据探查报告生成失败");
+      }
+
+      await refreshWorkspace();
+      toast({ description: payload.summary || payload.message || "数据探查 SKILL 文档已生成" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "数据探查报告生成失败";
+      toast({ description: message, variant: "destructive" });
+    } finally {
+      setIsGeneratingDataProfileReport(false);
+    }
+  }, [
+    buildDbRequestPayload,
+    currentUser,
+    dbConfig.database,
+    effectiveSelectedDbSourceIds,
+    isGeneratingDataProfileReport,
+    refreshWorkspace,
+    savedDbConnections,
+    sessionId,
+    toast,
+    workspaceFiles.length,
+  ]);
 
   // 智能体介绍面板状态
   const [showAgentIntro, setShowAgentIntro] = useState(false);
@@ -5057,6 +5125,34 @@ ${analysisContent}
                 ref={treeContainerRef}
                 className="flex-1 w-full min-h-0 overflow-hidden pl-3 pr-1 py-2"
               >
+                <button
+                  type="button"
+                  onClick={handleGenerateDataProfileReport}
+                  disabled={isGeneratingDataProfileReport}
+                  className="group relative mb-5 h-20 w-full overflow-hidden rounded-md border border-cyan-300/70 bg-slate-950 text-left text-white shadow-sm transition-all hover:border-cyan-200 hover:shadow-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-70"
+                  title="生成数据探查 SKILL 文档"
+                >
+                  <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(14,165,233,0.18)_1px,transparent_1px),linear-gradient(0deg,rgba(14,165,233,0.12)_1px,transparent_1px)] bg-[size:18px_18px]" />
+                  <div className="absolute right-3 top-3 flex h-14 w-14 items-center justify-center rounded-full border border-cyan-300/60 bg-cyan-400/10">
+                    <Cpu className="h-6 w-6 text-cyan-200" />
+                    <Zap className="absolute -right-1 -top-1 h-4 w-4 text-amber-300" />
+                  </div>
+                  <div className="relative z-10 flex h-full items-center gap-3 px-4 pr-20">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-cyan-300/60 bg-cyan-300/10">
+                      {isGeneratingDataProfileReport ? (
+                        <RefreshCw className="h-5 w-5 animate-spin text-cyan-200" />
+                      ) : (
+                        <Database className="h-5 w-5 text-cyan-200" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold tracking-normal">数据探查报告</div>
+                      <div className="mt-1 truncate text-[11px] text-cyan-100/85">
+                        分析数据库关系与上传文件，生成独立 SKILL 文档
+                      </div>
+                    </div>
+                  </div>
+                </button>
                 <div
                   className={`mb-2 rounded border border-dashed flex items-center justify-center h-20 text-xs select-none ${dropActive
                     ? "bg-blue-50 border-blue-300 text-blue-600"
@@ -5100,7 +5196,7 @@ ${analysisContent}
                 {workspaceTree ? (
                   <Tree
                     width={treeSize.w || "100%"}
-                    height={Math.max(600, treeSize.h - 110)}
+                    height={Math.max(600, treeSize.h - 205)}
                     data={toArbor(workspaceTree).children || []}
                     initialOpenState={expanded}
                     indent={14}
@@ -6421,8 +6517,11 @@ ${analysisContent}
         dbContextSummary={dbContextSummary}
         dbKnowledgeSummary={dbKnowledgeSummary}
         dbKnowledgeUpdatedAt={dbKnowledgeUpdatedAt}
+        dbSchemaGraph={dbSchemaGraph}
         isLoadingDbContext={isLoadingDbContext}
         handleLoadDbContext={handleLoadDbContext}
+        isLoadingSchemaGraph={isLoadingSchemaGraph}
+        handleLoadSchemaGraph={handleLoadSchemaGraph}
         handleFetchDatabaseNames={handleFetchDatabaseNames}
         handleTestConnection={handleTestConnection}
         isTestingDb={isTestingDb}

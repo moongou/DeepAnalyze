@@ -1268,8 +1268,10 @@ _V1_REWRITE = {
     "/v1/database/test":          "/api/db/test",
     "/v1/database/list":          "/api/db/list-databases",
     "/v1/database/context/load":  "/api/db/context/load",
+    "/v1/database/schema/graph":  "/api/db/schema/graph",
     "/v1/database/generate-sql":  "/api/db/generate-sql",
     "/v1/database/execute":       "/api/db/execute",
+    "/v1/data/profile-report":     "/api/data/profile-report",
     "/v1/export/report":          "/export/report",
     "/v1/chat/guidance":          "/api/chat/guidance",
     "/v1/code/execute":           "/execute",
@@ -6211,6 +6213,344 @@ def build_database_context_snapshot(db_type: str, config: dict) -> Dict[str, Any
     }
 
 
+def _schema_table_id(schema_name: Optional[str], table_name: str) -> str:
+    schema_part = str(schema_name or "default").strip() or "default"
+    table_part = str(table_name or "table").strip() or "table"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{schema_part}.{table_part}").strip("_")
+
+
+def build_database_schema_graph(db_type: str, config: dict) -> Dict[str, Any]:
+    """Build ChartDB-style table/relationship graph metadata from a live database."""
+    normalized_type = normalize_db_type(db_type)
+    config = config or {}
+    database_name = str(config.get("database", "") or "").strip()
+
+    if normalized_type != "sqlite" and not database_name:
+        raise ValueError("请先选择数据库名称后再生成关系图")
+
+    from sqlalchemy import inspect
+
+    engine = build_db_engine(normalized_type, config)
+    inspector = inspect(engine)
+
+    source_label = (
+        f"{normalized_type}@{database_name}"
+        if normalized_type == "sqlite"
+        else f"{normalized_type}@{str(config.get('host', 'localhost') or 'localhost').strip()}:{str(config.get('port', '') or DB_DEFAULT_PORTS.get(normalized_type, '')).strip() or DB_DEFAULT_PORTS.get(normalized_type, '')}/{database_name}"
+    )
+
+    table_targets: List[Tuple[Optional[str], str]] = []
+    if normalized_type in ("postgresql", "mssql", "oracle"):
+        try:
+            schema_names = inspector.get_schema_names()
+        except Exception:
+            schema_names = []
+
+        for schema_name in schema_names:
+            if not schema_name:
+                continue
+            lower_schema = str(schema_name).lower()
+            upper_schema = str(schema_name).upper()
+            if normalized_type == "postgresql" and lower_schema in {"pg_catalog", "information_schema", "pg_toast"}:
+                continue
+            if normalized_type == "mssql" and upper_schema in {"INFORMATION_SCHEMA", "SYS"}:
+                continue
+            if normalized_type == "oracle" and upper_schema in {"SYS", "SYSTEM", "XDB", "MDSYS", "CTXSYS", "WMSYS"}:
+                continue
+            try:
+                schema_tables = inspector.get_table_names(schema=schema_name)
+            except Exception:
+                schema_tables = []
+            for table_name in schema_tables:
+                table_targets.append((schema_name, table_name))
+    else:
+        try:
+            base_tables = inspector.get_table_names()
+        except Exception:
+            base_tables = []
+        for table_name in base_tables:
+            table_targets.append((None, table_name))
+
+    table_targets = sorted(table_targets, key=lambda item: ((item[0] or ""), item[1]))
+    tables: List[Dict[str, Any]] = []
+    relationships: List[Dict[str, Any]] = []
+    table_id_lookup: Dict[Tuple[str, str], str] = {}
+
+    with engine.connect() as conn:
+        for schema_name, table_name in table_targets:
+            table_id = _schema_table_id(schema_name, table_name)
+            schema_key = str(schema_name or "").strip()
+            table_id_lookup[(schema_key, table_name)] = table_id
+            display_name = f"{schema_name}.{table_name}" if schema_name else table_name
+
+            try:
+                columns = inspector.get_columns(table_name, schema=schema_name)
+            except Exception:
+                columns = []
+
+            try:
+                pk_info = inspector.get_pk_constraint(table_name, schema=schema_name) or {}
+                pk_columns = set(pk_info.get("constrained_columns") or [])
+            except Exception:
+                pk_columns = set()
+
+            row_count: Optional[int] = None
+            try:
+                qualified_table_name = _build_qualified_table_name(schema_name, table_name, normalized_type)
+                row_count_value = conn.execute(text(f"SELECT COUNT(*) AS cnt FROM {qualified_table_name}")).scalar()
+                row_count = int(row_count_value) if row_count_value is not None else 0
+            except Exception:
+                row_count = None
+
+            table_columns = []
+            for column in columns:
+                column_name = str(column.get("name") or "")
+                table_columns.append(
+                    {
+                        "name": column_name,
+                        "type": str(column.get("type") or ""),
+                        "nullable": bool(column.get("nullable", True)),
+                        "default": str(column.get("default") or ""),
+                        "definition": str(column.get("comment") or column.get("definition") or ""),
+                        "is_pk": column_name in pk_columns,
+                    }
+                )
+
+            tables.append(
+                {
+                    "id": table_id,
+                    "schema": schema_key,
+                    "name": table_name,
+                    "display_name": display_name,
+                    "row_count": row_count,
+                    "columns": table_columns,
+                }
+            )
+
+        for schema_name, table_name in table_targets:
+            source_table_id = table_id_lookup.get((str(schema_name or "").strip(), table_name))
+            if not source_table_id:
+                continue
+
+            try:
+                foreign_keys = inspector.get_foreign_keys(table_name, schema=schema_name)
+            except Exception:
+                foreign_keys = []
+
+            for index, foreign_key in enumerate(foreign_keys or []):
+                referred_table = str(foreign_key.get("referred_table") or "").strip()
+                if not referred_table:
+                    continue
+                referred_schema = foreign_key.get("referred_schema")
+                referred_schema_key = str(referred_schema if referred_schema is not None else (schema_name or "")).strip()
+                target_table_id = table_id_lookup.get((referred_schema_key, referred_table))
+                if not target_table_id and not referred_schema_key:
+                    target_table_id = table_id_lookup.get(("", referred_table))
+                if not target_table_id:
+                    continue
+
+                constrained_columns = [str(item) for item in (foreign_key.get("constrained_columns") or [])]
+                referred_columns = [str(item) for item in (foreign_key.get("referred_columns") or [])]
+                fk_name = str(foreign_key.get("name") or "").strip()
+                relationship_id = re.sub(
+                    r"[^A-Za-z0-9_.-]+",
+                    "_",
+                    fk_name or f"fk_{source_table_id}_{target_table_id}_{index}",
+                ).strip("_")
+
+                relationships.append(
+                    {
+                        "id": relationship_id,
+                        "name": fk_name or relationship_id,
+                        "source_table_id": source_table_id,
+                        "source_columns": constrained_columns,
+                        "target_table_id": target_table_id,
+                        "target_columns": referred_columns,
+                        "relationship_type": "many_to_one",
+                    }
+                )
+
+    engine.dispose()
+
+    return {
+        "source_label": source_label,
+        "db_type": normalized_type,
+        "database": database_name,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "tables": tables,
+        "relationships": relationships,
+        "summary": f"{source_label} 共 {len(tables)} 张表、{len(relationships)} 条外键关系",
+    }
+
+
+def _profile_workspace_file(file_path: Path, workspace_root: Path) -> Dict[str, Any]:
+    relative_path = str(file_path.relative_to(workspace_root))
+    profile: Dict[str, Any] = {
+        "name": file_path.name,
+        "path": relative_path,
+        "size": file_path.stat().st_size if file_path.exists() else 0,
+        "extension": file_path.suffix.lower().lstrip("."),
+        "status": "listed",
+        "columns": [],
+        "row_count_sampled": None,
+    }
+
+    extension = file_path.suffix.lower()
+    try:
+        if extension in {".csv", ".tsv", ".txt"}:
+            separator = "\t" if extension == ".tsv" else ","
+            df = pd.read_csv(file_path, nrows=1000, sep=separator)
+        elif extension in {".xlsx", ".xls"}:
+            df = pd.read_excel(file_path, nrows=1000)
+        elif extension == ".json":
+            df = pd.read_json(file_path)
+            if len(df) > 1000:
+                df = df.head(1000)
+        else:
+            return profile
+
+        profile["status"] = "profiled"
+        profile["row_count_sampled"] = int(len(df))
+        profile["column_count"] = int(len(df.columns))
+        profile["columns"] = [
+            {
+                "name": str(column),
+                "dtype": str(df[column].dtype),
+                "non_null_sampled": int(df[column].notna().sum()),
+                "null_sampled": int(df[column].isna().sum()),
+                "sample_values": [str(value)[:80] for value in df[column].dropna().head(3).tolist()],
+            }
+            for column in df.columns[:80]
+        ]
+    except Exception as exc:
+        profile["status"] = "profile_failed"
+        profile["error"] = str(exc)[:240]
+    return profile
+
+
+def _collect_workspace_file_profiles(session_id: str, username: str) -> List[Dict[str, Any]]:
+    workspace_root = Path(get_session_workspace(session_id, username)).resolve()
+    profiles: List[Dict[str, Any]] = []
+    excluded_dirs = {"generated", ".lib", "__pycache__"}
+
+    for file_path in sorted(workspace_root.rglob("*")):
+        if not file_path.is_file():
+            continue
+        relative_parts = file_path.relative_to(workspace_root).parts
+        if any(part in excluded_dirs or part.startswith(".") for part in relative_parts):
+            continue
+        profiles.append(_profile_workspace_file(file_path, workspace_root))
+        if len(profiles) >= 30:
+            break
+    return profiles
+
+
+def _build_data_profile_skill_markdown(
+    username: str,
+    session_id: str,
+    db_graphs: List[Dict[str, Any]],
+    file_profiles: List[Dict[str, Any]],
+) -> str:
+    generated_at = datetime.now().isoformat(timespec="seconds")
+    lines: List[str] = [
+        "# Data Exploration SKILL",
+        "",
+        "## Purpose",
+        "",
+        "This SKILL captures the current data landscape for subsequent customs risk analysis. Use it before analysis planning, SQL generation, feature engineering, anomaly detection, and report writing.",
+        "",
+        "## Runtime Context",
+        "",
+        f"- User: {username or 'default'}",
+        f"- Session: {session_id or 'default'}",
+        f"- Generated at: {generated_at}",
+        "",
+        "## Database Sources",
+        "",
+    ]
+
+    if db_graphs:
+        for graph in db_graphs:
+            lines.extend(
+                [
+                    f"### {graph.get('source_label', 'database')}",
+                    "",
+                    f"- Type: {graph.get('db_type', '-')}",
+                    f"- Tables: {len(graph.get('tables', []) or [])}",
+                    f"- Relationships: {len(graph.get('relationships', []) or [])}",
+                    "",
+                ]
+            )
+            for table in (graph.get("tables", []) or [])[:20]:
+                columns = table.get("columns", []) or []
+                pk_columns = [col.get("name") for col in columns if col.get("is_pk")]
+                key_columns = ", ".join(str(col.get("name")) for col in columns[:12])
+                lines.append(
+                    f"- `{table.get('display_name') or table.get('name')}`: rows={table.get('row_count', 'unknown')}, columns={len(columns)}, pk={', '.join(pk_columns) or '-'}, key fields={key_columns or '-'}"
+                )
+            if graph.get("relationships"):
+                lines.extend(["", "Relationships:"])
+                table_names = {table.get("id"): table.get("display_name") or table.get("name") for table in graph.get("tables", []) or []}
+                for relationship in (graph.get("relationships", []) or [])[:30]:
+                    source_name = table_names.get(relationship.get("source_table_id"), relationship.get("source_table_id"))
+                    target_name = table_names.get(relationship.get("target_table_id"), relationship.get("target_table_id"))
+                    lines.append(
+                        f"- `{source_name}`.{','.join(relationship.get('source_columns', []) or [])} -> `{target_name}`.{','.join(relationship.get('target_columns', []) or [])}"
+                    )
+            lines.append("")
+    else:
+        lines.extend(["- No live database source was available for this report.", ""])
+
+    lines.extend(["## Uploaded / Workspace Files", ""])
+    if file_profiles:
+        for profile in file_profiles:
+            lines.extend(
+                [
+                    f"### {profile.get('path')}",
+                    "",
+                    f"- Size: {profile.get('size', 0)} bytes",
+                    f"- Type: {profile.get('extension') or '-'}",
+                    f"- Profile status: {profile.get('status')}",
+                ]
+            )
+            if profile.get("row_count_sampled") is not None:
+                lines.append(f"- Sampled rows: {profile.get('row_count_sampled')}")
+            columns = profile.get("columns", []) or []
+            if columns:
+                lines.append("- Columns:")
+                for column in columns[:30]:
+                    sample_values = ", ".join(column.get("sample_values", []) or [])
+                    lines.append(
+                        f"  - `{column.get('name')}` ({column.get('dtype')}), non-null sample={column.get('non_null_sampled')}, examples={sample_values or '-'}"
+                    )
+            if profile.get("error"):
+                lines.append(f"- Profiling note: {profile.get('error')}")
+            lines.append("")
+    else:
+        lines.extend(["- No user-uploaded workspace data files were detected.", ""])
+
+    lines.extend(
+        [
+            "## Analysis Contract",
+            "",
+            "When analyzing this workspace:",
+            "",
+            "1. Prefer the database relationship graph for join planning and entity grain decisions.",
+            "2. Treat table primary keys, foreign keys, row counts, and high-null columns as first-order data quality signals.",
+            "3. Reconcile uploaded files with database entities before feature engineering; identify duplicate keys, missing periods, and inconsistent code mappings.",
+            "4. For customs risk analysis, prioritize import/export主体、商品编码、贸易方式、原产地/目的地、申报价格、数量、税则、许可证件、物流路径 and time-window anomalies.",
+            "5. Before producing final conclusions, record assumptions about table joins, missing values, and derived fields.",
+            "",
+            "## Suggested Next Prompts",
+            "",
+            "- 基于 Data Exploration SKILL，识别当前数据中最适合开展风险画像的主表和关联表。",
+            "- 根据字段完整性、关系图和样本值，为该数据集设计走私违规、逃证逃税、安全准入风险特征。",
+            "- 生成一份分阶段分析计划：数据校验、指标构造、异常发现、证据链整理、报告输出。",
+        ]
+    )
+    return "\n".join(lines).strip() + "\n"
+
+
 @app.post("/api/db/test")
 async def test_db_connection(body: dict = Body(...)):
     """测试数据库连接"""
@@ -6295,6 +6635,82 @@ async def load_db_context_into_session(body: dict = Body(...)):
     except Exception as e:
         print(f"DB Context Load Error: {e}")
         return {"success": False, "message": format_db_error(e, body.get("db_type"))}
+
+
+@app.post("/api/db/schema/graph")
+async def load_db_schema_graph(body: dict = Body(...)):
+    """返回数据库表/字段/外键关系图，用于前端可视化。"""
+    try:
+        db_type = body.get("db_type")
+        config = body.get("config", {})
+        graph = build_database_schema_graph(db_type, config)
+        return {"success": True, "graph": graph, "message": graph.get("summary", "关系图已生成")}
+    except Exception as e:
+        print(f"DB Schema Graph Error: {e}")
+        return {"success": False, "message": format_db_error(e, body.get("db_type"))}
+
+
+@app.post("/api/data/profile-report")
+async def create_data_profile_report(body: dict = Body(...)):
+    """生成当前数据库与 workspace 文件的数据探查 SKILL 文档。"""
+    try:
+        session_id = str(body.get("session_id", "default") or "default")
+        username = str(body.get("username", "default") or "default")
+        selected_database_sources = body.get("selected_database_sources", [])
+
+        db_graphs: List[Dict[str, Any]] = []
+        source_candidates: List[Dict[str, Any]] = []
+        if isinstance(selected_database_sources, list):
+            source_candidates.extend([item for item in selected_database_sources if isinstance(item, dict)])
+
+        db_type = body.get("db_type")
+        config = body.get("config")
+        if db_type and isinstance(config, dict):
+            source_candidates.append({"dbType": db_type, "config": config})
+
+        seen_sources = set()
+        for source in source_candidates[:5]:
+            source_db_type = source.get("dbType") or source.get("db_type")
+            source_config = source.get("config", {}) if isinstance(source.get("config", {}), dict) else {}
+            source_key = json.dumps({"db_type": source_db_type, "config": source_config}, sort_keys=True, ensure_ascii=False)
+            if source_key in seen_sources:
+                continue
+            seen_sources.add(source_key)
+            try:
+                db_graphs.append(build_database_schema_graph(source_db_type, source_config))
+            except Exception as graph_error:
+                db_graphs.append(
+                    {
+                        "source_label": source.get("label") or str(source_db_type or "database"),
+                        "db_type": source_db_type,
+                        "tables": [],
+                        "relationships": [],
+                        "error": format_db_error(graph_error, source_db_type),
+                    }
+                )
+
+        file_profiles = _collect_workspace_file_profiles(session_id, username)
+        markdown = _build_data_profile_skill_markdown(username, session_id, db_graphs, file_profiles)
+
+        workspace_dir = get_session_workspace(session_id, username)
+        generated_dir = Path(workspace_dir) / "generated"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+        base_name = f"Data_Exploration_SKILL_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        md_path = _save_md(markdown, base_name, str(generated_dir))
+        file_url = build_download_url(f"{username}/{session_id}/generated/{Path(md_path).name}")
+
+        return {
+            "success": True,
+            "message": "数据探查 SKILL 文档已生成",
+            "filename": Path(md_path).name,
+            "file_url": file_url,
+            "database_source_count": len(db_graphs),
+            "file_count": len(file_profiles),
+            "summary": f"已整理 {len(db_graphs)} 个数据库来源、{len(file_profiles)} 个工作区文件",
+        }
+    except Exception as e:
+        print(f"Data Profile Report Error: {e}")
+        return {"success": False, "message": str(e)}
 
 
 @app.post("/api/db/generate-sql")

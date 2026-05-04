@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.1.8 - 2026-05-04
+
+### Added (v1.1.8)
+
+- Added a ChartDB-inspired database schema relationship visualization flow, including backend table/field/foreign-key graph extraction and a frontend topology dialog for browsing tables, columns, primary keys, row counts, and join paths.
+- Added a data exploration report action above the workspace upload area that profiles selected database sources and uploaded workspace files, then generates an independent `Data_Exploration_SKILL_*.md` document for follow-up analysis.
+
+### Changed (v1.1.8)
+
+- Changed the workspace upload area layout to reserve a dedicated technology-styled data exploration action zone above the root upload drop target.
+
 ## v1.1.7 - 2026-05-04
 
 ### Added (v1.1.7)

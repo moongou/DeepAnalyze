@@ -23,6 +23,7 @@ import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/componen
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MODEL_PROVIDER_PRESETS, parseModelHeadersInput, type ModelProviderConfig } from "@/lib/config";
 import { Database, RefreshCw, Sparkles, Play, ChevronDown, ChevronRight } from "lucide-react";
+import { DatabaseRelationshipDialog } from "./DatabaseRelationshipDialog";
 
 interface DbConfig {
   host: string;
@@ -99,8 +100,11 @@ interface SystemSettingsDialogProps {
   dbContextSummary: string;
   dbKnowledgeSummary: string;
   dbKnowledgeUpdatedAt: string | null;
+  dbSchemaGraph: any | null;
   isLoadingDbContext: boolean;
   handleLoadDbContext: () => void;
+  isLoadingSchemaGraph: boolean;
+  handleLoadSchemaGraph: () => void;
   handleFetchDatabaseNames: () => void;
   handleTestConnection: () => void;
   isTestingDb: boolean;
@@ -168,7 +172,8 @@ export function SystemSettingsDialog({
   modelTestStatus, availableModels, analysisStrategy, temperature,
   dbType, handleDbTypeChange, dbConfig, setDbConfig, getDefaultPort,
   availableDatabaseNames, isLoadingDatabaseNames, databaseListError,
-  dbContextSummary, dbKnowledgeSummary, dbKnowledgeUpdatedAt, isLoadingDbContext, handleLoadDbContext, handleFetchDatabaseNames,
+  dbContextSummary, dbKnowledgeSummary, dbKnowledgeUpdatedAt, dbSchemaGraph,
+  isLoadingDbContext, handleLoadDbContext, isLoadingSchemaGraph, handleLoadSchemaGraph, handleFetchDatabaseNames,
   handleTestConnection, isTestingDb, isDbTested,
   dbPrompt, setDbPrompt, handleGenerateSql, isGeneratingSql,
   dbGeneratedSql, setDbGeneratedSql, dbDatasetName, setDbDatasetName,
@@ -200,6 +205,7 @@ export function SystemSettingsDialog({
 
   const [expandedDbGroups, setExpandedDbGroups] = useState<Record<string, boolean>>({});
   const [pendingDeleteConnection, setPendingDeleteConnection] = useState<SavedDatabaseConnection | null>(null);
+  const [showRelationshipDialog, setShowRelationshipDialog] = useState(false);
   const dbGroupStateStorageKey = useMemo(() => {
     const normalizedUser = String(currentUser || "default").trim() || "default";
     return `dbGroupExpandedState:${normalizedUser}`;
@@ -299,6 +305,7 @@ export function SystemSettingsDialog({
   }, [dbGroupStateStorageKey, expandedDbGroups]);
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="dialog-page-like max-w-none w-auto h-auto p-0 overflow-hidden flex flex-col">
         <DialogHeader className="px-6 py-4 border-b">
@@ -563,6 +570,18 @@ export function SystemSettingsDialog({
                             </div>
                           </div>
                           <div className="flex gap-2 justify-end">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setShowRelationshipDialog(true);
+                                handleLoadSchemaGraph();
+                              }}
+                              disabled={isLoadingSchemaGraph || !isDbTested}
+                            >
+                              {isLoadingSchemaGraph ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                              表关系可视化
+                            </Button>
                             <Button
                               variant="outline"
                               size="sm"
@@ -1003,5 +1022,13 @@ export function SystemSettingsDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    <DatabaseRelationshipDialog
+      open={showRelationshipDialog}
+      onOpenChange={setShowRelationshipDialog}
+      graph={dbSchemaGraph}
+      loading={isLoadingSchemaGraph}
+      onRefresh={handleLoadSchemaGraph}
+    />
+    </>
   );
 }

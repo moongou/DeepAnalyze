@@ -53,6 +53,7 @@ export function useDatabase({ sessionId, currentUser, modelProviderConfig, onRef
   const [dbContextSummary, setDbContextSummary] = useState("");
   const [dbKnowledgeSummary, setDbKnowledgeSummary] = useState("");
   const [dbKnowledgeUpdatedAt, setDbKnowledgeUpdatedAt] = useState<string | null>(null);
+  const [dbSchemaGraph, setDbSchemaGraph] = useState<any | null>(null);
 
   const workspaceFilesRef = useRef<{ name: string }[]>([]);
 
@@ -307,8 +308,34 @@ export function useDatabase({ sessionId, currentUser, modelProviderConfig, onRef
     },
   });
 
+  const loadSchemaGraphMutation = useMutation({
+    mutationFn: async () => {
+      const payload = buildPayload();
+      if (!payload) throw new Error("invalid_payload");
+
+      const res = await fetch(API_URLS.DB_SCHEMA_GRAPH, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.message || data.detail || "关系图生成失败");
+      return data;
+    },
+    onSuccess: (data) => {
+      setDbSchemaGraph(data.graph || null);
+      toast({ description: data.message || "数据库表关系图已生成" });
+    },
+    onError: (error) => {
+      if (error.message !== "invalid_payload") {
+        toast({ description: `数据库关系图生成失败: ${error.message}`, variant: "destructive" });
+      }
+    },
+  });
+
   useEffect(() => {
     setIsDbTested(false);
+    setDbSchemaGraph(null);
   }, [dbConfig, dbType]);
 
   useEffect(() => {
@@ -351,6 +378,10 @@ export function useDatabase({ sessionId, currentUser, modelProviderConfig, onRef
     if (!loadDbContextMutation.isPending) loadDbContextMutation.mutate();
   }, [loadDbContextMutation]);
 
+  const loadSchemaGraph = useCallback(() => {
+    if (!loadSchemaGraphMutation.isPending) loadSchemaGraphMutation.mutate();
+  }, [loadSchemaGraphMutation]);
+
   return {
     showDialog, setShowDialog,
     dbType, setDbType: handleDbTypeChange,
@@ -369,9 +400,12 @@ export function useDatabase({ sessionId, currentUser, modelProviderConfig, onRef
     dbContextSummary,
     dbKnowledgeSummary,
     dbKnowledgeUpdatedAt,
+    dbSchemaGraph,
     testConnection, generateSql, executeSql,
     isLoadingDbContext: loadDbContextMutation.isPending,
     loadDbContext,
+    isLoadingSchemaGraph: loadSchemaGraphMutation.isPending,
+    loadSchemaGraph,
     fetchDatabaseNames,
     buildPayload,
     workspaceFilesRef,

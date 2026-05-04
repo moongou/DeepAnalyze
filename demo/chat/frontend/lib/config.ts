@@ -260,8 +260,10 @@ export const API_CONFIG = {
     DB_TEST: "/v1/database/test",
     DB_LIST: "/v1/database/list",
     DB_CONTEXT_LOAD: "/v1/database/context/load",
+    DB_SCHEMA_GRAPH: "/v1/database/schema/graph",
     DB_GENERATE_SQL: "/v1/database/generate-sql",
     DB_EXECUTE: "/v1/database/execute",
+    DATA_PROFILE_REPORT: "/v1/data/profile-report",
 
     // 导出报告
     EXPORT_REPORT: "/v1/export/report",
@@ -355,8 +357,10 @@ export const API_URLS = {
   DB_TEST: buildApiUrl(API_CONFIG.ENDPOINTS.DB_TEST),
   DB_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.DB_LIST),
   DB_CONTEXT_LOAD: buildApiUrl(API_CONFIG.ENDPOINTS.DB_CONTEXT_LOAD),
+  DB_SCHEMA_GRAPH: buildApiUrl(API_CONFIG.ENDPOINTS.DB_SCHEMA_GRAPH),
   DB_GENERATE_SQL: buildApiUrl(API_CONFIG.ENDPOINTS.DB_GENERATE_SQL),
   DB_EXECUTE: buildApiUrl(API_CONFIG.ENDPOINTS.DB_EXECUTE),
+  DATA_PROFILE_REPORT: buildApiUrl(API_CONFIG.ENDPOINTS.DATA_PROFILE_REPORT),
 
   // 导出
   EXPORT_REPORT: buildApiUrl(API_CONFIG.ENDPOINTS.EXPORT_REPORT),
