@@ -15,6 +15,7 @@
 - Changed chat prompt construction to use compact core rules + selective modules (`strategy`, `mode`, `language`, `report`, `DB source`) with size trimming.
 - Changed session database context usage from full inline payloads to summary + retrieval snippets to reduce token pressure.
 - Changed frontend `useDatabase` state flow to persist and expose knowledge summary/update timestamp after context import.
+- Changed repository hygiene by ignoring local `.hintrc` workspace hints to avoid non-runtime config noise in git status.
 
 ### Fixed (v1.1.6)
 
