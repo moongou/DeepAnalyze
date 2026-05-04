@@ -7,7 +7,7 @@ import {
   oneLight,
 } from "react-syntax-highlighter/dist/esm/styles/prism";
 import Editor from "@monaco-editor/react";
-import { useState, useRef, useEffect, useCallback, memo } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
 import { configureMonaco } from "@/lib/monaco-config";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -106,6 +107,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 
 interface Message {
   id: string;
@@ -131,6 +133,24 @@ interface WorkspaceFile {
   icon: string;
   download_url: string;
   preview_url?: string;
+}
+
+interface SavedDatabaseConnection {
+  id: string;
+  dbType: string;
+  label: string;
+  config: {
+    host?: string;
+    port?: string;
+    user?: string;
+    password?: string;
+    database: string;
+  };
+}
+
+interface DataSourceSelectionState {
+  selectedDbSourceIds: string[];
+  allowFilesOnly: boolean;
 }
 
 type WorkspaceNode = {
@@ -160,6 +180,99 @@ const createClientId = () =>
 
 const MODEL_PROVIDER_STORE_KEY = "modelProviderStore";
 const ANALYSIS_LANGUAGE_STORE_KEY = "analysisLanguage";
+const LEGACY_DB_SETTINGS_STORE_KEY = "systemDbSettings";
+
+const getUserDbSettingsStorageKey = (username?: string | null) => {
+  const normalized = String(username || "default").trim() || "default";
+  return `systemDbSettings:${normalized}`;
+};
+
+const getUserDataSourceSelectionStorageKey = (username?: string | null) => {
+  const normalized = String(username || "default").trim() || "default";
+  return `dataSourceSelection:${normalized}`;
+};
+
+const sanitizeDbSourceToken = (value: unknown) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+const buildDatabaseConnectionId = (
+  dbType: string,
+  config: Record<string, unknown>
+) => {
+  const normalizedType = normalizeDbTypeForRequest(dbType);
+  const dbName = sanitizeDbSourceToken(config.database);
+  if (normalizedType === "sqlite") {
+    return `db_${normalizedType}_${dbName || "local"}`;
+  }
+  const host = sanitizeDbSourceToken(config.host);
+  const port = sanitizeDbSourceToken(config.port);
+  return `db_${normalizedType}_${host || "localhost"}_${port || "default"}_${dbName || "database"}`;
+};
+
+const normalizeSavedDbConnections = (connections: unknown): SavedDatabaseConnection[] => {
+  if (!Array.isArray(connections)) {
+    return [];
+  }
+
+  const normalized: SavedDatabaseConnection[] = [];
+  const seenIds = new Set<string>();
+
+  connections.forEach((raw, index) => {
+    if (!raw || typeof raw !== "object") {
+      return;
+    }
+
+    const source = raw as Record<string, unknown>;
+    const dbType = normalizeDbTypeForRequest(String(source.dbType || source.db_type || "mysql"));
+    const sourceConfig =
+      source.config && typeof source.config === "object"
+        ? (source.config as Record<string, unknown>)
+        : {};
+
+    const normalizedConfig = {
+      host: String(sourceConfig.host || "").trim(),
+      port: String(sourceConfig.port || "").trim(),
+      user: String(sourceConfig.user || "").trim(),
+      password: String(sourceConfig.password || ""),
+      database: String(sourceConfig.database || "").trim(),
+    };
+
+    if (!normalizedConfig.database) {
+      return;
+    }
+
+    const fallbackId = buildDatabaseConnectionId(dbType, normalizedConfig as Record<string, unknown>);
+    const incomingId = String(source.id || "").trim();
+    const candidateId = incomingId || fallbackId || `db_source_${index + 1}`;
+    const uniqueId = seenIds.has(candidateId) ? `${candidateId}_${index + 1}` : candidateId;
+    seenIds.add(uniqueId);
+
+    const defaultLabel =
+      dbType === "sqlite"
+        ? `${dbType}@${normalizedConfig.database}`
+        : `${dbType}@${normalizedConfig.host || "localhost"}:${normalizedConfig.port || "default"}/${normalizedConfig.database}`;
+
+    normalized.push({
+      id: uniqueId,
+      dbType,
+      label: String(source.label || "").trim() || defaultLabel,
+      config: normalizedConfig,
+    });
+  });
+
+  return normalized;
+};
+
+const areSameStringArrays = (left: string[], right: string[]) => {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((item, index) => item === right[index]);
+};
 
 type AnalysisLanguage = "zh-CN" | "en";
 
@@ -673,9 +786,18 @@ export function ThreePanelInterface() {
     dbDatasetName, setDbDatasetName,
     dbExecuteMode, setDbExecuteMode,
     isTestingDb, isGeneratingSql, isExecutingDbSql, isDbTested,
+    availableDatabaseNames,
+    isLoadingDatabaseNames,
+    databaseListError,
+    dbContextSummary,
+    dbKnowledgeSummary,
+    dbKnowledgeUpdatedAt,
     testConnection: handleTestConnection,
     generateSql: handleGenerateSql,
     executeSql: handleExecuteDbSql,
+    isLoadingDbContext,
+    loadDbContext: handleLoadDbContext,
+    fetchDatabaseNames: handleFetchDatabaseNames,
     buildPayload: buildDbRequestPayload,
     workspaceFilesRef,
   } = useDatabase({
@@ -684,6 +806,40 @@ export function ThreePanelInterface() {
     modelProviderConfig,
     onRefreshWorkspace: refreshWorkspace,
   });
+
+  const [savedDbConnections, setSavedDbConnections] = useState<SavedDatabaseConnection[]>([]);
+  const [selectedDbSourceIds, setSelectedDbSourceIds] = useState<string[]>([]);
+  const [sourceSelectionExplicit, setSourceSelectionExplicit] = useState(false);
+  const [showDataSourceDialog, setShowDataSourceDialog] = useState(false);
+  const [pendingDataSourceSelection, setPendingDataSourceSelection] = useState<DataSourceSelectionState>({
+    selectedDbSourceIds: [],
+    allowFilesOnly: false,
+  });
+  const [dataSourceSelection, setDataSourceSelection] = useState<DataSourceSelectionState>({
+    selectedDbSourceIds: [],
+    allowFilesOnly: false,
+  });
+  const [pendingSendOverrideMessage, setPendingSendOverrideMessage] = useState<string | null>(null);
+
+  const selectedDatabaseSources = useMemo(() => {
+    if (!savedDbConnections.length || !selectedDbSourceIds.length) {
+      return [] as SavedDatabaseConnection[];
+    }
+    const selectedIdSet = new Set(selectedDbSourceIds);
+    return savedDbConnections.filter((item) => selectedIdSet.has(item.id));
+  }, [savedDbConnections, selectedDbSourceIds]);
+
+  const hasWorkspaceDataSource = workspaceFiles.length > 0;
+
+  const effectiveSelectedDbSourceIds = useMemo(() => {
+    if (!savedDbConnections.length) {
+      return [] as string[];
+    }
+    if (savedDbConnections.length === 1) {
+      return [savedDbConnections[0].id];
+    }
+    return selectedDbSourceIds;
+  }, [savedDbConnections, selectedDbSourceIds]);
 
   useEffect(() => {
     workspaceFilesRef.current = workspaceFiles;
@@ -891,30 +1047,102 @@ export function ThreePanelInterface() {
     }
   };
 
-  const handleSaveDatabaseConfig = async () => {
+  const handleSaveDatabaseConfig = useCallback(async (options?: { silent?: boolean }) => {
+    const username = (currentUser || "default").trim() || "default";
+    const normalizedType = normalizeDbTypeForRequest(dbType);
+    const normalizedConfig = {
+      host: (dbConfig.host || "").trim() || "localhost",
+      port: (dbConfig.port || "").trim() || getDefaultPortForDbType(normalizedType),
+      user: (dbConfig.user || "").trim(),
+      password: dbConfig.password || "",
+      database: (dbConfig.database || "").trim(),
+    };
+    const connectionId = buildDatabaseConnectionId(
+      normalizedType,
+      normalizedConfig as unknown as Record<string, unknown>
+    );
+    const snapshot = { dbType: normalizedType, dbConfig: normalizedConfig };
+
     if (typeof window !== "undefined") {
       localStorage.setItem(
-        "systemDbSettings",
-        JSON.stringify({ dbType, dbConfig })
+        getUserDbSettingsStorageKey(username),
+        JSON.stringify(snapshot)
       );
+      // 兼容历史版本默认用户缓存，避免升级后丢失旧配置
+      if (username === "default") {
+        localStorage.setItem(LEGACY_DB_SETTINGS_STORE_KEY, JSON.stringify(snapshot));
+      }
     }
+
     try {
       await fetch(
-        `${API_URLS.CONFIG_DATABASES_SAVE}?username=${currentUser || "default"}`,
+        `${API_URLS.CONFIG_DATABASES_SAVE}?username=${username}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            username: currentUser || "default",
-            connection: { id: `db_${dbType}`, dbType, config: dbConfig, label: `${dbType}@${dbConfig.host}` },
+            username,
+            connection: {
+              id: connectionId,
+              dbType: normalizedType,
+              config: normalizedConfig,
+              label:
+                normalizedType === "sqlite"
+                  ? `${normalizedType}@${normalizedConfig.database}`
+                  : `${normalizedType}@${normalizedConfig.host || "localhost"}:${normalizedConfig.port || getDefaultPortForDbType(normalizedType)}/${normalizedConfig.database}`,
+            },
           }),
         }
       );
-      toast({ description: "数据库配置已保存到本地" });
+
+      const normalizedSaved = normalizeSavedDbConnections([
+        {
+          id: connectionId,
+          dbType: normalizedType,
+          config: normalizedConfig,
+        },
+      ]);
+      const savedItem = normalizedSaved[0];
+      if (savedItem) {
+        setSavedDbConnections((prev) => {
+          const existing = prev.filter((item) => item.id !== savedItem.id);
+          return [...existing, savedItem];
+        });
+        setSelectedDbSourceIds((prev) => {
+          if (prev.includes(savedItem.id)) {
+            return prev;
+          }
+          return [...prev, savedItem.id];
+        });
+        setDataSourceSelection((prev) => {
+          if (prev.selectedDbSourceIds.includes(savedItem.id)) {
+            return prev;
+          }
+          return {
+            ...prev,
+            selectedDbSourceIds: [...prev.selectedDbSourceIds, savedItem.id],
+          };
+        });
+        setSourceSelectionExplicit(true);
+      }
+
+      if (!options?.silent) {
+        toast({ description: "数据库配置已保存到本地" });
+      }
     } catch {
-      toast({ description: "数据库配置已保存到当前浏览器" });
+      if (!options?.silent) {
+        toast({ description: "数据库配置已保存到当前浏览器" });
+      }
     }
-  };
+  }, [currentUser, dbConfig, dbType, toast]);
+
+  const prevDbTestedRef = useRef(false);
+  useEffect(() => {
+    if (isDbTested && !prevDbTestedRef.current) {
+      void handleSaveDatabaseConfig({ silent: true });
+    }
+    prevDbTestedRef.current = isDbTested;
+  }, [isDbTested, handleSaveDatabaseConfig]);
 
   // 智能体介绍面板状态
   const [showAgentIntro, setShowAgentIntro] = useState(false);
@@ -1411,14 +1639,12 @@ ${analysisContent}
     setAttachments([]);
     setInputValue("");
     setSideGuidanceHistory([]);
-    setUserProjects([]);
     setProjectName("");
     setShowSaveDialog(false);
     setShowProjectManager(false);
     setShowTaskTreeDialog(false);
     setTaskTreeData(null);
     setSelectedTasks(new Set());
-    setRegisteredUsers([]);
     loadRegisteredUsers();
   };
 
@@ -1959,28 +2185,6 @@ ${analysisContent}
       }
     }
 
-    const savedDbSettings = localStorage.getItem("systemDbSettings");
-    if (savedDbSettings) {
-      try {
-        const parsed = JSON.parse(savedDbSettings);
-        const normalizedType = normalizeDbTypeForRequest(parsed?.dbType || "mysql");
-        if (typeof parsed?.dbType === "string") {
-          handleDbTypeChange(normalizedType);
-        }
-        if (parsed?.dbConfig && typeof parsed.dbConfig === "object") {
-          setDbConfig((prev) => {
-            const merged = { ...prev, ...parsed.dbConfig };
-            if (!String(merged.port || "").trim()) {
-              merged.port = getDefaultPortForDbType(normalizedType);
-            }
-            return merged;
-          });
-        }
-      } catch {
-        // ignore invalid db settings cache
-      }
-    }
-
     let hasLoadedModelProvider = false;
     const savedModelProviderStore = localStorage.getItem(MODEL_PROVIDER_STORE_KEY);
     if (savedModelProviderStore) {
@@ -2080,22 +2284,143 @@ ${analysisContent}
           }
         }
 
-        // 2. 加载数据库配置
+        // 2. 加载数据库配置与数据源选择状态
+        const applyDbSettings = (typeValue: unknown, configValue: unknown) => {
+          const normalizedType = normalizeDbTypeForRequest(String(typeValue || "mysql"));
+          handleDbTypeChange(normalizedType);
+          if (configValue && typeof configValue === "object") {
+            setDbConfig((prev) => {
+              const merged = { ...prev, ...(configValue as Record<string, unknown>) };
+              const nextPort = String(merged.port || "").trim();
+              return {
+                ...merged,
+                port: nextPort || getDefaultPortForDbType(normalizedType),
+              } as typeof prev;
+            });
+          }
+        };
+
+        const restoreDataSourceSelection = (connections: SavedDatabaseConnection[]) => {
+          if (typeof window === "undefined") {
+            if (connections.length === 1) {
+              const single = [connections[0].id];
+              setSelectedDbSourceIds(single);
+              setDataSourceSelection({ selectedDbSourceIds: single, allowFilesOnly: false });
+              setSourceSelectionExplicit(false);
+            } else {
+              setSelectedDbSourceIds([]);
+              setDataSourceSelection({ selectedDbSourceIds: [], allowFilesOnly: false });
+              setSourceSelectionExplicit(false);
+            }
+            return;
+          }
+
+          const selectionKey = getUserDataSourceSelectionStorageKey(currentUser);
+          const selectionRaw = localStorage.getItem(selectionKey);
+          let storedSelection: DataSourceSelectionState | null = null;
+
+          if (selectionRaw) {
+            try {
+              const parsed = JSON.parse(selectionRaw);
+              if (parsed && typeof parsed === "object") {
+                const parsedIds = Array.isArray(parsed.selectedDbSourceIds)
+                  ? parsed.selectedDbSourceIds.map((item: unknown) => String(item || "").trim()).filter(Boolean)
+                  : [];
+                storedSelection = {
+                  selectedDbSourceIds: parsedIds,
+                  allowFilesOnly: Boolean(parsed.allowFilesOnly),
+                };
+              }
+            } catch {
+              // ignore invalid storage payload
+            }
+          }
+
+          const availableIds = new Set(connections.map((item) => item.id));
+          const restoredIds = (storedSelection?.selectedDbSourceIds || []).filter((id) => availableIds.has(id));
+
+          if (connections.length === 1) {
+            const single = [connections[0].id];
+            setSelectedDbSourceIds(single);
+            setDataSourceSelection({ selectedDbSourceIds: single, allowFilesOnly: false });
+            setSourceSelectionExplicit(false);
+            return;
+          }
+
+          setSelectedDbSourceIds(restoredIds);
+          setDataSourceSelection({
+            selectedDbSourceIds: restoredIds,
+            allowFilesOnly: Boolean(storedSelection?.allowFilesOnly),
+          });
+          setSourceSelectionExplicit(restoredIds.length > 0 || Boolean(storedSelection?.allowFilesOnly));
+        };
+
+        let dbLoadedFromBackend = false;
         const dbRes = await fetch(
           `${API_URLS.CONFIG_DATABASES_GET}?username=${currentUser}`
         );
         if (dbRes.ok) {
           const dbData = await dbRes.json();
-          if (dbData.connections && dbData.connections.length > 0) {
-            const savedConn = dbData.connections[0];
-            if (savedConn.dbType) handleDbTypeChange(savedConn.dbType);
-            if (savedConn.config && typeof savedConn.config === "object") {
-              setDbConfig((prev) => ({
-                ...prev,
-                ...savedConn.config,
-                port: String(savedConn.config.port || prev.port),
-              }));
+          const normalizedConnections = normalizeSavedDbConnections(dbData.connections);
+          setSavedDbConnections(normalizedConnections);
+          restoreDataSourceSelection(normalizedConnections);
+
+          if (normalizedConnections.length > 0) {
+            const preferred = normalizedConnections[0];
+            applyDbSettings(preferred.dbType, preferred.config);
+            dbLoadedFromBackend = true;
+
+            if (typeof window !== "undefined") {
+              localStorage.setItem(
+                getUserDbSettingsStorageKey(currentUser),
+                JSON.stringify({
+                  dbType: preferred.dbType,
+                  dbConfig: preferred.config,
+                })
+              );
             }
+          }
+        }
+
+        if (!dbLoadedFromBackend && typeof window !== "undefined") {
+          const scopedKey = getUserDbSettingsStorageKey(currentUser);
+          let savedDbSettings = localStorage.getItem(scopedKey);
+
+          // 兼容旧版单 key 缓存：迁移到当前用户维度
+          if (!savedDbSettings) {
+            const legacy = localStorage.getItem(LEGACY_DB_SETTINGS_STORE_KEY);
+            if (legacy) {
+              savedDbSettings = legacy;
+              localStorage.setItem(scopedKey, legacy);
+            }
+          }
+
+          if (savedDbSettings) {
+            try {
+              const parsed = JSON.parse(savedDbSettings);
+              applyDbSettings(parsed?.dbType, parsed?.dbConfig);
+
+              const fallbackType = normalizeDbTypeForRequest(String(parsed?.dbType || "mysql"));
+              const fallbackConfig = parsed?.dbConfig && typeof parsed.dbConfig === "object"
+                ? (parsed.dbConfig as Record<string, unknown>)
+                : {};
+              const fallbackConnection = normalizeSavedDbConnections([
+                {
+                  id: buildDatabaseConnectionId(fallbackType, fallbackConfig),
+                  dbType: fallbackType,
+                  config: fallbackConfig,
+                },
+              ]);
+              setSavedDbConnections(fallbackConnection);
+              restoreDataSourceSelection(fallbackConnection);
+            } catch {
+              // ignore invalid per-user db settings cache
+              setSavedDbConnections([]);
+              setSelectedDbSourceIds([]);
+            }
+          } else {
+            setSavedDbConnections([]);
+            setSelectedDbSourceIds([]);
           }
         }
 
@@ -2121,6 +2446,68 @@ ${analysisContent}
       }
     })();
   }, [isLoggedIn, currentUser]);
+
+  useEffect(() => {
+    if (!savedDbConnections.length) {
+      if (selectedDbSourceIds.length > 0) {
+        setSelectedDbSourceIds([]);
+      }
+      setDataSourceSelection((prev) => {
+        if (prev.selectedDbSourceIds.length === 0 && !prev.allowFilesOnly) {
+          return prev;
+        }
+        return { selectedDbSourceIds: [], allowFilesOnly: false };
+      });
+      setSourceSelectionExplicit(false);
+      return;
+    }
+
+    if (savedDbConnections.length === 1) {
+      const singleId = [savedDbConnections[0].id];
+      if (!areSameStringArrays(selectedDbSourceIds, singleId)) {
+        setSelectedDbSourceIds(singleId);
+      }
+      setDataSourceSelection((prev) => {
+        if (areSameStringArrays(prev.selectedDbSourceIds, singleId) && !prev.allowFilesOnly) {
+          return prev;
+        }
+        return {
+          selectedDbSourceIds: singleId,
+          allowFilesOnly: false,
+        };
+      });
+      setSourceSelectionExplicit(false);
+      return;
+    }
+
+    const validIds = new Set(savedDbConnections.map((item) => item.id));
+    const sanitizedIds = selectedDbSourceIds.filter((id) => validIds.has(id));
+    if (!areSameStringArrays(selectedDbSourceIds, sanitizedIds)) {
+      setSelectedDbSourceIds(sanitizedIds);
+    }
+    setDataSourceSelection((prev) => {
+      if (areSameStringArrays(prev.selectedDbSourceIds, sanitizedIds)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        selectedDbSourceIds: sanitizedIds,
+      };
+    });
+  }, [savedDbConnections, selectedDbSourceIds]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !currentUser) {
+      return;
+    }
+    localStorage.setItem(
+      getUserDataSourceSelectionStorageKey(currentUser),
+      JSON.stringify({
+        selectedDbSourceIds: dataSourceSelection.selectedDbSourceIds,
+        allowFilesOnly: dataSourceSelection.allowFilesOnly,
+      })
+    );
+  }, [currentUser, dataSourceSelection]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2200,22 +2587,10 @@ ${analysisContent}
   }, [analysisMode]);
 
   useEffect(() => {
-    const loadRegisteredUsers = async () => {
-      try {
-        const res = await fetch(API_URLS.USERS_LIST);
-        if (res.ok) {
-          const data = await res.json();
-          setRegisteredUsers(data.users || []);
-        }
-      } catch (e) {
-        console.warn("Failed to load registered users", e);
-      }
-    };
-
     if (showAuthModal) {
       loadRegisteredUsers();
     }
-  }, [showAuthModal]);
+  }, [showAuthModal, loadRegisteredUsers]);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -2475,8 +2850,8 @@ ${analysisContent}
                   <FolderOpen className="h-3.5 w-3.5 text-gray-500" />
                 )}
               </>
-            ) : (
-              <div style={{ width: 16, height: 16 }}>
+              ) : (
+                <div className="w-4 h-4">
                 {/* 动态扩展样式，fallback 到 txt */}
                 {/* @ts-ignore */}
                 <FileIcon
@@ -3963,6 +4338,41 @@ ${analysisContent}
     toast({ description: "分析语言已切换为中文（简体）" });
   };
 
+  const cancelDataSourcePicker = () => {
+    setShowDataSourceDialog(false);
+    setPendingSendOverrideMessage(null);
+    setPendingDataSourceSelection(dataSourceSelection);
+  };
+
+  const confirmDataSourcePicker = () => {
+    const validIds = new Set(savedDbConnections.map((item) => item.id));
+    const nextIds = pendingDataSourceSelection.selectedDbSourceIds.filter((id) => validIds.has(id));
+    const hasAtLeastOneSource = nextIds.length > 0 || hasWorkspaceDataSource;
+
+    if (!hasAtLeastOneSource) {
+      toast({
+        description: "请至少选择一个数据库数据源，或先上传文件后再开始分析。",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setSelectedDbSourceIds(nextIds);
+    setDataSourceSelection({
+      selectedDbSourceIds: nextIds,
+      allowFilesOnly: pendingDataSourceSelection.allowFilesOnly,
+    });
+    setSourceSelectionExplicit(true);
+    setShowDataSourceDialog(false);
+
+    const queuedOverride = pendingSendOverrideMessage ?? undefined;
+    setPendingSendOverrideMessage(null);
+    void handleSendMessage(queuedOverride, {
+      bypassSourceSelectionDialog: true,
+      sourceSelectionConfirmed: true,
+    });
+  };
+
   const handleSendGuidance = async () => {
     if (!sideGuidanceText.trim()) return;
     setIsSubmittingGuidance(true);
@@ -4018,10 +4428,56 @@ ${analysisContent}
 
   const deselectAllTasks = useCallback(() => setSelectedTasks(new Set()), []);
 
-  const handleSendMessage = async (overrideMessage?: string) => {
+  const handleSendMessage = async (
+    overrideMessage?: string,
+    options?: {
+      bypassSourceSelectionDialog?: boolean;
+      sourceSelectionConfirmed?: boolean;
+    }
+  ) => {
     const messageText = overrideMessage ?? inputValue;
     const outgoingAttachments = overrideMessage ? [] : attachments;
     if (!messageText.trim() && outgoingAttachments.length === 0) return;
+
+    const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+    const selectedSourcesForRequest = savedDbConnections.filter((item) => selectedIdSet.has(item.id));
+    const hasDataSource = selectedSourcesForRequest.length > 0 || hasWorkspaceDataSource;
+    const shouldPromptSourceSelection =
+      !options?.bypassSourceSelectionDialog &&
+      savedDbConnections.length > 1 &&
+      !sourceSelectionExplicit;
+
+    if (shouldPromptSourceSelection) {
+      setPendingDataSourceSelection({
+        selectedDbSourceIds: effectiveSelectedDbSourceIds,
+        allowFilesOnly: dataSourceSelection.allowFilesOnly || hasWorkspaceDataSource,
+      });
+      setPendingSendOverrideMessage(overrideMessage ?? null);
+      setShowDataSourceDialog(true);
+      return;
+    }
+
+    if (!hasDataSource) {
+      toast({
+        description: "请至少选择一个数据库数据源，或先上传一个数据文件后再开始分析。",
+        variant: "destructive",
+      });
+      setSystemSettingsTab("database");
+      setShowSystemSettings(true);
+      return;
+    }
+
+    if (options?.sourceSelectionConfirmed) {
+      setSourceSelectionExplicit(true);
+    }
+
+    const databaseSourcesForRequest =
+      selectedSourcesForRequest.length > 0
+        ? selectedSourcesForRequest
+        : savedDbConnections.length === 1
+          ? [savedDbConnections[0]]
+          : [];
+
     setIsAnalyzing(true);
     const baseMessageIndex = messages.length;
     const aiMessageIndex = baseMessageIndex + 1;
@@ -4085,6 +4541,11 @@ ${analysisContent}
           analysis_mode: analysisMode,
           analysis_language: analysisLanguage,
           report_types: effectiveReportTypes,
+          selected_database_sources: databaseSourcesForRequest,
+          source_selection_explicit:
+            Boolean(options?.sourceSelectionConfirmed) ||
+            sourceSelectionExplicit ||
+            savedDbConnections.length === 1,
           model_provider: modelProviderConfig,
           ...(temperature !== null && { temperature }),
         }),
@@ -4424,6 +4885,8 @@ ${analysisContent}
                     onChange={handleFileUpload}
                     className="hidden"
                     accept="*"
+                    aria-label="上传文件"
+                    title="上传文件"
                   />
                   {/* <Button
                     variant="ghost"
@@ -4496,6 +4959,8 @@ ${analysisContent}
                     onChange={handleFileUpload}
                     className="hidden"
                     accept="*"
+                    aria-label="上传文件"
+                    title="上传文件"
                   />
                   <div className="flex items-center gap-2">
                     <Upload className="h-4 w-4" />
@@ -4945,18 +5410,12 @@ ${analysisContent}
                                 <div className="absolute inset-0 bg-gray-200 dark:bg-gray-700 rounded-full" />
 
                                 {/* 进度条 */}
-                                <div
-                                  className={`absolute inset-0 rounded-full transition-all duration-700 ${isCompleted || isActive
-                                    ? "bg-gradient-to-r from-green-400 to-green-500 shadow-sm shadow-green-500/30"
-                                    : "bg-transparent"
-                                    }`}
-                                  style={{
-                                    transform: isActive
-                                      ? "scaleX(0.5)"
-                                      : "scaleX(1)",
-                                    transformOrigin: "left",
-                                  }}
-                                />
+                                  <div
+                                    className={`absolute inset-0 rounded-full transition-all duration-700 origin-left transform ${isCompleted || isActive
+                                      ? "bg-gradient-to-r from-green-400 to-green-500 shadow-sm shadow-green-500/30"
+                                      : "bg-transparent"
+                                      } ${isActive ? "scale-x-50" : "scale-x-100"}`}
+                                  />
 
                                 {/* 流动动画 */}
                                 {isActive && (
@@ -5099,11 +5558,13 @@ ${analysisContent}
                       </div>
                     </div>
                   ) : (
-                    <div className="flex-1 min-h-0 flex flex-col p-4 editor-container overflow-hidden">
+                      <div
+                        className="flex-1 min-h-0 flex flex-col p-4 editor-container overflow-hidden"
+                        style={{ ["--editor-height" as string]: `${editorHeight}%` }}
+                      >
                       {/* Code Editor */}
                       <div
-                        className="min-h-0 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-black flex flex-col"
-                        style={{ height: `${editorHeight}%` }}
+                          className="min-h-0 h-[var(--editor-height)] border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-black flex flex-col"
                       >
                         <div className="bg-gray-50 dark:bg-gray-800 px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
                           <span className="text-xs text-gray-500 font-mono">
@@ -5169,8 +5630,7 @@ ${analysisContent}
 
                       {/* Terminal Output */}
                       <div
-                        className="min-h-0 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-900 flex flex-col"
-                        style={{ height: `${100 - editorHeight}%` }}
+                          className="min-h-0 h-[calc(100%-var(--editor-height))] border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-900 flex flex-col"
                       >
                         <div className="bg-gray-50 dark:bg-gray-800 px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
                           <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
@@ -5256,6 +5716,8 @@ ${analysisContent}
                         onChange={handleFileUpload}
                         className="hidden"
                         accept="*"
+                        aria-label="上传文件"
+                        title="上传文件"
                       />
                       <div className="flex-1 relative flex flex-col h-full min-h-0">
                         <Textarea
@@ -5514,7 +5976,11 @@ ${analysisContent}
                 />
               </div>
             ) : previewType === "pdf" ? (
-              <iframe src={previewContent} className="w-full h-full" />
+              <iframe
+                src={previewContent}
+                title={previewTitle || "文件预览"}
+                className="w-full h-full"
+              />
             ) : previewType === "text" ? (
               <div className="h-full min-h-0 p-2">
                 <div className="h-full min-h-0 border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden">
@@ -5579,6 +6045,71 @@ ${analysisContent}
                 </div>
               </div>
             )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 多数据源选择弹窗 */}
+      <Dialog
+        open={showDataSourceDialog}
+        onOpenChange={(open) => {
+          if (!open) {
+            cancelDataSourcePicker();
+          } else {
+            setShowDataSourceDialog(true);
+          }
+        }}
+      >
+        <DialogContent className="max-w-[620px]">
+          <DialogHeader>
+            <DialogTitle>选择本轮分析数据源</DialogTitle>
+            <DialogDescription>
+              检测到你已配置多个数据库连接。请为本轮分析选择一个或多个数据库数据源。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 max-h-[320px] overflow-auto pr-1">
+            {savedDbConnections.map((connection) => {
+              const checked = pendingDataSourceSelection.selectedDbSourceIds.includes(connection.id);
+              return (
+                <label
+                  key={connection.id}
+                  className="flex items-start gap-3 rounded-md border border-gray-200 dark:border-gray-700 p-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-900/40"
+                >
+                  <Checkbox
+                    checked={checked}
+                    onCheckedChange={(nextChecked) => {
+                      setPendingDataSourceSelection((prev) => {
+                        const ids = new Set(prev.selectedDbSourceIds);
+                        if (nextChecked) {
+                          ids.add(connection.id);
+                        } else {
+                          ids.delete(connection.id);
+                        }
+                        return {
+                          ...prev,
+                          selectedDbSourceIds: Array.from(ids),
+                        };
+                      });
+                    }}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-800 dark:text-gray-100 break-all">
+                      {connection.label}
+                    </div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 break-all">
+                      类型: {connection.dbType.toUpperCase()} | 用户: {connection.config.user || "(未填写)"}
+                    </div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+          <div className="rounded-md border border-dashed border-gray-300 dark:border-gray-700 p-3 text-xs text-gray-600 dark:text-gray-300">
+            文件数据源状态: {hasWorkspaceDataSource ? "已检测到已上传文件，可与数据库联合分析或单独分析。" : "当前未检测到已上传文件。"}
+          </div>
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" onClick={cancelDataSourcePicker}>取消</Button>
+            <Button onClick={confirmDataSourcePicker}>开始分析</Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -5760,6 +6291,15 @@ ${analysisContent}
         dbConfig={dbConfig}
         setDbConfig={setDbConfig}
         getDefaultPort={getDefaultPortForDbType}
+        availableDatabaseNames={availableDatabaseNames}
+        isLoadingDatabaseNames={isLoadingDatabaseNames}
+        databaseListError={databaseListError}
+        dbContextSummary={dbContextSummary}
+        dbKnowledgeSummary={dbKnowledgeSummary}
+        dbKnowledgeUpdatedAt={dbKnowledgeUpdatedAt}
+        isLoadingDbContext={isLoadingDbContext}
+        handleLoadDbContext={handleLoadDbContext}
+        handleFetchDatabaseNames={handleFetchDatabaseNames}
         handleTestConnection={handleTestConnection}
         isTestingDb={isTestingDb}
         isDbTested={isDbTested}
@@ -5812,6 +6352,13 @@ ${analysisContent}
         dbConfig={dbConfig}
         setDbConfig={setDbConfig}
         getDefaultPort={getDefaultPortForDbType}
+        availableDatabaseNames={availableDatabaseNames}
+        isLoadingDatabaseNames={isLoadingDatabaseNames}
+        databaseListError={databaseListError}
+        dbContextSummary={dbContextSummary}
+        isLoadingDbContext={isLoadingDbContext}
+        onLoadDbContext={handleLoadDbContext}
+        onFetchDatabaseNames={handleFetchDatabaseNames}
         onTestConnection={handleTestConnection}
         isTestingDb={isTestingDb}
         isDbTested={isDbTested}

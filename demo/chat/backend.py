@@ -1266,6 +1266,8 @@ _V1_REWRITE = {
     "/v1/projects/restore-files": "/api/projects/restore-files",
     "/v1/projects/restore-to-workspace": "/api/projects/restore-to-workspace",
     "/v1/database/test":          "/api/db/test",
+    "/v1/database/list":          "/api/db/list-databases",
+    "/v1/database/context/load":  "/api/db/context/load",
     "/v1/database/generate-sql":  "/api/db/generate-sql",
     "/v1/database/execute":       "/api/db/execute",
     "/v1/export/report":          "/export/report",
@@ -1444,6 +1446,9 @@ async def list_model_names(body: dict = Body(...)):
 # ---------- Side Guidance Storage ----------
 # session_id -> guidance_text
 SESSION_GUIDANCE = {}
+
+# session_id -> imported database context payload
+SESSION_DB_CONTEXT: Dict[str, Dict[str, Any]] = {}
 
 @app.post("/api/chat/guidance")
 async def set_guidance(session_id: str = Query(...), guidance: dict = Body(...)):
@@ -3090,6 +3095,77 @@ def get_system_prompt_with_fonts() -> str:
     return system_prompt_template.replace("{FONTS_DIR_PLACEHOLDER}", fonts_dir)
 
 
+def get_compact_system_prompt_with_fonts() -> str:
+    """更轻量的系统提示词，避免触发上下文长度上限。"""
+    try:
+        fonts_dir = str(get_fonts_dir())
+    except (NameError, ImportError):
+        fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/fonts")
+
+    return (
+        "你是 DeepAnalyze，负责中国海关风险分析与数据研判。"
+        "你的结论必须数据驱动、可解释、可复现，不得臆造字段或结论。\n\n"
+        "【输出协议】\n"
+        "1) 按需使用 <Analyze>/<Understand>/<Code>/<Execute>/<Answer>/<TaskTree> 标签。\n"
+        "2) 每轮应先说明思路，再执行可运行代码，再给结论。\n"
+        "3) 代码必须包含必要 import、异常处理，并打印关键中间结果。\n\n"
+        "【数据分析硬约束】\n"
+        "1) 首次代码必须先做数据探测：数据规模、字段名、字段类型、样例值。\n"
+        "2) 仅可使用真实字段；字段缺失时要明确说明并给替代分析方案。\n"
+        "3) 图表需有中文标题/坐标轴/图例，保存后给出文件路径。\n"
+        "4) 产出文件统一放在 generated 目录，并避免重复生成同类文件。\n\n"
+        "【报告交付】\n"
+        "1) 结果要体现 数据事实→推理→结论。\n"
+        "2) 最终报告按用户勾选格式交付（PDF/DOCX/PPTX）。\n"
+        "3) 禁止空壳报告；若某章节证据不足必须显式标注。\n\n"
+        "【数据库知识使用】\n"
+        "1) 优先使用数据库知识库检索上下文，不要重复粘贴整库结构。\n"
+        "2) 若用户要求全库视角，先给摘要，再分层展开关键表字段。\n\n"
+        "【工具提示】\n"
+        "- 可优先使用 agent_utils.generate_report_pdf/docx/pptx。\n"
+        f"- 中文字体目录: {fonts_dir}"
+    )
+
+
+def build_brief_yutu_context(max_items: int = 3, max_chars: int = 1000) -> str:
+    """构建精简版雨途斩棘录上下文，避免无上限扩张。"""
+    try:
+        yutu_data = search_errors(page_size=max_items)
+    except Exception as e:
+        print(f"[雨途斩棘录] 启动注入失败: {e}")
+        return ""
+
+    items = yutu_data.get("items") or []
+    if not items:
+        return ""
+
+    lines = ["\n\n【雨途斩棘录摘要（近期可复用修复经验）】"]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        err_type = _shorten_text(item.get("error_type", "未知"), 40)
+        err_msg = _shorten_text(item.get("error_message", ""), 80)
+        solution = _shorten_text(item.get("solution", ""), 120)
+        lines.append(f"- {err_type}: {err_msg} -> {solution}")
+
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[: max_chars - 1] + "…"
+    return text
+
+
+def trim_text_for_budget(text: str, max_chars: int, tail_marker: str = "\n...(已按预算截断)") -> str:
+    if len(text) <= max_chars:
+        return text
+    safe_max = max(0, max_chars - len(tail_marker))
+    return text[:safe_max] + tail_marker
+
+
+def assemble_system_prompt(modules: List[str], max_chars: int = 5600) -> str:
+    prompt = "\n\n".join(part.strip() for part in modules if str(part or "").strip())
+    return trim_text_for_budget(prompt, max_chars=max_chars)
+
+
 def bot_stream(
     messages,
     workspace,
@@ -3101,6 +3177,8 @@ def bot_stream(
     report_types=None,
     model_provider=None,
     analysis_language="zh-CN",
+    selected_database_sources=None,
+    source_selection_explicit=False,
 ):
     analysis_language = normalize_analysis_language(analysis_language)
 
@@ -3235,63 +3313,185 @@ def bot_stream(
             "\n- 如果进入报告生成阶段，必须输出以上全部选定格式，不得只生成其中一部分。"
             "\n- 生成报告前请记住该要求，并在完成分析后产出对应成果文件。"
         )
+
+    def _normalize_runtime_db_source(item: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(item, dict):
+            return None
+        raw_type = item.get("dbType") or item.get("db_type")
+        try:
+            normalized_type = normalize_db_type(raw_type)
+        except Exception:
+            return None
+        raw_config = item.get("config")
+        if not isinstance(raw_config, dict):
+            return None
+        normalized_config = {
+            "host": str(raw_config.get("host", "")).strip(),
+            "port": str(raw_config.get("port", "")).strip(),
+            "user": str(raw_config.get("user", "")).strip(),
+            "password": str(raw_config.get("password", "")),
+            "database": str(raw_config.get("database", "")).strip(),
+        }
+        if not normalized_config["database"]:
+            return None
+        return {
+            "id": str(item.get("id", "")).strip(),
+            "label": str(item.get("label", "")).strip(),
+            "db_type": normalized_type,
+            "config": normalized_config,
+        }
+
+    normalized_selected_sources: List[Dict[str, Any]] = []
+    if isinstance(selected_database_sources, list):
+        for source_item in selected_database_sources:
+            normalized_item = _normalize_runtime_db_source(source_item)
+            if normalized_item:
+                normalized_selected_sources.append(normalized_item)
+
+    configured_sources: List[Dict[str, Any]] = []
+    try:
+        saved_db_config = _load_user_config(username, "database_connections.json", {"connections": []})
+        for conn_item in saved_db_config.get("connections", []):
+            normalized_item = _normalize_runtime_db_source(conn_item)
+            if normalized_item:
+                configured_sources.append(normalized_item)
+    except Exception:
+        configured_sources = []
+
+    active_sources = normalized_selected_sources
+    if not active_sources and len(configured_sources) == 1:
+        active_sources = [configured_sources[0]]
+
+    database_source_prompt = ""
+    database_data_context = ""
+    if active_sources:
+        source_lines = []
+        for idx, source in enumerate(active_sources, start=1):
+            cfg = source["config"]
+            if source["db_type"] == "sqlite":
+                source_lines.append(
+                    f"{idx}. type={source['db_type']}, database={cfg['database']}"
+                )
+            else:
+                source_lines.append(
+                    f"{idx}. type={source['db_type']}, host={cfg['host'] or 'localhost'}, "
+                    f"port={cfg['port'] or DB_DEFAULT_PORTS.get(source['db_type'], '')}, "
+                    f"database={cfg['database']}, user={cfg['user']}, password={cfg['password']}"
+                )
+
+        if analysis_language == "en":
+            database_source_prompt = (
+                "\n\n**Connected database sources (use as primary analysis data source)**:"
+                f"\n{chr(10).join(source_lines)}"
+                "\n- Start from these connected databases directly. Do not wait for file uploads when they are available."
+                "\n- Use these credentials exactly as provided by the user configuration; do not fabricate or hardcode credentials."
+            )
+            database_data_context = (
+                "Connected database sources for this run:\n"
+                f"{chr(10).join(source_lines)}\n"
+                "Use these sources as the default analysis target."
+            )
+        else:
+            database_source_prompt = (
+                "\n\n**已连接数据库数据源（请优先作为本轮分析对象）**："
+                f"\n{chr(10).join(source_lines)}"
+                "\n- 当存在上述连接时，直接从数据库开始分析，不必等待用户上传文件。"
+                "\n- 连接参数必须严格使用用户配置值，不得臆造或硬编码。"
+            )
+            database_data_context = (
+                "本轮已选择数据库数据源：\n"
+                f"{chr(10).join(source_lines)}\n"
+                "请以这些数据库作为默认分析对象。"
+            )
+    elif configured_sources and len(configured_sources) > 1 and not source_selection_explicit:
+        if analysis_language == "en":
+            database_source_prompt = (
+                "\n\nUser has configured multiple database sources, but no explicit selection was provided in this round. "
+                "If no files are available, ask for source selection before deep analysis."
+            )
+        else:
+            database_source_prompt = (
+                "\n\n用户已配置多个数据库数据源，但本轮尚未明确选择。"
+                "若当前无文件数据，请先要求用户选择至少一个数据库数据源后再深入分析。"
+            )
+
+    loaded_db_context = SESSION_DB_CONTEXT.get(session_id, {})
+    loaded_db_source = str(loaded_db_context.get("source_label", "") or "").strip()
+    loaded_db_table_count = int(loaded_db_context.get("table_count", 0) or 0)
+    loaded_db_column_count = int(loaded_db_context.get("column_count", 0) or 0)
+    loaded_db_snapshot_file = str(loaded_db_context.get("snapshot_file", "") or "").strip()
+
+    preferred_source_labels: List[str] = [
+        str(item.get("label", "") or "").strip()
+        for item in active_sources
+        if str(item.get("label", "") or "").strip()
+    ]
+    if loaded_db_source and loaded_db_source not in preferred_source_labels:
+        preferred_source_labels.append(loaded_db_source)
+
+    if loaded_db_source:
+        if analysis_language == "en":
+            database_source_prompt += (
+                "\n\n**Session DB context loaded**: "
+                f"{loaded_db_source} (tables={loaded_db_table_count}, columns={loaded_db_column_count})."
+                f" Snapshot file: {loaded_db_snapshot_file or 'N/A'}."
+            )
+        else:
+            database_source_prompt += (
+                "\n\n**已加载会话数据库上下文**："
+                f"{loaded_db_source}（表{loaded_db_table_count}张，字段{loaded_db_column_count}个）。"
+                f" 快照文件：{loaded_db_snapshot_file or '无'}。"
+            )
+
+    latest_user_query = ""
+    for msg in reversed(messages or []):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            latest_user_query = str(msg.get("content", "") or "")
+            break
+
+    db_kb_context = build_database_knowledge_context(
+        username=username,
+        user_query=latest_user_query,
+        preferred_source_labels=preferred_source_labels,
+        analysis_language=analysis_language,
+    )
+    if db_kb_context:
+        database_data_context = (
+            f"{database_data_context}\n\n" if database_data_context else ""
+        ) + db_kb_context
+    if database_data_context:
+        database_data_context = trim_text_for_budget(database_data_context, max_chars=2800)
+
     language_prompt = build_analysis_language_prompt(analysis_language)
     signature_safety_prompt = (
-        "\n\n**函数与方法调用安全规则（必须遵守）**："
-        "\n- 定义自定义函数后，调用时必须逐一核对参数数量、参数名称、默认值和返回值。"
-        "\n- 遇到 pandas、matplotlib、reportlab、docx、pptx 等库方法时，必须按当前版本支持的签名调用，不得臆造参数。"
-        "\n- 执行前先自查一遍：是否存在 missing positional argument、unexpected keyword argument、takes N positional arguments 等风险。"
-        "\n- 如需复用辅助函数，先统一函数定义，再统一所有调用点，避免同名函数签名不一致。"
+        "\n\n**函数调用安全（必须遵守）**："
+        "\n- 先核对函数签名与参数，再执行。"
+        "\n- 对第三方库仅使用已支持参数，避免臆造 keyword。"
+        "\n- 复用函数时确保定义与调用一致。"
     )
     methodology_integration_prompt = (
-        "\n\n**AI数据分析师方法论增强层（新增注入，不替代你已有的方法与规则）**："
-        "\n你必须将以下方法论与现有分析流程高度融合、贯穿执行全过程："
-        "\n1) CRISP-DM 改进框架：业务理解→数据理解→数据准备→建模分析→评估验证→部署应用。"
-        "\n2) 迭代循环：探索→假设→验证→优化→报告，并根据反馈进入下一轮循环。"
-        "\n3) 分析哲学：数据驱动决策、假设驱动探索、多维交叉验证、可解释性优先、实用价值导向。"
-        "\n4) 质量原则：完整性、一致性、准确性、时效性检查为刚性步骤。"
-        "\n5) 分析视角：时间、空间/区域、用户/对象、业务指标四类视角应按需组合使用。"
-        "\n6) 分析深度：浅层（快速洞察）→中层（交叉探索）→深层（预测/归因/优化）渐进推进。"
-        "\n7) 工具策略：SQL优先、可视化驱动、分析过程文档化与可复现。"
-        "\n\n**每一轮输出的执行约束（必须遵守）**："
-        "\n- 每个 `<Analyze>` 必须明确写出：当前CRISP-DM阶段、当前迭代环节、核心假设、验证与交叉验证计划、质量检查点、业务价值。"
-        "\n- 每个 `<Code>` 必须对应可验证的分析动作，不得跳过关键质量检查与验证环节。"
-        "\n- 在 `<Answer>` 中必须包含：关键洞察、可解释依据、业务建议优先级、后续行动计划。"
-        "\n- 若因数据限制无法执行某阶段，必须显式说明影响、替代方案与风险。"
-        "\n\n**工作流程融合要求**："
-        "\n- 标准作业流程按 准备(20%)→执行(50%)→交付(30%) 推进。"
-        "\n- 使用敏捷模式：快速原型→反馈调整→深度扩展→最终交付。"
-        "\n- 每次分析结束后进行简短复盘，说明方法是否有效、下一轮如何优化。"
+        "\n\n**方法执行要求（简版）**："
+        "\n- 遵循 数据理解→假设→验证→结论→交付 的闭环。"
+        "\n- `<Analyze>` 说明当前假设与验证计划；`<Code>` 执行可验证动作；`<Answer>` 给出可解释结论。"
+        "\n- 证据不足时必须明确标注并提出补充数据建议。"
     )
 
-    # 使用动态生成的 system prompt（已包含完整内容）
-    system_prompt = get_system_prompt_with_fonts()
-
-    # 获取雨途斩棘录最近的错误记录并注入
-    try:
-        yutu_data = search_errors(page_size=20)
-        if yutu_data.get("items"):
-            yutu_context = "\n\n**雨途斩棘录 - 历史错误及解决方案知识库（启动必读）**：\n"
-            for item in yutu_data["items"]:
-                yutu_context += f"- 错误类型: {item['error_type']}\n"
-                yutu_context += f"  错误消息: {item['error_message']}\n"
-                yutu_context += f"  解决方案: {item['solution']}\n"
-                if item.get('solution_code'):
-                    yutu_context += f"  参考代码: {item['solution_code']}\n"
-                yutu_context += "---\n"
-            system_prompt += yutu_context
-    except Exception as e:
-        print(f"[雨途斩棘录] 启动注入失败: {e}")
-
-    # Append strategy, mode, temperature, and report type prompts
-    system_prompt += selected_strategy_prompt
-    system_prompt += selected_mode_prompt
-    system_prompt += temp_hint
-    system_prompt += report_types_prompt
-    system_prompt += signature_safety_prompt
-    system_prompt += methodology_integration_prompt
-    system_prompt += report_prompt
-    system_prompt += language_prompt
+    system_prompt = assemble_system_prompt(
+        modules=[
+            get_compact_system_prompt_with_fonts(),
+            build_brief_yutu_context(max_items=3, max_chars=900),
+            selected_strategy_prompt,
+            selected_mode_prompt,
+            temp_hint,
+            report_types_prompt,
+            signature_safety_prompt,
+            methodology_integration_prompt,
+            report_prompt,
+            database_source_prompt,
+            language_prompt,
+        ],
+        max_chars=5600,
+    )
 
     language_enforcer_prompt = (
         "CRITICAL OUTPUT RULE: Respond in English only for all user-facing narrative text. "
@@ -3314,6 +3514,22 @@ def bot_stream(
     # 创建 generated 子文件夹用于存放代码生成的文件
     GENERATED_DIR = os.path.join(WORKSPACE_DIR, "generated")
     os.makedirs(GENERATED_DIR, exist_ok=True)
+    # 记录本轮开始前已有的报告文件，便于判断当前轮是否真正产出新报告
+    preexisting_report_files: Dict[str, set[str]] = {
+        "pdf": set(),
+        "docx": set(),
+        "pptx": set(),
+    }
+    try:
+        generated_dir_path = Path(GENERATED_DIR)
+        for existing in generated_dir_path.iterdir():
+            if not existing.is_file():
+                continue
+            ext = existing.suffix.lower().lstrip(".")
+            if ext in preexisting_report_files:
+                preexisting_report_files[ext].add(existing.name)
+    except Exception:
+        pass
     # 创建 converted 子文件夹用于存放 UTF-8 转换后的文件
     CONVERTED_DIR = os.path.join(WORKSPACE_DIR, "converted")
     os.makedirs(CONVERTED_DIR, exist_ok=True)
@@ -3329,9 +3545,18 @@ def bot_stream(
         # 总是使用当前 session 的 WORKSPACE_DIR 获取文件信息
         file_info = collect_file_info(WORKSPACE_DIR)
         if file_info:
+            file_info = trim_text_for_budget(file_info, max_chars=2200)
+        data_sections: List[str] = []
+        if file_info:
+            data_sections.append(file_info)
+        if database_data_context:
+            data_sections.append(database_data_context)
+
+        if data_sections:
+            merged_data_sections = trim_text_for_budget("\n\n".join(data_sections), max_chars=3800)
             messages[-1][
                 "content"
-            ] = f"# Instruction\n{user_message}\n\n# Data\n{file_info}"
+            ] = f"# Instruction\n{user_message}\n\n# Data\n{merged_data_sections}"
         else:
             messages[-1]["content"] = f"# Instruction\n{user_message}"
     # print("111",messages)
@@ -3384,6 +3609,7 @@ def bot_stream(
 
         cur_res = ""
         last_finish_reason = None
+        saw_final_answer_this_round = False
         for chunk in response:
             if chunk.choices:
                 choice = chunk.choices[0]
@@ -3395,7 +3621,7 @@ def bot_stream(
                     yield delta
 
             if re.search(r"</answer>", cur_res, re.IGNORECASE):
-                finished = True
+                saw_final_answer_this_round = True
                 break
             # ---- TaskTree 检测（流式中途发现完整闭合标签） ----
             if re.search(r"</tasktree>", cur_res, re.IGNORECASE):
@@ -3421,8 +3647,9 @@ def bot_stream(
 
         has_code_open = re.search(r"<code>", cur_res, re.IGNORECASE) is not None
         has_code_close = re.search(r"</code>", cur_res, re.IGNORECASE) is not None
+        has_fenced_code = re.search(r"```(?:python)?(.*?)```", cur_res, re.DOTALL | re.IGNORECASE) is not None
 
-        if last_finish_reason == "stop" and not finished and has_code_open and not has_code_close:
+        if last_finish_reason == "stop" and has_code_open and not has_code_close:
             if not re.search(r"</code>\s*$", cur_res, re.IGNORECASE):
                 missing_tag = "</Code>"
                 cur_res += missing_tag
@@ -3430,7 +3657,9 @@ def bot_stream(
                 yield missing_tag
             has_code_close = True
 
-        if has_code_open and has_code_close and not finished:
+        should_execute_code = (has_code_open and has_code_close) or ((not has_code_open) and has_fenced_code)
+
+        if should_execute_code:
             messages.append({"role": "assistant", "content": cur_res})
             code_match = re.search(r"<code>(.*?)</code>", cur_res, re.DOTALL | re.IGNORECASE)
             code_str = None
@@ -3563,6 +3792,15 @@ def bot_stream(
                     workspace.extend(new_files)
                     initial_workspace.update(new_files)
 
+                if saw_final_answer_this_round:
+                    finished = True
+
+            continue
+
+        if saw_final_answer_this_round:
+            if cur_res.strip():
+                messages.append({"role": "assistant", "content": cur_res})
+            finished = True
             continue
 
         # 无代码时也要保留本轮输出，允许模型进入下一轮（例如先 Analyze 再 Code）
@@ -3579,6 +3817,97 @@ def bot_stream(
         assistant_reply += limit_block
         yield limit_block
 
+    # 兜底：若本轮缺少所需报告产物，则服务端自动导出，确保前端文件输出区可见。
+    try:
+        requested_report_types = [
+            str(item).strip().lower()
+            for item in (report_types or ["pdf"])
+            if str(item).strip().lower() in {"pdf", "docx", "pptx"}
+        ]
+        if not requested_report_types:
+            requested_report_types = ["pdf"]
+
+        has_final_answer = re.search(r"</answer>", assistant_reply, re.IGNORECASE) is not None
+        if has_final_answer:
+            current_report_files: Dict[str, set[str]] = {
+                "pdf": set(),
+                "docx": set(),
+                "pptx": set(),
+            }
+            generated_dir_path = Path(GENERATED_DIR)
+            if generated_dir_path.exists():
+                for current_file in generated_dir_path.iterdir():
+                    if not current_file.is_file():
+                        continue
+                    ext = current_file.suffix.lower().lstrip(".")
+                    if ext in current_report_files:
+                        current_report_files[ext].add(current_file.name)
+
+            missing_types = [
+                ext for ext in requested_report_types
+                if not (current_report_files.get(ext, set()) - preexisting_report_files.get(ext, set()))
+            ]
+
+            if missing_types:
+                report_history = [
+                    msg for msg in messages
+                    if isinstance(msg, dict) and str(msg.get("role", "")).lower() in {"user", "assistant", "execute"}
+                ]
+                if not report_history or str(report_history[-1].get("role", "")).lower() != "assistant":
+                    report_history.append({"role": "assistant", "content": assistant_reply})
+
+                md_text = _extract_sections_from_messages(report_history)
+                if not md_text:
+                    md_text = (
+                        "No structured report sections were extracted; fallback to final answer text."
+                        if analysis_language == "en"
+                        else "未提取到结构化报告段落，已回退使用最终回答文本。"
+                    )
+                    md_text += "\n\n" + (assistant_reply or "")
+
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                base_name = f"Auto_Report_{ts}"
+                auto_generated_paths: List[Path] = []
+
+                md_path = _save_md(md_text, base_name, GENERATED_DIR)
+                if md_path:
+                    auto_generated_paths.append(md_path)
+
+                if "pdf" in missing_types:
+                    try:
+                        pdf_path = _save_pdf(md_text, base_name, GENERATED_DIR)
+                        if pdf_path:
+                            auto_generated_paths.append(pdf_path)
+                    except Exception as pdf_error:
+                        print(f"Auto report fallback pdf generation failed: {pdf_error}")
+                if "docx" in missing_types:
+                    try:
+                        docx_path = _save_docx(md_text, base_name, GENERATED_DIR)
+                        if docx_path:
+                            auto_generated_paths.append(docx_path)
+                    except Exception as docx_error:
+                        print(f"Auto report fallback docx generation failed: {docx_error}")
+                if "pptx" in missing_types:
+                    try:
+                        pptx_path = _save_pptx(md_text, base_name, GENERATED_DIR)
+                        if pptx_path:
+                            auto_generated_paths.append(pptx_path)
+                    except Exception as pptx_error:
+                        print(f"Auto report fallback pptx generation failed: {pptx_error}")
+
+                if auto_generated_paths:
+                    lines = ["<File>"]
+                    for artifact in auto_generated_paths:
+                        name = Path(artifact).name
+                        url = build_download_url(f"{username}/{session_id}/generated/{name}")
+                        lines.append(f"- [{name}]({url})")
+                    lines.append("</File>")
+                    auto_file_block = "\n" + "\n".join(lines) + "\n"
+                    assistant_reply += auto_file_block
+                    yield auto_file_block
+    except Exception as auto_report_error:
+        print(f"Auto report fallback failed: {auto_report_error}")
+
     os.chdir(original_cwd)
 
 
@@ -3594,6 +3923,8 @@ async def chat(body: dict = Body(...)):
     analysis_language = normalize_analysis_language(body.get("analysis_language", "zh-CN"))
     report_types = body.get("report_types", ["pdf"])
     model_provider = body.get("model_provider")
+    selected_database_sources = body.get("selected_database_sources", [])
+    source_selection_explicit = bool(body.get("source_selection_explicit", False))
     model_name = MODEL_PATH
     if isinstance(model_provider, dict):
         model_name = (model_provider.get("model") or MODEL_PATH)
@@ -3613,6 +3944,8 @@ async def chat(body: dict = Body(...)):
             report_types,
             model_provider,
             analysis_language,
+            selected_database_sources,
+            source_selection_explicit,
         ):
             # print(delta_content)
             chunk = {
@@ -3766,6 +4099,9 @@ def _get_available_fonts() -> dict:
     import reportlab.pdfbase.ttfonts as ttfonts
 
     fonts = {"assets": [], "system": [], "reportlab_fallback": None}
+    fonts_dir = _FONT_DIR if '_FONT_DIR' in globals() else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "../../assets/fonts"
+    )
 
     # === assets 字体（纯 TTF，reportlab/fpdf2/matplotlib 均支持）===
     assets_fonts = [
@@ -3777,7 +4113,7 @@ def _get_available_fonts() -> dict:
         # 注意：simfang.ttf 和 fzbsk.ttf 是损坏的 HTML 文件，已排除
     ]
     for fname, name, desc in assets_fonts:
-        fp = os.path.join(FONT_DIR, fname)
+        fp = os.path.join(fonts_dir, fname)
         if os.path.exists(fp):
             fonts["assets"].append((fp, name, desc))
 
@@ -4138,79 +4474,76 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
 def _save_pdf_with_r(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
     """使用 R script + Cairo/grDevices 生成中文 PDF（支持所有 CJK 字体）"""
-    import tempfile, subprocess
+    import subprocess
+
+    Path(workspace_dir).mkdir(parents=True, exist_ok=True)
+    pdf_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pdf")
 
     font_path, font_name = _find_chinese_font()
     if not font_path:
         return None
 
-    # 准备字体路径（确保无空格或特殊字符）
     r_script_path = os.path.join(workspace_dir, f"_pdf_gen_{os.getpid()}.R")
     r_font_path = font_path.replace("\\", "\\\\").replace("'", "\\'")
-
-    # 清理 markdown 文本
     clean_text = re.sub(r"\\newpage", "", md_text)
+    r_pdf_path = str(pdf_path).replace("\\", "\\\\").replace("'", "\\'")
+    r_text = _escape_r_string(clean_text)
 
-    # 生成 R 脚本
     r_script = f"""
 options(width=120)
 Sys.setenv(LANG="en_US.UTF-8")
-library(grDevices)
+suppressPackageStartupMessages(library(showtext))
+suppressPackageStartupMessages(library(sysfonts))
 
-# 注册中文字体（Cairo 支持 TTC/TTF）
-tryCatch({{
-    if (file.exists("{r_font_path}")) {{
-        # macOS: 使用 quartz 或 cairo 设备
-        if (.Platform$GUI[1] == "AQUA") {{
-            # macOS 原生字体注册
-            quartz粵 font = quartzFont(c("{font_name}"))
+font_add("{font_name}", "{r_font_path}")
+showtext_auto()
+
+pdf("{r_pdf_path}", family="{font_name}", width=8.27, height=11.69)
+par(family="{font_name}", mar=c(2.5, 2.5, 2, 1), oma=c(0, 0, 0, 0))
+
+txt <- "{r_text}"
+lines <- strsplit(txt, "\\n")[[1]]
+if (length(lines) == 0) lines <- c(txt)
+
+plot.new()
+y <- 0.98
+line_height <- 0.03
+
+for (line in lines) {{
+    raw <- trimws(line)
+    if (nchar(raw) == 0) {{
+        y <- y - line_height
+    }} else {{
+        cex_val <- 0.95
+        font_val <- 1
+        if (grepl("^###\\\\s+", raw, perl=TRUE)) {{
+            raw <- sub("^###\\\\s+", "", raw, perl=TRUE)
+            cex_val <- 1.15
+            font_val <- 2
+        }} else if (grepl("^##\\\\s+", raw, perl=TRUE)) {{
+            raw <- sub("^##\\\\s+", "", raw, perl=TRUE)
+            cex_val <- 1.2
+            font_val <- 2
+        }} else if (grepl("^#\\\\s+", raw, perl=TRUE)) {{
+            raw <- sub("^#\\\\s+", "", raw, perl=TRUE)
+            cex_val <- 1.3
+            font_val <- 2
+        }} else if (grepl("^[-*]\\\\s+", raw, perl=TRUE)) {{
+            raw <- paste0("• ", sub("^[-*]\\\\s+", "", raw, perl=TRUE))
         }}
-    }}
-    warning("Font not found")
-}}, error = function(e) {{ warning(e) }})
 
-# 使用 showtext 方案（最可靠）
-tryCatch({{
-    library(showtext)
-    library(sysfonts)
-
-    # 添加字体文件
-    font_add("{font_name}", "{r_font_path}")
-    showtext_auto()
-
-    pdf("{str(pdf_path).replace("\\", "\\\\").replace("'", "\\'")}",
-        family="{font_name}", width=8.27, height=11.69)
-
-    par(family="{font_name}", mar=c(2.5, 2.5, 2, 1), oma=c(0, 0, 0, 0))
-
-    lines <- strsplit(gsub(r"\\n(?=\\S)", "<<<SPLIT>>>", "{_escape_r_string(clean_text)}", perl=TRUE), "<<<SPLIT>>>")[[1]]
-
-    for (line in lines) {{
-        line <- gsub("^#\\\\s+(.*)$", "\\\\1", line, perl=TRUE)
-        if (grepl("^##\\\\s+(.*)$", line, perl=TRUE)) {{
-            title <- gsub("^##\\\\s+(.*)$", "\\\\1", line, perl=TRUE)
-            cat("\\n")
-            plot.new()
-            text(0.5, 0.7, title, cex=2.2, family="{font_name}", font=2, adj=0)
-        }} else if (grepl("^###\\\\s+(.*)$", line, perl=TRUE)) {{
-            title <- gsub("^###\\\\s+(.*)$", "\\\\1", line, perl=TRUE)
-            cat("\\n")
-            plot.new()
-            text(0.5, 0.65, title, cex=1.6, family="{font_name}", font=2, adj=0)
-        }} else if (nzchar(trimws(line))) {{
-            if (grepl("^[-*]\\\\s+(.*)$", line, perl=TRUE)) {{
-                line <- paste0("  \\u2022 ", gsub("^[-*]\\\\s+(.*)$", "\\\\1", line, perl=TRUE))
-            }}
-            cat(line, "\\n", sep="")
-        }}
+        text(0.02, y, labels=raw, adj=c(0, 1), cex=cex_val, family="{font_name}", font=font_val)
+        y <- y - line_height
     }}
 
-    dev.off()
-    cat("PDF_R_OK\\n")
-}}, error = function(e) {{
-    message("R Cairo PDF failed: ", e$message)
-    if (dev.cur() > 1) dev.off()
-}})
+    if (y <= 0.04) {{
+        plot.new()
+        y <- 0.98
+    }}
+}}
+
+dev.off()
+cat("PDF_R_OK\\n")
 """
     try:
         with open(r_script_path, "w", encoding="utf-8") as f:
@@ -4218,11 +4551,13 @@ tryCatch({{
 
         result = subprocess.run(
             ["Rscript", "--vanilla", "--quiet", r_script_path],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=60
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
         )
 
-        # 清理脚本
         try:
             os.remove(r_script_path)
         except Exception:
@@ -4230,10 +4565,9 @@ tryCatch({{
 
         if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
             return pdf_path
-        else:
-            print(f"R PDF generation failed stdout: {result.stdout}, stderr: {result.stderr}")
-            return None
 
+        print(f"R PDF generation failed stdout: {result.stdout}, stderr: {result.stderr}")
+        return None
     except Exception as e:
         print(f"R PDF generation error: {e}")
         try:
@@ -5326,6 +5660,124 @@ def build_db_engine(db_type: str, config: dict):
     return create_engine(url, **engine_kwargs)
 
 
+def list_accessible_databases(db_type: str, config: dict) -> List[str]:
+    """根据连接信息列出可访问的数据库名称。"""
+    normalized_type = normalize_db_type(db_type)
+    config = config or {}
+
+    if normalized_type == "sqlite":
+        database = str(config.get("database", "")).strip()
+        if not database:
+            raise ValueError("SQLite 模式下请先填写数据库文件路径")
+        return [database]
+
+    host = str(config.get("host", "localhost") or "localhost").strip() or "localhost"
+    user = str(config.get("user", "") or "").strip() or None
+    password_raw = config.get("password", None)
+    password = None if password_raw in (None, "") else str(password_raw)
+
+    port_raw = str(config.get("port", "") or "").strip()
+    if port_raw:
+        if not port_raw.isdigit():
+            raise ValueError("端口必须为数字")
+        port = int(port_raw)
+    else:
+        port = DB_DEFAULT_PORTS.get(normalized_type)
+
+    def _create_engine_for_db(database_name: Optional[str]):
+        query = {"charset": "utf8mb4"} if normalized_type == "mysql" else None
+        url = URL.create(
+            drivername=DB_DRIVER_NAMES[normalized_type],
+            username=user,
+            password=password,
+            host=host,
+            port=port,
+            database=database_name,
+            query=query,
+        )
+        connect_args = {}
+        if normalized_type in ("mysql", "postgresql"):
+            connect_args["connect_timeout"] = 5
+        elif normalized_type == "mssql":
+            connect_args["login_timeout"] = 5
+        kwargs: Dict[str, Any] = {"pool_pre_ping": True}
+        if connect_args:
+            kwargs["connect_args"] = connect_args
+        return create_engine(url, **kwargs)
+
+    if normalized_type == "postgresql":
+        candidates = []
+        configured_db = str(config.get("database", "") or "").strip()
+        if configured_db:
+            candidates.append(configured_db)
+        candidates.extend(["postgres", "template1"])
+        seen = set()
+        dedup_candidates = []
+        for item in candidates:
+            if item and item not in seen:
+                dedup_candidates.append(item)
+                seen.add(item)
+
+        last_error: Optional[Exception] = None
+        for db_name in dedup_candidates:
+            engine = None
+            try:
+                engine = _create_engine_for_db(db_name)
+                with engine.connect() as conn:
+                    rows = conn.execute(
+                        text(
+                            "SELECT datname FROM pg_database "
+                            "WHERE datistemplate = false AND datallowconn = true "
+                            "ORDER BY datname"
+                        )
+                    ).fetchall()
+                names = [str(row[0]) for row in rows if row and row[0]]
+                if names:
+                    return names
+            except Exception as exc:
+                last_error = exc
+            finally:
+                if engine is not None:
+                    engine.dispose()
+
+        if configured_db:
+            return [configured_db]
+        if last_error is not None:
+            raise last_error
+        raise ValueError("未能获取 PostgreSQL 数据库列表")
+
+    if normalized_type == "mysql":
+        engine = None
+        try:
+            engine = _create_engine_for_db(None)
+            with engine.connect() as conn:
+                rows = conn.execute(text("SHOW DATABASES")).fetchall()
+            names = [str(row[0]) for row in rows if row and row[0]]
+            return names
+        finally:
+            if engine is not None:
+                engine.dispose()
+
+    if normalized_type == "mssql":
+        engine = None
+        admin_db = str(config.get("database", "") or "").strip() or "master"
+        try:
+            engine = _create_engine_for_db(admin_db)
+            with engine.connect() as conn:
+                rows = conn.execute(text("SELECT name FROM sys.databases ORDER BY name")).fetchall()
+            names = [str(row[0]) for row in rows if row and row[0]]
+            return names
+        finally:
+            if engine is not None:
+                engine.dispose()
+
+    # Oracle 无统一的“数据库名列表”语义，回退为当前用户输入值
+    configured_db = str(config.get("database", "") or "").strip()
+    if configured_db:
+        return [configured_db]
+    raise ValueError("当前数据库类型暂不支持自动拉取数据库名称，请手动填写数据库名称")
+
+
 def format_db_error(exc: Exception, db_type: Optional[str]) -> str:
     raw_message = str(exc).strip() or exc.__class__.__name__
     # 避免把连接串中的明文密码返回前端
@@ -5349,6 +5801,416 @@ def format_db_error(exc: Exception, db_type: Optional[str]) -> str:
     return safe_message
 
 
+def _escape_md_cell(value: Any) -> str:
+    text_value = str(value or "").replace("\n", " ").strip()
+    if not text_value:
+        return "-"
+    return text_value.replace("|", "\\|")
+
+
+def _quote_identifier(identifier: str, db_type: str) -> str:
+    if db_type == "mysql":
+        return f"`{identifier.replace('`', '``')}`"
+    if db_type == "mssql":
+        return f"[{identifier.replace(']', ']]')}]"
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _build_qualified_table_name(schema_name: Optional[str], table_name: str, db_type: str) -> str:
+    if schema_name:
+        return f"{_quote_identifier(schema_name, db_type)}.{_quote_identifier(table_name, db_type)}"
+    return _quote_identifier(table_name, db_type)
+
+
+def _shorten_text(value: Any, max_len: int = 120) -> str:
+    text_value = str(value or "").strip()
+    if len(text_value) <= max_len:
+        return text_value
+    return text_value[: max_len - 1] + "…"
+
+
+def _safe_iso_ts(value: Any) -> str:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return ""
+    try:
+        return datetime.fromisoformat(text_value).isoformat(timespec="seconds")
+    except Exception:
+        return text_value
+
+
+def upsert_database_knowledge_source(
+    username: str,
+    db_type: str,
+    config: dict,
+    snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    """把数据库快照持久化为用户级知识库条目。"""
+    username = str(username or "default").strip() or "default"
+
+    source_entry = {
+        "source_label": str(snapshot.get("source_label", "") or ""),
+        "db_type": normalize_db_type(db_type),
+        "host": str(config.get("host", "") or "").strip(),
+        "port": str(config.get("port", "") or "").strip(),
+        "database": str(snapshot.get("database", "") or "").strip(),
+        "table_count": int(snapshot.get("table_count", 0) or 0),
+        "column_count": int(snapshot.get("column_count", 0) or 0),
+        "loaded_at": datetime.now().isoformat(timespec="seconds"),
+        "tables": snapshot.get("tables", []),
+        "summary": _shorten_text(snapshot.get("summary", ""), max_len=500),
+    }
+
+    kb_data = _load_user_config(username, "database_knowledge_base.json", {"sources": []})
+    sources = kb_data.get("sources", [])
+    if not isinstance(sources, list):
+        sources = []
+
+    source_label = source_entry["source_label"]
+    source_db = source_entry["database"]
+    source_host = source_entry["host"]
+    source_port = source_entry["port"]
+    replaced = False
+
+    for idx, existing in enumerate(sources):
+        if not isinstance(existing, dict):
+            continue
+        existing_label = str(existing.get("source_label", "") or "").strip()
+        existing_db = str(existing.get("database", "") or "").strip()
+        existing_host = str(existing.get("host", "") or "").strip()
+        existing_port = str(existing.get("port", "") or "").strip()
+
+        if (
+            (source_label and existing_label == source_label)
+            or (
+                source_db
+                and source_host == existing_host
+                and source_port == existing_port
+                and source_db == existing_db
+            )
+        ):
+            sources[idx] = source_entry
+            replaced = True
+            break
+
+    if not replaced:
+        sources.append(source_entry)
+
+    sources = sorted(
+        [item for item in sources if isinstance(item, dict)],
+        key=lambda item: _safe_iso_ts(item.get("loaded_at", "")),
+        reverse=True,
+    )[:30]
+
+    kb_data["sources"] = sources
+    _save_user_config(username, "database_knowledge_base.json", kb_data)
+    return source_entry
+
+
+def build_database_knowledge_context(
+    username: str,
+    user_query: str,
+    preferred_source_labels: Optional[List[str]] = None,
+    analysis_language: str = "zh-CN",
+    max_tables: int = 6,
+    max_columns_per_table: int = 10,
+    max_chars: int = 2600,
+) -> str:
+    """从数据库知识库检索与当前问题相关的结构化上下文。"""
+    username = str(username or "default").strip() or "default"
+    kb_data = _load_user_config(username, "database_knowledge_base.json", {"sources": []})
+    raw_sources = kb_data.get("sources", [])
+    if not isinstance(raw_sources, list) or not raw_sources:
+        return ""
+
+    sources = [item for item in raw_sources if isinstance(item, dict)]
+    if not sources:
+        return ""
+
+    preferred_labels = set(
+        str(item or "").strip()
+        for item in (preferred_source_labels or [])
+        if str(item or "").strip()
+    )
+    if preferred_labels:
+        matched_sources = [
+            item
+            for item in sources
+            if str(item.get("source_label", "") or "").strip() in preferred_labels
+        ]
+        if matched_sources:
+            sources = matched_sources
+
+    query_text = str(user_query or "").lower()
+    query_tokens = [
+        token for token in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]{2,}", query_text)
+        if token
+    ]
+
+    def table_score(table_item: Dict[str, Any]) -> int:
+        table_name = str(table_item.get("name", "") or "").lower()
+        table_comment = str(table_item.get("table_comment", "") or "").lower()
+        columns = table_item.get("columns", [])
+        column_blob = " ".join(
+            f"{str(col.get('name', '') or '')} {str(col.get('definition', '') or '')}"
+            for col in columns
+            if isinstance(col, dict)
+        ).lower()
+
+        if not query_tokens:
+            return 1
+
+        score = 0
+        for token in query_tokens:
+            if token in table_name:
+                score += 6
+            if token in table_comment:
+                score += 3
+            if token in column_blob:
+                score += 2
+        return score
+
+    lines: List[str] = []
+    if analysis_language == "en":
+        lines.append("Database knowledge base retrieval context:")
+    else:
+        lines.append("数据库知识库检索上下文：")
+
+    source_count = 0
+    for source in sources:
+        if source_count >= 2:
+            break
+
+        tables = source.get("tables", [])
+        if not isinstance(tables, list):
+            tables = []
+        ranked_tables = sorted(
+            [item for item in tables if isinstance(item, dict)],
+            key=lambda item: (table_score(item), int(item.get("row_count") or 0)),
+            reverse=True,
+        )
+
+        if not ranked_tables:
+            continue
+
+        source_label = str(source.get("source_label", "") or "").strip()
+        table_count = int(source.get("table_count", len(tables)) or len(tables))
+        column_count = int(source.get("column_count", 0) or 0)
+
+        lines.append(
+            f"- 数据源: {source_label} (表{table_count}张, 字段{column_count}个)"
+        )
+
+        selected_tables = ranked_tables[:max_tables]
+        for table in selected_tables:
+            table_name = str(table.get("name", "") or "")
+            row_count = table.get("row_count")
+            table_comment = _shorten_text(table.get("table_comment", ""), max_len=80)
+
+            if analysis_language == "en":
+                table_line = f"  - Table: {table_name}, rows={row_count if row_count is not None else 'unknown'}"
+            else:
+                table_line = f"  - 表: {table_name}, 行数={row_count if row_count is not None else '未知'}"
+
+            if table_comment:
+                table_line += f", 说明={table_comment}"
+            lines.append(table_line)
+
+            columns = table.get("columns", [])
+            if not isinstance(columns, list) or not columns:
+                continue
+
+            column_entries: List[str] = []
+            for col in columns[:max_columns_per_table]:
+                if not isinstance(col, dict):
+                    continue
+                col_name = str(col.get("name", "") or "")
+                col_type = str(col.get("type", "") or "")
+                col_def = _shorten_text(col.get("definition", ""), max_len=40)
+                entry = f"{col_name}({col_type})"
+                if col_def:
+                    entry += f":{col_def}"
+                column_entries.append(entry)
+
+            if column_entries:
+                if analysis_language == "en":
+                    lines.append(f"    key columns: {', '.join(column_entries)}")
+                else:
+                    lines.append(f"    关键字段: {', '.join(column_entries)}")
+
+        source_count += 1
+
+    context_text = "\n".join(lines).strip()
+    if len(context_text) > max_chars:
+        context_text = context_text[: max_chars - 1] + "…"
+    return context_text
+
+
+def build_database_context_snapshot(db_type: str, config: dict) -> Dict[str, Any]:
+    """提取数据库结构快照，用于注入分析上下文。"""
+    normalized_type = normalize_db_type(db_type)
+    config = config or {}
+    database_name = str(config.get("database", "") or "").strip()
+
+    if normalized_type != "sqlite" and not database_name:
+        raise ValueError("请先选择数据库名称后再导入上下文")
+
+    from sqlalchemy import inspect
+
+    engine = build_db_engine(normalized_type, config)
+    inspector = inspect(engine)
+
+    source_label = (
+        f"{normalized_type}@{database_name}"
+        if normalized_type == "sqlite"
+        else f"{normalized_type}@{str(config.get('host', 'localhost') or 'localhost').strip()}:{str(config.get('port', '') or DB_DEFAULT_PORTS.get(normalized_type, '')).strip() or DB_DEFAULT_PORTS.get(normalized_type, '')}/{database_name}"
+    )
+
+    lines: List[str] = [
+        "# 数据库知识库上下文快照",
+        f"- 数据源: {source_label}",
+        f"- 导入时间: {datetime.now().isoformat(timespec='seconds')}",
+        "",
+    ]
+
+    table_targets: List[Tuple[Optional[str], str]] = []
+
+    if normalized_type in ("postgresql", "mssql", "oracle"):
+        try:
+            schema_names = inspector.get_schema_names()
+        except Exception:
+            schema_names = []
+
+        for schema_name in schema_names:
+            if not schema_name:
+                continue
+            lower_schema = str(schema_name).lower()
+            upper_schema = str(schema_name).upper()
+
+            if normalized_type == "postgresql" and lower_schema in {"pg_catalog", "information_schema", "pg_toast"}:
+                continue
+            if normalized_type == "mssql" and upper_schema in {"INFORMATION_SCHEMA", "SYS"}:
+                continue
+            if normalized_type == "oracle" and upper_schema in {"SYS", "SYSTEM", "XDB", "MDSYS", "CTXSYS", "WMSYS"}:
+                continue
+
+            try:
+                schema_tables = inspector.get_table_names(schema=schema_name)
+            except Exception:
+                schema_tables = []
+
+            for table_name in schema_tables:
+                table_targets.append((schema_name, table_name))
+    else:
+        try:
+            base_tables = inspector.get_table_names()
+        except Exception:
+            base_tables = []
+        for table_name in base_tables:
+            table_targets.append((None, table_name))
+
+    table_targets = sorted(table_targets, key=lambda item: ((item[0] or ""), item[1]))
+
+    total_tables = 0
+    total_columns = 0
+    table_records: List[Dict[str, Any]] = []
+
+    with engine.connect() as conn:
+        for schema_name, table_name in table_targets:
+            total_tables += 1
+
+            try:
+                columns = inspector.get_columns(table_name, schema=schema_name)
+            except Exception:
+                columns = []
+
+            total_columns += len(columns)
+
+            try:
+                pk_info = inspector.get_pk_constraint(table_name, schema=schema_name) or {}
+                pk_columns = set(pk_info.get("constrained_columns") or [])
+            except Exception:
+                pk_columns = set()
+
+            table_comment = ""
+            try:
+                comment_payload = inspector.get_table_comment(table_name, schema=schema_name) or {}
+                table_comment = str(comment_payload.get("text") or "").strip()
+            except Exception:
+                table_comment = ""
+
+            row_count: Optional[int] = None
+            try:
+                qualified_table_name = _build_qualified_table_name(schema_name, table_name, normalized_type)
+                row_count_result = conn.execute(text(f"SELECT COUNT(*) AS cnt FROM {qualified_table_name}"))
+                row_count_value = row_count_result.scalar()
+                row_count = int(row_count_value) if row_count_value is not None else 0
+            except Exception:
+                row_count = None
+
+            display_table_name = f"{schema_name}.{table_name}" if schema_name else table_name
+            lines.append(f"## 表: {display_table_name}")
+            lines.append(f"- 数据量(行数): {row_count if row_count is not None else '未知'}")
+            lines.append(f"- 字段数量: {len(columns)}")
+            if table_comment:
+                lines.append(f"- 表定义/说明: {table_comment}")
+
+            table_record: Dict[str, Any] = {
+                "schema": schema_name or "",
+                "name": display_table_name,
+                "row_count": row_count,
+                "column_count": len(columns),
+                "table_comment": table_comment,
+                "columns": [],
+            }
+
+            if not columns:
+                lines.append("- 字段信息: 无法读取")
+                lines.append("")
+                table_records.append(table_record)
+                continue
+
+            lines.append("| 字段名 | 数据类型 | 可空 | 默认值 | 字段定义/说明 | 主键 |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
+            for column in columns:
+                column_name = str(column.get("name") or "")
+                column_type = _escape_md_cell(column.get("type") or "")
+                nullable = "是" if column.get("nullable", True) else "否"
+                default_value = _escape_md_cell(column.get("default") or "")
+                definition_text = _escape_md_cell(column.get("comment") or column.get("definition") or "")
+                is_pk = "是" if column_name in pk_columns else "-"
+                lines.append(
+                    f"| {_escape_md_cell(column_name)} | {column_type} | {nullable} | {default_value} | {definition_text} | {is_pk} |"
+                )
+                table_record["columns"].append(
+                    {
+                        "name": column_name,
+                        "type": str(column.get("type") or ""),
+                        "nullable": bool(column.get("nullable", True)),
+                        "default": str(column.get("default") or ""),
+                        "definition": str(column.get("comment") or column.get("definition") or ""),
+                        "is_pk": column_name in pk_columns,
+                    }
+                )
+            lines.append("")
+            table_records.append(table_record)
+
+    engine.dispose()
+
+    lines.insert(3, f"- 表数量: {total_tables}")
+    lines.insert(4, f"- 字段总数: {total_columns}")
+
+    return {
+        "source_label": source_label,
+        "database": database_name,
+        "table_count": total_tables,
+        "column_count": total_columns,
+        "tables": table_records,
+        "summary": f"{source_label} 共 {total_tables} 张表、{total_columns} 个字段",
+        "context_text": "\n".join(lines).strip(),
+    }
+
+
 @app.post("/api/db/test")
 async def test_db_connection(body: dict = Body(...)):
     """测试数据库连接"""
@@ -5364,6 +6226,74 @@ async def test_db_connection(body: dict = Body(...)):
         return {"success": True, "message": "Connection successful"}
     except Exception as e:
         print(f"DB Test Error: {e}")
+        return {"success": False, "message": format_db_error(e, body.get("db_type"))}
+
+
+@app.post("/api/db/list-databases")
+async def list_databases(body: dict = Body(...)):
+    """根据连接参数拉取数据库名称列表，用于前端数据库下拉选择。"""
+    try:
+        db_type = body.get("db_type")
+        config = body.get("config", {})
+        databases = list_accessible_databases(db_type, config)
+        return {"success": True, "databases": databases}
+    except Exception as e:
+        print(f"DB List Databases Error: {e}")
+        return {"success": False, "message": format_db_error(e, body.get("db_type"))}
+
+
+@app.post("/api/db/context/load")
+async def load_db_context_into_session(body: dict = Body(...)):
+    """将当前数据库结构导入会话上下文，作为分析知识库。"""
+    try:
+        db_type = body.get("db_type")
+        config = body.get("config", {})
+        session_id = str(body.get("session_id", "default") or "default")
+        username = str(body.get("username", "default") or "default")
+
+        snapshot = build_database_context_snapshot(db_type, config)
+        context_text = snapshot.get("context_text", "")
+        kb_entry = upsert_database_knowledge_source(username, db_type, config, snapshot)
+
+        workspace_dir = get_session_workspace(session_id, username)
+        generated_dir = Path(workspace_dir) / "generated"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_db_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(snapshot.get("database") or "database")).strip("_") or "database"
+        base_name = f"Database_Context_{safe_db_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        md_path = _save_md(context_text, base_name, str(generated_dir))
+
+        file_url = None
+        if md_path:
+            file_url = build_download_url(f"{username}/{session_id}/generated/{Path(md_path).name}")
+
+        loaded_at = datetime.now().isoformat(timespec="seconds")
+
+        SESSION_DB_CONTEXT[session_id] = {
+            "context_text": context_text,
+            "source_label": snapshot.get("source_label", ""),
+            "table_count": snapshot.get("table_count", 0),
+            "column_count": snapshot.get("column_count", 0),
+            "loaded_at": loaded_at,
+            "snapshot_file": Path(md_path).name if md_path else "",
+            "snapshot_url": file_url or "",
+            "knowledge_summary": kb_entry.get("summary", ""),
+        }
+
+        return {
+            "success": True,
+            "message": "数据库上下文已导入当前会话",
+            "source_label": snapshot.get("source_label", ""),
+            "table_count": snapshot.get("table_count", 0),
+            "column_count": snapshot.get("column_count", 0),
+            "context_length": len(context_text),
+            "snapshot_file": Path(md_path).name if md_path else None,
+            "snapshot_url": file_url,
+            "knowledge_summary": kb_entry.get("summary", ""),
+            "loaded_at": loaded_at,
+        }
+    except Exception as e:
+        print(f"DB Context Load Error: {e}")
         return {"success": False, "message": format_db_error(e, body.get("db_type"))}
 
 

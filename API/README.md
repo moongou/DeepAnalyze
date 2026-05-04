@@ -145,6 +145,7 @@ Then call chat with model id `gpt-4.1` as normal.
 ### 1. File Upload
 
 **Requests Example:**
+
 ```python
 import requests
 
@@ -157,6 +158,7 @@ print(f"File uploaded: {file_id}")
 ```
 
 **OpenAI Library Example:**
+
 ```python
 import openai
 
@@ -205,6 +207,7 @@ print(response.choices[0].message.content)
 ### 3. Chat with Files
 
 **Requests Example:**
+
 ```python
 response = requests.post('http://localhost:8200/v1/chat/completions', json={
     "model": "DeepAnalyze-8B",
@@ -228,6 +231,7 @@ for file_info in files:
 ```
 
 **OpenAI Library Example:**
+
 ```python
 response = client.chat.completions.create(
     model="DeepAnalyze-8B",
@@ -257,6 +261,7 @@ Use `thread_id` in the latest message to maintain workspace context across multi
 **Important:** You must maintain the complete conversation history in each request - only add `thread_id` to the latest message.
 
 **Requests Example:**
+
 ```python
 conversation_history = []
 
@@ -293,6 +298,7 @@ response = requests.post('http://localhost:8200/v1/chat/completions', json={
 ```
 
 **OpenAI Library Example:**
+
 ```python
 messages = []
 
@@ -324,6 +330,7 @@ messages.append({"role": "assistant", "content": response.choices[0].message.con
 ```
 
 **Key Points:**
+
 - `thread_id` is returned in the response message
 - Include `thread_id` in the **latest** user message of your conversation history
 - You should send the **complete conversation history** in each request
@@ -364,6 +371,7 @@ for line in response.iter_lines():
 ```
 
 **OpenAI Library Example:**
+
 ```python
 stream = client.chat.completions.create(
     model="DeepAnalyze-8B",
@@ -386,15 +394,16 @@ for chunk in stream:
         print(f"\nThread ID: {chunk.choices[0].delta.thread_id}")
 ```
 
-
 ## 📋 API Reference
 
 ### Files API
 
 #### POST /v1/files
+
 Upload a file for analysis.
 
 **Request:**
+
 ```http
 POST /v1/files
 Content-Type: multipart/form-data
@@ -403,6 +412,7 @@ file: [binary file data]
 ```
 
 **Response:**
+
 ```json
 {
   "id": "file-abc123...",
@@ -414,14 +424,17 @@ file: [binary file data]
 ```
 
 #### GET /v1/files
+
 List all uploaded files.
 
 **Request:**
+
 ```http
 GET /v1/files
 ```
 
 **Response:**
+
 ```json
 {
   "object": "list",
@@ -438,9 +451,11 @@ GET /v1/files
 ```
 
 #### GET /v1/files/{file_id}/content
+
 Download file content.
 
 **Request:**
+
 ```http
 GET /v1/files/{file_id}/content
 ```
@@ -448,14 +463,17 @@ GET /v1/files/{file_id}/content
 **Response:** Binary file content
 
 #### DELETE /v1/files/{file_id}
+
 Delete a file.
 
 **Request:**
+
 ```http
 DELETE /v1/files/{file_id}
 ```
 
 **Response:**
+
 ```json
 {
   "id": "file-abc123...",
@@ -467,9 +485,11 @@ DELETE /v1/files/{file_id}
 ### Chat Completions API
 
 #### POST /v1/chat/completions
+
 Extended chat completion with file support.
 
 **Request:**
+
 ```json
 {
   "model": "DeepAnalyze-8B",
@@ -488,6 +508,7 @@ Extended chat completion with file support.
 ```
 
 **Response (Non-Streaming):**
+
 ```json
 {
   "id": "chatcmpl-xyz789...",
@@ -522,25 +543,27 @@ Extended chat completion with file support.
 ```
 
 **Response (Streaming):**
-```
+
+```text
 data: {"id": "chatcmpl-xyz789...", "object": "chat.completion.chunk", "choices": [{"delta": {"content": "分析"}}]}
 data: {"id": "chatcmpl-xyz789...", "object": "chat.completion.chunk", "choices": [{"delta": {"files": [{"name":"chart.png","url":"..."}], "thread_id": "thread-abc123..."}, "finish_reason": "stop"}]}
 data: [DONE]
 ```
 
-
-
 ### Health Check API
 
 #### GET /health
+
 Check API server status.
 
 **Request:**
+
 ```http
 GET /health
 ```
 
 **Response:**
+
 ```json
 {
   "status": "healthy",
@@ -572,8 +595,6 @@ DEFAULT_TEMPERATURE = 0.4            # Default sampling temperature
 MAX_NEW_TOKENS = 32768               # Maximum response tokens
 STOP_TOKEN_IDS = [32000, 32007]      # Special token IDs
 ```
-
-
 
 ## 🛠️ Examples
 

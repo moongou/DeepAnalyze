@@ -258,6 +258,8 @@ export const API_CONFIG = {
 
     // 数据库连接
     DB_TEST: "/v1/database/test",
+    DB_LIST: "/v1/database/list",
+    DB_CONTEXT_LOAD: "/v1/database/context/load",
     DB_GENERATE_SQL: "/v1/database/generate-sql",
     DB_EXECUTE: "/v1/database/execute",
 
@@ -351,6 +353,8 @@ export const API_URLS = {
 
   // 数据库
   DB_TEST: buildApiUrl(API_CONFIG.ENDPOINTS.DB_TEST),
+  DB_LIST: buildApiUrl(API_CONFIG.ENDPOINTS.DB_LIST),
+  DB_CONTEXT_LOAD: buildApiUrl(API_CONFIG.ENDPOINTS.DB_CONTEXT_LOAD),
   DB_GENERATE_SQL: buildApiUrl(API_CONFIG.ENDPOINTS.DB_GENERATE_SQL),
   DB_EXECUTE: buildApiUrl(API_CONFIG.ENDPOINTS.DB_EXECUTE),
 

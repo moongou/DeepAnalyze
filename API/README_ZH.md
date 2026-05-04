@@ -145,6 +145,7 @@ requests.post(
 ### 1. 文件上传
 
 **请求示例:**
+
 ```python
 import requests
 
@@ -157,6 +158,7 @@ print(f"File uploaded: {file_id}")
 ```
 
 **OpenAI 库示例:**
+
 ```python
 import openai
 
@@ -189,6 +191,7 @@ print(content)
 ```
 
 **OpenAI 库示例:**
+
 ```python
 response = client.chat.completions.create(
     model="DeepAnalyze-8B",
@@ -204,6 +207,7 @@ print(response.choices[0].message.content)
 ### 3. 带文件的聊天
 
 **请求示例:**
+
 ```python
 response = requests.post('http://localhost:8200/v1/chat/completions', json={
     "model": "DeepAnalyze-8B",
@@ -227,6 +231,7 @@ for file_info in files:
 ```
 
 **OpenAI 库示例:**
+
 ```python
 response = client.chat.completions.create(
     model="DeepAnalyze-8B",
@@ -256,6 +261,7 @@ if hasattr(message, 'files') and message.files:
 **重要提示：** 您必须在每个请求中维护完整的对话历史记录 - 只在最新的消息中添加 `thread_id`。
 
 **请求示例:**
+
 ```python
 conversation_history = []
 
@@ -292,6 +298,7 @@ response = requests.post('http://localhost:8200/v1/chat/completions', json={
 ```
 
 **OpenAI 库示例:**
+
 ```python
 messages = []
 
@@ -323,6 +330,7 @@ messages.append({"role": "assistant", "content": response.choices[0].message.con
 ```
 
 **关键要点:**
+
 - `thread_id` 在响应消息中返回
 - 使用 `hasattr(message, 'thread_id')` 来检查OpenAI库中的thread_id
 - 只在对话历史记录的**最新**用户消息中包含 `thread_id`
@@ -364,6 +372,7 @@ for line in response.iter_lines():
 ```
 
 **OpenAI 库示例:**
+
 ```python
 stream = client.chat.completions.create(
     model="DeepAnalyze-8B",
@@ -386,17 +395,16 @@ for chunk in stream:
         print(f"\nThread ID: {chunk.choices[0].delta.thread_id}")
 ```
 
-
-
-
 ## 📋 API 参考
 
 ### 文件 API
 
 #### POST /v1/files
+
 上传文件进行分析。
 
 **请求:**
+
 ```http
 POST /v1/files
 Content-Type: multipart/form-data
@@ -405,6 +413,7 @@ file: [binary file data]
 ```
 
 **响应:**
+
 ```json
 {
   "id": "file-abc123...",
@@ -416,14 +425,17 @@ file: [binary file data]
 ```
 
 #### GET /v1/files
+
 列出所有上传的文件。
 
 **请求:**
+
 ```http
 GET /v1/files
 ```
 
 **响应:**
+
 ```json
 {
   "object": "list",
@@ -440,9 +452,11 @@ GET /v1/files
 ```
 
 #### GET /v1/files/{file_id}/content
+
 下载文件内容。
 
 **请求:**
+
 ```http
 GET /v1/files/{file_id}/content
 ```
@@ -450,14 +464,17 @@ GET /v1/files/{file_id}/content
 **响应:** 二进制文件内容
 
 #### DELETE /v1/files/{file_id}
+
 删除文件。
 
 **请求:**
+
 ```http
 DELETE /v1/files/{file_id}
 ```
 
 **响应:**
+
 ```json
 {
   "id": "file-abc123...",
@@ -469,9 +486,11 @@ DELETE /v1/files/{file_id}
 ### 聊天完成 API
 
 #### POST /v1/chat/completions
+
 扩展聊天完成，支持文件功能。
 
 **请求:**
+
 ```json
 {
   "model": "DeepAnalyze-8B",
@@ -490,6 +509,7 @@ DELETE /v1/files/{file_id}
 ```
 
 **响应（非流式）:**
+
 ```json
 {
   "id": "chatcmpl-xyz789...",
@@ -524,26 +544,27 @@ DELETE /v1/files/{file_id}
 ```
 
 **响应（流式）:**
-```
+
+```text
 data: {"id": "chatcmpl-xyz789...", "object": "chat.completion.chunk", "choices": [{"delta": {"content": "分析"}}]}
 data: {"id": "chatcmpl-xyz789...", "object": "chat.completion.chunk", "choices": [{"delta": {"files": [{"name":"chart.png","url":"..."}], "thread_id": "thread-abc123..."}, "finish_reason": "stop"}]}
 data: [DONE]
 ```
 
-
-
-
 ### 健康检查 API
 
 #### GET /health
+
 检查 API 服务器状态。
 
 **请求:**
+
 ```http
 GET /health
 ```
 
 **响应:**
+
 ```json
 {
   "status": "healthy",
@@ -575,8 +596,6 @@ DEFAULT_TEMPERATURE = 0.4            # 默认采样温度
 MAX_NEW_TOKENS = 32768               # 最大响应令牌数
 STOP_TOKEN_IDS = [32000, 32007]      # 特殊令牌 ID
 ```
-
-
 
 ## 🛠️ 示例
 

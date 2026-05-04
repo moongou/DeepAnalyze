@@ -69,6 +69,15 @@ interface SystemSettingsDialogProps {
   dbConfig: DbConfig;
   setDbConfig: (config: DbConfig) => void;
   getDefaultPort: (type: string) => string;
+  availableDatabaseNames: string[];
+  isLoadingDatabaseNames: boolean;
+  databaseListError: string;
+  dbContextSummary: string;
+  dbKnowledgeSummary: string;
+  dbKnowledgeUpdatedAt: string | null;
+  isLoadingDbContext: boolean;
+  handleLoadDbContext: () => void;
+  handleFetchDatabaseNames: () => void;
   handleTestConnection: () => void;
   isTestingDb: boolean;
   isDbTested: boolean;
@@ -128,6 +137,8 @@ export function SystemSettingsDialog({
   handleFetchModelList, isFetchingModelList, handleSaveModelConfig,
   modelTestStatus, availableModels, analysisStrategy, temperature,
   dbType, handleDbTypeChange, dbConfig, setDbConfig, getDefaultPort,
+  availableDatabaseNames, isLoadingDatabaseNames, databaseListError,
+  dbContextSummary, dbKnowledgeSummary, dbKnowledgeUpdatedAt, isLoadingDbContext, handleLoadDbContext, handleFetchDatabaseNames,
   handleTestConnection, isTestingDb, isDbTested,
   dbPrompt, setDbPrompt, handleGenerateSql, isGeneratingSql,
   dbGeneratedSql, setDbGeneratedSql, dbDatasetName, setDbDatasetName,
@@ -144,6 +155,16 @@ export function SystemSettingsDialog({
   knowledgeTestResults, handleTestKnowledgeProvider, knowledgeTestTarget,
   isSavingKnowledgeConfig, handleSaveKnowledgeConfig, knowledgeSettingsLoaded,
 }: SystemSettingsDialogProps) {
+  const formattedDbKnowledgeUpdatedAt = dbKnowledgeUpdatedAt
+    ? (() => {
+        const parsed = new Date(dbKnowledgeUpdatedAt);
+        if (Number.isNaN(parsed.getTime())) {
+          return dbKnowledgeUpdatedAt;
+        }
+        return parsed.toLocaleString("zh-CN", { hour12: false });
+      })()
+    : "-";
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="dialog-page-like max-w-none w-auto h-auto p-0 overflow-hidden flex flex-col">
@@ -386,15 +407,56 @@ export function SystemSettingsDialog({
                             </div>
                             <div className="col-span-2 space-y-1.5">
                               <Label htmlFor="system-db-name">{dbType === "sqlite" ? "SQLite 文件绝对路径" : "数据库名称"}</Label>
-                              <Input id="system-db-name" value={dbConfig.database} onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })} />
+                              {dbType !== "sqlite" && availableDatabaseNames.length > 0 ? (
+                                <Select
+                                  value={dbConfig.database || undefined}
+                                  onValueChange={(value) => setDbConfig({ ...dbConfig, database: value })}
+                                >
+                                  <SelectTrigger id="system-db-name">
+                                    <SelectValue placeholder="请选择数据库名称" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {availableDatabaseNames.map((name) => (
+                                      <SelectItem key={name} value={name}>
+                                        {name}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              ) : (
+                                <Input id="system-db-name" value={dbConfig.database} onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })} />
+                              )}
+                              {databaseListError ? <div className="text-xs text-amber-600">数据库列表加载失败：{databaseListError}</div> : null}
                             </div>
                           </div>
                           <div className="flex gap-2 justify-end">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={handleLoadDbContext}
+                              disabled={isLoadingDbContext}
+                            >
+                              {isLoadingDbContext ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                              将当前数据库所有信息作为上下文
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={handleFetchDatabaseNames} disabled={isLoadingDatabaseNames || dbType === "sqlite"}>
+                              {isLoadingDatabaseNames ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                              刷新数据库列表
+                            </Button>
                             <Button variant="outline" size="sm" onClick={handleTestConnection} disabled={isTestingDb}>
                               {isTestingDb ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
                               测试连接
                             </Button>
                           </div>
+                          {dbContextSummary ? (
+                            <div className="space-y-1 text-right">
+                              <div className="text-xs text-emerald-600 dark:text-emerald-400">{dbContextSummary}</div>
+                              {dbKnowledgeSummary ? (
+                                <div className="text-xs text-sky-600 dark:text-sky-400">知识库摘要：{dbKnowledgeSummary}</div>
+                              ) : null}
+                              <div className="text-xs text-gray-500 dark:text-gray-400">最近一次知识库更新时间：{formattedDbKnowledgeUpdatedAt}</div>
+                            </div>
+                          ) : null}
                         </section>
 
                         <section className={`space-y-3 transition-opacity ${!isDbTested ? "opacity-50 pointer-events-none" : ""}`}>

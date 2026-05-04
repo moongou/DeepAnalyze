@@ -84,7 +84,7 @@ export const TaskTreeItem = memo(function TaskTreeItem({
   const allChildrenChecked = hasChildren && node.children!.every(c => selectedTasks.has(c.id));
 
   return (
-    <div style={{ paddingLeft: depth * 20 }}>
+    <div>
       <div className="flex items-center gap-2 py-1.5 hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2">
         <Checkbox
           checked={hasChildren ? allChildrenChecked : isChecked}
@@ -102,7 +102,7 @@ export const TaskTreeItem = memo(function TaskTreeItem({
         </div>
       </div>
       {hasChildren && (
-        <div>
+        <div className="pl-5">
           {node.children!.map(child => (
             <TaskTreeItem
               key={child.id}

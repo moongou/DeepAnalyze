@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.1.6 - 2026-05-04
+
+### Added (v1.1.6)
+
+- Added compact layered system-prompt assembly with explicit budget controls for prompt modules and user data sections.
+- Added user-level database knowledge base persistence (`database_knowledge_base.json`) for imported table/column snapshots.
+- Added query-aware database knowledge retrieval context (top relevant tables/columns) instead of injecting full snapshots into each round.
+- Added DB context-load response metadata `knowledge_summary` and `loaded_at` for frontend status display.
+- Added database settings UI display for knowledge summary and latest knowledge-base update time.
+
+### Changed (v1.1.6)
+
+- Changed chat prompt construction to use compact core rules + selective modules (`strategy`, `mode`, `language`, `report`, `DB source`) with size trimming.
+- Changed session database context usage from full inline payloads to summary + retrieval snippets to reduce token pressure.
+- Changed frontend `useDatabase` state flow to persist and expose knowledge summary/update timestamp after context import.
+
+### Fixed (v1.1.6)
+
+- Fixed context-length instability risk by capping system prompt and `# Data` payload size before model requests.
+- Fixed DB knowledge timeline visibility gap in settings by surfacing last update time from backend.
+- Fixed a backend identifier quoting syntax issue to keep Python compile checks passing after prompt refactor.
+
 ## v1.1.5 - 2026-05-03
 
 ### Added (v1.1.5)
