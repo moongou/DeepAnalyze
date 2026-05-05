@@ -7,6 +7,7 @@ import time
 from fastapi import APIRouter, Query, HTTPException
 
 from config import CLEANUP_TIMEOUT_HOURS
+from maintenance_state import get_cleanup_status, mark_cleanup_failure, mark_cleanup_success
 from model_gateway import model_gateway
 from models import (
     ThreadCleanupRequest,
@@ -43,6 +44,7 @@ async def manual_cleanup_threads(
     """
     try:
         cleaned_count = storage.cleanup_expired_threads(timeout_hours=timeout_hours)
+        mark_cleanup_success(cleaned_count)
         return ThreadCleanupResponse(
             status="success",
             cleaned_threads=cleaned_count,
@@ -50,12 +52,19 @@ async def manual_cleanup_threads(
             timestamp=int(time.time())
         )
     except Exception as e:
+        mark_cleanup_failure(e)
         return ThreadCleanupResponse(
             status="error",
             cleaned_threads=0,
             timeout_hours=timeout_hours,
             timestamp=int(time.time())
         )
+
+
+@router.get("/cleanup-status")
+async def get_thread_cleanup_status():
+    """Return periodic/manual cleanup health state."""
+    return {"status": "ok", "cleanup": get_cleanup_status(), "timestamp": int(time.time())}
 
 
 @router.get("/threads-stats", response_model=ThreadStatsResponse)

@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.1.12 - 2026-05-05
+
+### Added (v1.1.12)
+
+- Added a read-only database schema inspection endpoint at `/v1/database/schema`, returning table, column, primary-key, and foreign-key metadata for SQL-first planning without requiring users to hand-author schema context.
+- Added `/v1/admin/cleanup-status` so operators can inspect periodic/manual thread cleanup health, last run time, error state, run count, and cleanup configuration.
+- Added a shared API SQL safety module for single-statement read-only validation so database SQL generation and execution share the same policy boundary.
+
+### Changed (v1.1.12)
+
+- Refactored API database connection handling through shared engine construction while preserving driver-aware timeouts and special-character-safe SQLAlchemy URLs.
+
+## v1.1.11 - 2026-05-05
+
+### Fixed (v1.1.11)
+
+- Fixed the API database SQL generation endpoint by using the model gateway synchronous client API instead of a missing client method.
+
+### Changed (v1.1.11)
+
+- Hardened the API database execution endpoint with single-statement read-only SQL validation, bounded result fetching, driver-aware connection timeouts, and SQLAlchemy URL construction for credentials containing special characters.
+- Changed model gateway registry persistence to write through a temporary file and atomically replace the registry JSON, reducing partial-write risk during provider/model updates.
+- Added periodic expired-thread cleanup on API server startup so temporary threads and workspaces are reclaimed without relying only on manual admin cleanup.
+
 ## v1.1.10 - 2026-05-05
 
 ### Added (v1.1.10)

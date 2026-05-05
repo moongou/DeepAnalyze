@@ -75,8 +75,20 @@ class ModelGateway:
 
     def _save_registry(self, registry: Optional[Dict[str, Any]] = None) -> None:
         payload = registry if registry is not None else self._registry
-        with open(MODEL_REGISTRY_PATH, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.makedirs(os.path.dirname(MODEL_REGISTRY_PATH), exist_ok=True)
+        tmp_path = f"{MODEL_REGISTRY_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, MODEL_REGISTRY_PATH)
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def _find_provider(self, provider_id: str) -> Optional[Dict[str, Any]]:
         for provider in self._registry.get("providers", []):
