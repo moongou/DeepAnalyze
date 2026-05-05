@@ -7459,6 +7459,19 @@ async def create_data_profile_report(body: dict = Body(...)):
         workspace_dir = get_session_workspace(session_id, username)
         generated_dir = Path(workspace_dir) / "generated"
         generated_dir.mkdir(parents=True, exist_ok=True)
+        existing_reports = sorted(generated_dir.glob("Data_Exploration_SKILL_*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if existing_reports:
+            latest_report = existing_reports[0]
+            return {
+                "success": True,
+                "skipped": True,
+                "message": f"已生成数据探查报告：{latest_report.name}，无需重复生成。",
+                "filename": latest_report.name,
+                "file_url": build_download_url(f"{username}/{session_id}/generated/{latest_report.name}"),
+                "database_source_count": len(db_graphs),
+                "file_count": len(file_profiles),
+                "summary": f"已存在数据探查报告：{latest_report.name}",
+            }
         base_name = f"Data_Exploration_SKILL_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         md_path = _save_md(markdown, base_name, str(generated_dir))
         file_url = build_download_url(f"{username}/{session_id}/generated/{Path(md_path).name}")

@@ -113,6 +113,11 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
 
 interface Message {
@@ -140,6 +145,8 @@ interface WorkspaceFile {
   download_url: string;
   preview_url?: string;
 }
+
+const DATA_PROFILE_REPORT_PATTERN = /^Data_Exploration_SKILL_.*\.md$/i;
 
 interface SavedDatabaseConnection {
   id: string;
@@ -913,31 +920,6 @@ export function ThreePanelInterface() {
   const [analysisLanguage, setAnalysisLanguage] = useState<AnalysisLanguage>("zh-CN");
   const [showLanguagePicker, setShowLanguagePicker] = useState(false);
   const [pendingAnalysisLanguage, setPendingAnalysisLanguage] = useState<AnalysisLanguage>("zh-CN");
-  // 点击外部关闭报告类型选择器
-  useEffect(() => {
-    if (!showReportTypePicker) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('[data-report-type-picker]')) {
-        setShowReportTypePicker(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showReportTypePicker]);
-
-  // 点击外部关闭语言选择器
-  useEffect(() => {
-    if (!showLanguagePicker) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('[data-language-picker]')) {
-        setShowLanguagePicker(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showLanguagePicker]);
   // 雨途斩棘录知识库
   const {
     showYutuPanel, setShowYutuPanel,
@@ -1285,6 +1267,12 @@ export function ThreePanelInterface() {
       return;
     }
 
+    const existingDataProfileReport = workspaceFiles.find((file) => DATA_PROFILE_REPORT_PATTERN.test(file.name));
+    if (existingDataProfileReport) {
+      toast({ description: `已生成数据探查报告：${existingDataProfileReport.name}，无需重复生成。` });
+      return;
+    }
+
     const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
     const databaseSourcesForReport = savedDbConnections
       .filter((connection) => selectedIdSet.has(connection.id))
@@ -1324,6 +1312,10 @@ export function ThreePanelInterface() {
       }
 
       await refreshWorkspace();
+      if (payload?.skipped && payload?.filename) {
+        toast({ description: `已生成数据探查报告：${payload.filename}，无需重复生成。` });
+        return;
+      }
       toast({ description: payload.summary || payload.message || "数据探查 SKILL 文档已生成" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "数据探查报告生成失败";
@@ -1341,7 +1333,7 @@ export function ThreePanelInterface() {
     savedDbConnections,
     sessionId,
     toast,
-    workspaceFiles.length,
+    workspaceFiles,
   ]);
 
   const loadAnalysisHistoryDetail = useCallback(async (runId: string, options?: { silent?: boolean }) => {
@@ -5237,9 +5229,9 @@ ${analysisContent}
         className="h-screen bg-white dark:bg-black text-black dark:text-white"
         suppressHydrationWarning
       >
-        <ResizablePanelGroup direction="horizontal" className="h-full">
+        <ResizablePanelGroup direction="horizontal" className="h-full min-h-0">
           {/* Left Panel - Workspace Tree */}
-          <ResizablePanel defaultSize={25} minSize={10}>
+          <ResizablePanel defaultSize={25} minSize={10} className="min-h-0 min-w-0">
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12">
                 <div className="flex items-center gap-2">
@@ -5523,28 +5515,28 @@ ${analysisContent}
           <ResizableHandle withHandle />
 
           {/* Middle Panel - Chat & Analysis */}
-          <ResizablePanel defaultSize={50} minSize={25}>
+          <ResizablePanel defaultSize={50} minSize={25} className="min-h-0 min-w-0">
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               {/* Header */}
-              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0">
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2">
+              <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0 overflow-hidden">
+                <div className="flex min-w-0 items-center gap-3 overflow-hidden">
+                  <div className="flex min-w-0 items-center gap-2 overflow-hidden">
                     <h1 className="text-sm font-medium">观雨</h1>
                     {isTyping && (
-                      <div className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
+                      <div className="flex shrink-0 items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
                         <div className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
                         <span>执行中…</span>
                       </div>
                     )}
                     {isLoggedIn && (
-                      <div className="flex items-center gap-2 px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full text-[10px] font-medium">
+                      <div className="flex shrink-0 items-center gap-2 px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full text-[10px] font-medium">
                         <User className="h-2.5 w-2.5" />
                         <span>{currentUser}</span>
                         <button onClick={handleLogout} className="hover:text-red-500 ml-1">退出</button>
                       </div>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
+                  <div className="hidden xl:flex shrink-0 items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
                     <span>自动折叠</span>
                     <Switch
                       className="data-[state=unchecked]:bg-gray-200 data-[state=unchecked]:border data-[state=unchecked]:border-gray-300"
@@ -5565,7 +5557,7 @@ ${analysisContent}
                       }}
                     />
                   </div>
-                  <div className="flex items-center gap-1 ml-2">
+                  <div className="flex min-w-0 items-center gap-1 ml-2 overflow-x-auto scrollbar-none">
                     <Button
                       variant="outline"
                       size="sm"
@@ -5585,116 +5577,130 @@ ${analysisContent}
                       项目中心
                     </Button>
                     {/* 报告类型选择 */}
-                    <div className="relative" data-report-type-picker>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-[11px] px-2 gap-1 border-green-200 text-green-600 hover:bg-green-50 dark:border-green-900 dark:text-green-400"
-                        onClick={() => {
-                          if (showReportTypePicker) {
-                            cancelReportTypePicker();
-                          } else {
-                            openReportTypePicker();
-                          }
-                        }}
+                    <Popover
+                      open={showReportTypePicker}
+                      onOpenChange={(open) => {
+                        if (open) {
+                          openReportTypePicker();
+                        } else {
+                          cancelReportTypePicker();
+                        }
+                      }}
+                    >
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-[11px] px-2 gap-1 border-green-200 text-green-600 hover:bg-green-50 dark:border-green-900 dark:text-green-400"
+                        >
+                          <FileText className="h-3 w-3" />
+                          报告类型
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        align="start"
+                        side="bottom"
+                        sideOffset={8}
+                        className="w-[240px] p-3 space-y-3"
                       >
-                        <FileText className="h-3 w-3" />
-                        报告类型
-                      </Button>
-                      {showReportTypePicker && (
-                        <div className="absolute top-8 left-0 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 min-w-[220px] space-y-3">
-                          <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择报告输出格式</div>
-                          {["pdf", "docx", "pptx"].map((type) => (
-                            <label key={type} className="flex items-center gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={pendingReportTypes.includes(type)}
-                                onChange={(e) => {
-                                  if (e.target.checked) {
-                                    setPendingReportTypes((prev) =>
-                                      prev.includes(type) ? prev : [...prev, type]
-                                    );
-                                  } else {
-                                    setPendingReportTypes((prev) =>
-                                      prev.filter((item) => item !== type)
-                                    );
-                                  }
-                                }}
-                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                              />
-                              <span className="text-xs text-gray-700 dark:text-gray-300 uppercase font-mono">{type}</span>
-                            </label>
-                          ))}
-                          <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
-                            当前: {pendingReportTypes.map(t => t.toUpperCase()).join(", ") || "未选择"}
-                          </div>
-                          <div className="flex justify-end gap-2">
-                            <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelReportTypePicker}>
-                              取消
-                            </Button>
-                            <Button size="sm" className="h-7 text-[11px]" onClick={confirmReportTypePicker}>
-                              确定
-                            </Button>
-                          </div>
+                        <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择报告输出格式</div>
+                        {["pdf", "docx", "pptx"].map((type) => (
+                          <label key={type} className="flex items-center gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={pendingReportTypes.includes(type)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setPendingReportTypes((prev) =>
+                                    prev.includes(type) ? prev : [...prev, type]
+                                  );
+                                } else {
+                                  setPendingReportTypes((prev) =>
+                                    prev.filter((item) => item !== type)
+                                  );
+                                }
+                              }}
+                              className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <span className="text-xs text-gray-700 dark:text-gray-300 uppercase font-mono">{type}</span>
+                          </label>
+                        ))}
+                        <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
+                          当前: {pendingReportTypes.map((type) => type.toUpperCase()).join(", ") || "未选择"}
                         </div>
-                      )}
-                    </div>
+                        <div className="flex justify-end gap-2">
+                          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelReportTypePicker}>
+                            取消
+                          </Button>
+                          <Button size="sm" className="h-7 text-[11px]" onClick={confirmReportTypePicker}>
+                            确定
+                          </Button>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
 
                     {/* 分析语言选择 */}
-                    <div className="relative" data-language-picker>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-[11px] px-2 gap-1 border-sky-200 text-sky-600 hover:bg-sky-50 dark:border-sky-900 dark:text-sky-400"
-                        onClick={() => {
-                          if (showLanguagePicker) {
-                            cancelLanguagePicker();
-                          } else {
-                            openLanguagePicker();
-                          }
-                        }}
+                    <Popover
+                      open={showLanguagePicker}
+                      onOpenChange={(open) => {
+                        if (open) {
+                          openLanguagePicker();
+                        } else {
+                          cancelLanguagePicker();
+                        }
+                      }}
+                    >
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-[11px] px-2 gap-1 border-sky-200 text-sky-600 hover:bg-sky-50 dark:border-sky-900 dark:text-sky-400"
+                        >
+                          <Languages className="h-3 w-3" />
+                          语言
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        align="start"
+                        side="bottom"
+                        sideOffset={8}
+                        className="w-[280px] p-3 space-y-3"
                       >
-                        <Languages className="h-3 w-3" />
-                        语言
-                      </Button>
-                      {showLanguagePicker && (
-                        <div className="absolute top-8 left-0 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 min-w-[260px] space-y-3">
-                          <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择分析与报告语言</div>
-                          {ANALYSIS_LANGUAGE_OPTIONS.map((option) => (
-                            <label
-                              key={option.value}
-                              className="flex items-start gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer"
-                            >
-                              <input
-                                type="radio"
-                                name="analysis-language"
-                                checked={pendingAnalysisLanguage === option.value}
-                                onChange={() => setPendingAnalysisLanguage(option.value)}
-                                className="mt-0.5 border-gray-300 text-blue-600 focus:ring-blue-500"
-                              />
-                              <span className="flex-1">
-                                <span className="block text-xs text-gray-700 dark:text-gray-300 font-medium">{option.label}</span>
-                                <span className="block text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{option.description}</span>
-                              </span>
-                            </label>
-                          ))}
-                          <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
-                            当前: {getAnalysisLanguageLabel(pendingAnalysisLanguage)}
-                          </div>
-                          <div className="flex justify-end gap-2">
-                            <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelLanguagePicker}>
-                              取消
-                            </Button>
-                            <Button size="sm" className="h-7 text-[11px]" onClick={confirmLanguagePicker}>
-                              确定
-                            </Button>
-                          </div>
+                        <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择分析与报告语言</div>
+                        {ANALYSIS_LANGUAGE_OPTIONS.map((option) => (
+                          <label
+                            key={option.value}
+                            className="flex items-start gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer"
+                          >
+                            <input
+                              type="radio"
+                              name="analysis-language"
+                              checked={pendingAnalysisLanguage === option.value}
+                              onChange={() => setPendingAnalysisLanguage(option.value)}
+                              className="mt-0.5 border-gray-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <span className="flex-1">
+                              <span className="block text-xs text-gray-700 dark:text-gray-300 font-medium">{option.label}</span>
+                              <span className="block text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{option.description}</span>
+                            </span>
+                          </label>
+                        ))}
+                        <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
+                          当前: {getAnalysisLanguageLabel(pendingAnalysisLanguage)}
                         </div>
-                      )}
-                    </div>
+                        <div className="flex justify-end gap-2">
+                          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelLanguagePicker}>
+                            取消
+                          </Button>
+                          <Button size="sm" className="h-7 text-[11px]" onClick={confirmLanguagePicker}>
+                            确定
+                          </Button>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
                   </div>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex shrink-0 items-center gap-1">
                   <AlertDialog>
                     <AlertDialogTrigger asChild>
                       <Button
@@ -5992,10 +5998,10 @@ ${analysisContent}
           <ResizableHandle withHandle />
 
           {/* Right Panel - Code Editor & Input */}
-          <ResizablePanel defaultSize={25} minSize={20}>
-            <ResizablePanelGroup direction="vertical">
+          <ResizablePanel defaultSize={25} minSize={20} className="min-h-0 min-w-0">
+            <ResizablePanelGroup direction="vertical" className="h-full min-h-0">
               {/* Upper: Code/Preview */}
-              <ResizablePanel defaultSize={40} minSize={30}>
+              <ResizablePanel defaultSize={40} minSize={30} className="min-h-0">
                 <div className="flex flex-col bg-gray-50 dark:bg-gray-900 min-h-0 h-full">
                   <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-gray-800 shrink-0">
                     <div className="flex items-center gap-3">
@@ -6200,7 +6206,7 @@ ${analysisContent}
               <ResizableHandle withHandle />
 
               {/* Lower: Chat Input */}
-              <ResizablePanel defaultSize={60} minSize={20}>
+              <ResizablePanel defaultSize={60} minSize={20} className="min-h-0">
                 <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
                   <div className="py-2 px-4 flex flex-col gap-1 border-b border-gray-100 dark:border-gray-900 bg-gray-50/50 dark:bg-gray-900/30">
                     <div className="flex justify-center items-center gap-3">
@@ -6324,7 +6330,7 @@ ${analysisContent}
                           <Button
                             size="sm"
                             onClick={stopGeneration}
-                            className="h-9 px-4 rounded-md bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50"
+                            className="h-9 w-[108px] px-4 rounded-md bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50"
                           >
                             <Square className="h-4 w-4 mr-2 fill-current" />
                             停止
@@ -6334,7 +6340,7 @@ ${analysisContent}
                             onClick={() => handleSendMessage()}
                             size="sm"
                             disabled={!inputValue.trim()}
-                            className="h-9 px-4 bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
+                            className="h-9 w-[108px] px-4 bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
                           >
                             <Send className="h-4 w-4 mr-2" />
                             发送

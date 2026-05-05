@@ -17,6 +17,7 @@ DEEPANALYZE_DEFAULT_MODEL_BASE_URL="${DEEPANALYZE_DEFAULT_MODEL_BASE_URL:-http:/
 DEEPANALYZE_DEFAULT_MODEL_NAME="${DEEPANALYZE_DEFAULT_MODEL_NAME:-DeepAnalyze-8B}"
 DEEPANALYZE_MODEL_AUTOSTART="${DEEPANALYZE_MODEL_AUTOSTART:-auto}"
 DEEPANALYZE_MODEL_READY_TIMEOUT_SECONDS="${DEEPANALYZE_MODEL_READY_TIMEOUT_SECONDS:-90}"
+DEEPANALYZE_FRONTEND_CLEAN_CACHE="${DEEPANALYZE_FRONTEND_CLEAN_CACHE:-1}"
 
 export DEEPANALYZE_COMPUTE_BACKEND
 export DEEPANALYZE_DEFAULT_PROVIDER_TYPE
@@ -26,6 +27,7 @@ export DEEPANALYZE_DEFAULT_MODEL_BASE_URL
 export DEEPANALYZE_DEFAULT_MODEL_NAME
 export DEEPANALYZE_MODEL_AUTOSTART
 export DEEPANALYZE_MODEL_READY_TIMEOUT_SECONDS
+export DEEPANALYZE_FRONTEND_CLEAN_CACHE
 
 # Make frontend defaults follow selected compute profile
 export NEXT_PUBLIC_AI_API_URL="${NEXT_PUBLIC_AI_API_URL:-$DEEPANALYZE_DEFAULT_MODEL_BASE_URL}"
@@ -86,6 +88,19 @@ should_autostart_model() {
     fi
     # auto mode: only local endpoint autostarts
     is_local_model_endpoint
+}
+
+should_clean_frontend_cache() {
+    local mode
+    mode="$(printf '%s' "$DEEPANALYZE_FRONTEND_CLEAN_CACHE" | tr '[:upper:]' '[:lower:]')"
+    case "$mode" in
+        0|false|off|no)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
 }
 
 model_health_url() {
@@ -283,6 +298,16 @@ sleep 3
 echo ""
 echo "Starting React frontend..."
 cd "$SCRIPT_DIR/frontend" || exit
+if should_clean_frontend_cache; then
+    if [ -d ".next" ]; then
+        echo "Cleaning frontend .next cache..."
+        rm -rf .next
+    else
+        echo "Frontend .next cache not found, skipping cleanup."
+    fi
+else
+    echo "Frontend cache cleanup skipped (DEEPANALYZE_FRONTEND_CLEAN_CACHE=$DEEPANALYZE_FRONTEND_CLEAN_CACHE)."
+fi
 nohup npm run dev -- -p "$FRONTEND_PORT" > "$LOG_DIR/frontend.log" 2>&1 &
 FRONTEND_PID=$!
 echo "Frontend PID: $FRONTEND_PID"

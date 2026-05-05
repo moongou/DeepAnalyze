@@ -244,7 +244,7 @@ export function DatabaseRelationshipDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="dialog-page-like max-w-none w-auto h-auto p-0 overflow-hidden flex flex-col">
         <DialogHeader className="px-6 py-4 border-b bg-white dark:bg-gray-950">
-          <div className="flex items-start justify-between gap-4">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <DialogTitle className="flex items-center gap-2">
                 <GitBranch className="h-5 w-5 text-cyan-600" />
@@ -254,10 +254,12 @@ export function DatabaseRelationshipDialog({
                 基于外键关系生成可拖拽的数据脉络视图，可切换多种布局方案，方便观察实体主从、连接路径和异常孤岛表。
               </DialogDescription>
             </div>
-            <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
-              {loading ? <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}
-              刷新数据脉络
-            </Button>
+            <div className="flex w-full justify-center sm:w-[340px] sm:flex-none">
+              <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
+                {loading ? <RefreshCw className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}
+                刷新数据脉络
+              </Button>
+            </div>
           </div>
         </DialogHeader>
 

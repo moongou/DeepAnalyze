@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.13 - 2026-05-05
+
+### Fixed (v1.1.13)
+
+- Fixed "报告类型" and "语言" 选择器按钮在溢出受限的 Header 中被裁剪无法展开的问题，将原生绝对定位下拉菜单替换为基于 Radix UI Portal 的 Popover 组件。
+- Fixed 三栏布局在分析发送后因高度未约束导致面板扩张崩坏的问题，为 ResizablePanelGroup 添加 `h-full min-h-0` 约束并移除 Header 的 `overflow-hidden`。
+- Fixed 数据探查报告重复生成问题：前端检测工作区已有 `Data_Exploration_SKILL_*.md` 文件时提示复用；后端扫描 `generated/` 目录，已存在时以 `skipped: true` 提前返回。
+- Fixed DatabaseRelationshipDialog 刷新按钮居中对齐。
+
+### Changed (v1.1.13)
+
+- `demo/chat/start.sh` 启动时自动清理前端 `.next` 缓存以防止构建产物损坏导致的服务启动失败，可通过环境变量 `DEEPANALYZE_FRONTEND_CLEAN_CACHE=0` 关闭。
+
 ## v1.1.12 - 2026-05-05
 
 ### Added (v1.1.12)
