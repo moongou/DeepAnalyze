@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.14 - 2026-05-05
+
+### Added (v1.1.14)
+
+- Added ECS deployment automation scripts for one-command release from local workspace to remote host: `scripts/deploy_ecs.sh`, `scripts/ecs_service.sh`, and `scripts/deploy.ecs.env.example`.
+- Added remote release flow with systemd service management (`deepanalyze-api`), shared virtual environment reuse, dependency installation, and post-deploy health check.
+- Added deployment hardening for Linux servers by filtering platform-incompatible dependencies (`mlx*`, `rpy2*`) and ensuring auth runtime dependencies (`PyJWT`, `bcrypt`) are installed.
+
+### Changed (v1.1.14)
+
+- Deployment now supports automatic port conflict fallback when requested ports are occupied on ECS, and reports effective runtime API/file ports.
+- Default remote deployment profile keeps the requested project port at `8420` while safely remapping internal bind ports when host conflicts exist.
+
 ## v1.1.13 - 2026-05-05
 
 ### Fixed (v1.1.13)
