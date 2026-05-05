@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.1.15 - 2026-05-05
+
+### Added (v1.1.15)
+
+- Added `scripts/ecs_enable_https_8420.sh` to automatically enable and maintain HTTPS ingress on `https://rainforgrain.top:8420`, proxying to the current effective DeepAnalyze API port on ECS.
+- Added `scripts/deploy_ecs_with_https.sh` as a one-command wrapper that performs deployment and then runs HTTPS 8420 upgrade in sequence.
+
+### Changed (v1.1.15)
+
+- HTTPS upgrader now supports idempotent updates: it reuses marker blocks in nginx config, updates `proxy_pass` target when effective API port changes, and ensures `8420/tcp` firewall allowance.
+- When `frps` still occupies 8420, upgrader stops/disables it before reloading nginx to guarantee TLS endpoint takeover.
+
 ## v1.1.14 - 2026-05-05
 
 ### Added (v1.1.14)
