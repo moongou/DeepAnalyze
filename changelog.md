@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.1.9 - 2026-05-05
+
+### Added (v1.1.9)
+
+- Added detailed per-session analysis history recording for demo/chat, including prompt assembly, round starts, LLM request/stream progress, code execution, report fallback, and final completion status, with persistent run/event storage for postmortem diagnosis.
+- Added a new analysis history entry in system settings so users can configure logging granularity, browse recent analysis runs, and inspect step-by-step event details for robustness, performance, quality, and reasoning review.
+- Added a runtime analysis-process sidebar in the main chat workspace so the current run's step events are visible during execution instead of only after opening system settings, with per-stage timing ranking plus stage-specific stall rules for LLM, code execution, database context loading, report assembly, and prompt preparation.
+
+### Changed (v1.1.9)
+
+- Changed the database relationship visualization entry name from “表关系可视化” to “数据脉络”.
+- Changed the 数据脉络 entry from the system settings database tab to the main workspace action row, pairing it horizontally with “沉淀数据探查”.
+- Changed the 数据脉络 window to a page-like workspace matching the system settings pane width, with draggable table cards and multiple layout modes (relationship-first, schema-grouped, grid) for easier relationship observation.
+- Changed the main workspace data entry area into a unified ingress panel with differentiated “沉淀数据探查” and “展示数据脉络” actions, stronger hover/press feedback, and a redesigned upload drop zone.
+
 ## v1.1.8 - 2026-05-04
 
 ### Added (v1.1.8)

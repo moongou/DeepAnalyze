@@ -596,6 +596,239 @@ def _save_user_config(username: str, filename: str, data) -> str:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     return path
+
+
+ANALYSIS_HISTORY_DEFAULT_SETTINGS = {
+    "enabled": True,
+    "capture_stream_progress": True,
+    "capture_prompt_preview": True,
+    "max_runs": 120,
+    "stream_progress_chunk_interval": 40,
+    "stream_progress_char_interval": 1600,
+}
+
+
+def _get_analysis_history_dir(username: str) -> str:
+    path = os.path.join(_get_user_config_dir(username), "analysis_history")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _get_analysis_history_index_path(username: str) -> str:
+    return os.path.join(_get_analysis_history_dir(username), "index.json")
+
+
+def _get_analysis_history_run_path(username: str, run_id: str) -> str:
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(run_id or "run")).strip("_") or f"run_{int(time_module.time())}"
+    return os.path.join(_get_analysis_history_dir(username), f"{safe_run_id}.jsonl")
+
+
+def _load_analysis_history_settings(username: str) -> Dict[str, Any]:
+    saved = _load_user_config(username, "analysis_history_settings.json", {})
+    merged = dict(ANALYSIS_HISTORY_DEFAULT_SETTINGS)
+    if isinstance(saved, dict):
+        for key, default_value in ANALYSIS_HISTORY_DEFAULT_SETTINGS.items():
+            value = saved.get(key, default_value)
+            if isinstance(default_value, bool):
+                merged[key] = bool(value)
+            elif isinstance(default_value, int):
+                try:
+                    merged[key] = max(1, int(value))
+                except Exception:
+                    merged[key] = default_value
+            else:
+                merged[key] = value
+    return merged
+
+
+def _sanitize_analysis_history_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    incoming = settings if isinstance(settings, dict) else {}
+    sanitized = dict(ANALYSIS_HISTORY_DEFAULT_SETTINGS)
+    for key, default_value in ANALYSIS_HISTORY_DEFAULT_SETTINGS.items():
+        value = incoming.get(key, default_value)
+        if isinstance(default_value, bool):
+            sanitized[key] = bool(value)
+        elif isinstance(default_value, int):
+            try:
+                sanitized[key] = max(1, int(value))
+            except Exception:
+                sanitized[key] = default_value
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
+def _load_analysis_history_index(username: str) -> Dict[str, Any]:
+    path = _get_analysis_history_index_path(username)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("runs"), list):
+                return data
+        except Exception:
+            pass
+    return {"runs": []}
+
+
+def _save_analysis_history_index(username: str, data: Dict[str, Any]) -> str:
+    path = _get_analysis_history_index_path(username)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def _upsert_analysis_history_summary(username: str, summary: Dict[str, Any], max_runs: int = 120) -> None:
+    if not isinstance(summary, dict) or not summary.get("run_id"):
+        return
+    data = _load_analysis_history_index(username)
+    runs = [item for item in data.get("runs", []) if isinstance(item, dict) and item.get("run_id") != summary.get("run_id")]
+    runs.append(summary)
+    runs.sort(key=lambda item: str(item.get("started_at") or item.get("updated_at") or ""), reverse=True)
+    data["runs"] = runs[:max(1, int(max_runs or 120))]
+    _save_analysis_history_index(username, data)
+
+
+def _truncate_history_text(text: Any, max_chars: int = 600) -> str:
+    raw = str(text or "")
+    if len(raw) <= max_chars:
+        return raw
+    return raw[:max_chars] + "..."
+
+
+def _sanitize_runtime_db_source_for_history(source: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(source, dict):
+        return {}
+    config = source.get("config") if isinstance(source.get("config"), dict) else {}
+    return {
+        "id": str(source.get("id", "") or ""),
+        "label": str(source.get("label", "") or ""),
+        "db_type": str(source.get("db_type") or source.get("dbType") or ""),
+        "config": {
+            "host": str(config.get("host", "") or ""),
+            "port": str(config.get("port", "") or ""),
+            "user": str(config.get("user", "") or ""),
+            "database": str(config.get("database", "") or ""),
+        },
+    }
+
+
+def _sanitize_model_provider_for_history(model_provider: Any) -> Dict[str, Any]:
+    if not isinstance(model_provider, dict):
+        return {}
+    return {
+        "id": str(model_provider.get("id", "") or ""),
+        "label": str(model_provider.get("label", "") or ""),
+        "providerType": str(model_provider.get("providerType", "") or ""),
+        "model": str(model_provider.get("model", "") or ""),
+        "baseUrl": str(model_provider.get("baseUrl", "") or ""),
+    }
+
+
+class AnalysisHistoryRecorder:
+    def __init__(
+        self,
+        username: str,
+        session_id: str,
+        settings: Dict[str, Any],
+        request_summary: Dict[str, Any],
+    ):
+        self.username = str(username or "default")
+        self.session_id = str(session_id or "default")
+        self.settings = _sanitize_analysis_history_settings(settings)
+        self.enabled = bool(self.settings.get("enabled", True))
+        self.started_at_ts = time_module.time()
+        self.started_at = datetime.now().isoformat(timespec="seconds")
+        self.run_id = f"{self.session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}"
+        self.path = _get_analysis_history_run_path(self.username, self.run_id)
+        self.event_count = 0
+        self.last_stage = "session"
+        self.last_event = "created"
+        self.current_status = "running"
+        self.summary = {
+            "run_id": self.run_id,
+            "session_id": self.session_id,
+            "username": self.username,
+            "status": "running",
+            "started_at": self.started_at,
+            "updated_at": self.started_at,
+            "duration_ms": 0,
+            "event_count": 0,
+            "last_stage": "session",
+            "last_event": "created",
+            "last_message": "analysis run created",
+            "request_summary": request_summary if isinstance(request_summary, dict) else {},
+        }
+        if self.enabled:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            self.log(
+                stage="session",
+                event="session_started",
+                status="running",
+                message="analysis session started",
+                details=request_summary,
+            )
+
+    def _persist_summary(self) -> None:
+        if not self.enabled:
+            return
+        self.summary["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        self.summary["duration_ms"] = int((time_module.time() - self.started_at_ts) * 1000)
+        self.summary["event_count"] = self.event_count
+        self.summary["last_stage"] = self.last_stage
+        self.summary["last_event"] = self.last_event
+        self.summary["status"] = self.current_status
+        _upsert_analysis_history_summary(
+            self.username,
+            dict(self.summary),
+            max_runs=self.settings.get("max_runs", ANALYSIS_HISTORY_DEFAULT_SETTINGS["max_runs"]),
+        )
+
+    def log(
+        self,
+        stage: str,
+        event: str,
+        status: str = "info",
+        message: str = "",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        self.event_count += 1
+        self.last_stage = str(stage or "session")
+        self.last_event = str(event or "event")
+        self.current_status = status if status in {"running", "info", "completed", "failed", "warning"} else self.current_status
+        payload = {
+            "run_id": self.run_id,
+            "sequence": self.event_count,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "elapsed_ms": int((time_module.time() - self.started_at_ts) * 1000),
+            "stage": self.last_stage,
+            "event": self.last_event,
+            "status": status,
+            "message": message,
+            "details": details or {},
+        }
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        if message:
+            self.summary["last_message"] = _truncate_history_text(message, max_chars=220)
+        if status in {"warning", "failed"}:
+            self.summary["last_problem"] = _truncate_history_text(message or json.dumps(details or {}, ensure_ascii=False), max_chars=320)
+        self._persist_summary()
+
+    def finalize(self, status: str, message: str = "", details: Optional[Dict[str, Any]] = None) -> None:
+        if not self.enabled:
+            return
+        normalized_status = status if status in {"completed", "failed", "warning"} else "completed"
+        self.current_status = normalized_status
+        self.log(
+            stage="session",
+            event="session_completed" if normalized_status == "completed" else "session_finished_with_issues",
+            status=normalized_status,
+            message=message,
+            details=details or {},
+        )
 KB_MASK = "••••••••"
 KB_DEFAULT_SETTINGS = {
     "knowledge_base_enabled": True,
@@ -1247,6 +1480,7 @@ _V1_REWRITE = {
     "/v1/config/models":          "/api/config/models",
     "/v1/config/databases":       "/api/config/databases",
     "/v1/config/knowledge":       "/api/config/knowledge",
+    "/v1/config/analysis-history": "/api/config/analysis-history",
     "/v1/config/export":          "/api/config/export",
     "/v1/knowledge/settings":     "/api/kb/settings",
     "/v1/knowledge/test":         "/api/kb/test",
@@ -1273,6 +1507,7 @@ _V1_REWRITE = {
     "/v1/database/execute":       "/api/db/execute",
     "/v1/data/profile-report":     "/api/data/profile-report",
     "/v1/export/report":          "/export/report",
+    "/v1/analysis/history":       "/api/analysis/history",
     "/v1/chat/guidance":          "/api/chat/guidance",
     "/v1/code/execute":           "/execute",
 }
@@ -1280,6 +1515,7 @@ _V1_PREFIX_REWRITE = {
     "/v1/knowledge/yutu/":  "/api/yutu/",
     "/v1/projects/":        "/api/projects/",
     "/v1/files/":           "/workspace/",
+    "/v1/analysis/history/": "/api/analysis/history/",
 }
 
 
@@ -3431,6 +3667,33 @@ def bot_stream(
     if loaded_db_source and loaded_db_source not in preferred_source_labels:
         preferred_source_labels.append(loaded_db_source)
 
+    analysis_history_settings = _load_analysis_history_settings(username)
+    history_recorder = AnalysisHistoryRecorder(
+        username=username,
+        session_id=session_id,
+        settings=analysis_history_settings,
+        request_summary={
+            "strategy": strategy,
+            "analysis_mode": analysis_mode,
+            "analysis_language": analysis_language,
+            "report_types": requested_report_types,
+            "incoming_message_count": len(messages or []),
+            "workspace_reference_count": len(workspace or []),
+            "active_database_sources": [
+                _sanitize_runtime_db_source_for_history(item)
+                for item in active_sources
+            ],
+            "source_selection_explicit": bool(source_selection_explicit),
+            "loaded_db_context": {
+                "source_label": loaded_db_source,
+                "table_count": loaded_db_table_count,
+                "column_count": loaded_db_column_count,
+                "snapshot_file": loaded_db_snapshot_file,
+            },
+            "model_provider": _sanitize_model_provider_for_history(model_provider),
+        },
+    )
+
     if loaded_db_source:
         if analysis_language == "en":
             database_source_prompt += (
@@ -3451,6 +3714,23 @@ def bot_stream(
             latest_user_query = str(msg.get("content", "") or "")
             break
 
+    database_context_started_ts = None
+    if active_sources or loaded_db_source:
+        database_context_started_ts = time_module.time()
+        history_recorder.log(
+            stage="database",
+            event="database_context_started",
+            status="running",
+            message="database runtime context assembly started",
+            details={
+                "selected_source_count": len(active_sources),
+                "loaded_context_source": loaded_db_source,
+                "loaded_table_count": loaded_db_table_count,
+                "loaded_column_count": loaded_db_column_count,
+                "snapshot_file": loaded_db_snapshot_file,
+            },
+        )
+
     db_kb_context = build_database_knowledge_context(
         username=username,
         user_query=latest_user_query,
@@ -3463,6 +3743,22 @@ def bot_stream(
         ) + db_kb_context
     if database_data_context:
         database_data_context = trim_text_for_budget(database_data_context, max_chars=2800)
+    if database_context_started_ts is not None:
+        history_recorder.log(
+            stage="database",
+            event="database_context_prepared",
+            status="running",
+            message="database runtime context prepared",
+            details={
+                "selected_source_count": len(active_sources),
+                "loaded_context_source": loaded_db_source,
+                "loaded_table_count": loaded_db_table_count,
+                "loaded_column_count": loaded_db_column_count,
+                "context_chars": len(database_data_context or ""),
+                "has_knowledge_context": bool(db_kb_context),
+                "duration_ms": int((time_module.time() - database_context_started_ts) * 1000),
+            },
+        )
 
     language_prompt = build_analysis_language_prompt(analysis_language)
     signature_safety_prompt = (
@@ -3535,6 +3831,21 @@ def bot_stream(
     # 创建 converted 子文件夹用于存放 UTF-8 转换后的文件
     CONVERTED_DIR = os.path.join(WORKSPACE_DIR, "converted")
     os.makedirs(CONVERTED_DIR, exist_ok=True)
+    history_recorder.log(
+        stage="prompt",
+        event="prompt_prepared",
+        status="running",
+        message="system prompt assembled",
+        details={
+            "system_prompt_chars": len(system_prompt or ""),
+            "language_enforcer_chars": len(language_enforcer_prompt or ""),
+            "database_context_chars": len(database_data_context or ""),
+            "database_source_prompt_chars": len(database_source_prompt or ""),
+            "system_prompt_preview": _truncate_history_text(system_prompt, 1200)
+            if analysis_history_settings.get("capture_prompt_preview", True)
+            else "",
+        },
+    )
     # print(messages)
     if messages and messages[0]["role"] == "assistant":
         messages = messages[1:]
@@ -3561,6 +3872,18 @@ def bot_stream(
             ] = f"# Instruction\n{user_message}\n\n# Data\n{merged_data_sections}"
         else:
             messages[-1]["content"] = f"# Instruction\n{user_message}"
+        history_recorder.log(
+            stage="prompt",
+            event="user_message_prepared",
+            status="running",
+            message="user instruction merged with runtime data context",
+            details={
+                "user_message_preview": _truncate_history_text(user_message, 600),
+                "file_info_chars": len(file_info or ""),
+                "merged_data_chars": len((messages[-1].get("content") or "")),
+                "has_database_context": bool(database_data_context),
+            },
+        )
     # print("111",messages)
     initial_workspace = set(workspace)
     assistant_reply = ""
@@ -3568,8 +3891,21 @@ def bot_stream(
     exe_output = None
     llm_client, llm_model, runtime_provider = get_runtime_llm(model_provider)
     round_count = 0
+    history_final_status = "completed"
+    history_final_message = "analysis session finished"
     while not finished and round_count < MAX_AGENT_ROUNDS:
         round_count += 1
+        history_recorder.log(
+            stage="round",
+            event="round_started",
+            status="running",
+            message=f"analysis round {round_count} started",
+            details={
+                "round": round_count,
+                "message_count": len(messages),
+                "workspace_dir": WORKSPACE_DIR,
+            },
+        )
         # 在每次 LLM 生成前，检查是否有用户提交的“过程指导/Side Task”
         guidance = SESSION_GUIDANCE.pop(session_id, None)
         if guidance:
@@ -3579,6 +3915,16 @@ def bot_stream(
             }
             messages.append(guidance_msg)
             print(f"[Side Guidance] Injecting guidance into session {session_id}")
+            history_recorder.log(
+                stage="guidance",
+                event="guidance_injected",
+                status="running",
+                message="side guidance injected into current round",
+                details={
+                    "round": round_count,
+                    "guidance_preview": _truncate_history_text(guidance, 500),
+                },
+            )
 
         request_kwargs: Dict[str, Any] = {
             "model": llm_model,
@@ -3601,9 +3947,33 @@ def bot_stream(
                 "max_new_tokens": 32768,
             }
 
+        history_recorder.log(
+            stage="llm",
+            event="llm_request_started",
+            status="running",
+            message=f"llm request started for round {round_count}",
+            details={
+                "round": round_count,
+                "provider": runtime_provider,
+                "model": llm_model,
+                "message_count": len(messages),
+                "temperature": effective_temperature,
+                "has_extra_body": "extra_body" in request_kwargs,
+            },
+        )
+
         try:
             response = _create_chat_completion_with_retry(llm_client, request_kwargs)
         except Exception as create_exc:
+            history_final_status = "failed"
+            history_final_message = f"llm request failed: {create_exc}"
+            history_recorder.log(
+                stage="llm",
+                event="llm_request_failed",
+                status="failed",
+                message=history_final_message,
+                details={"round": round_count},
+            )
             error_block = _build_streaming_answer_error(str(create_exc))
             assistant_reply += error_block
             yield error_block
@@ -3612,6 +3982,10 @@ def bot_stream(
         cur_res = ""
         last_finish_reason = None
         saw_final_answer_this_round = False
+        stream_chunk_count = 0
+        stream_char_count = 0
+        next_chunk_progress = int(analysis_history_settings.get("stream_progress_chunk_interval", 40))
+        next_char_progress = int(analysis_history_settings.get("stream_progress_char_interval", 1600))
         for chunk in response:
             if chunk.choices:
                 choice = chunk.choices[0]
@@ -3620,6 +3994,24 @@ def bot_stream(
                     delta = choice.delta.content
                     cur_res += delta
                     assistant_reply += delta
+                    stream_chunk_count += 1
+                    stream_char_count += len(delta)
+                    if analysis_history_settings.get("capture_stream_progress", True) and (
+                        stream_chunk_count >= next_chunk_progress or stream_char_count >= next_char_progress
+                    ):
+                        history_recorder.log(
+                            stage="llm",
+                            event="llm_stream_progress",
+                            status="running",
+                            message=f"round {round_count} streamed {stream_char_count} chars",
+                            details={
+                                "round": round_count,
+                                "chunk_count": stream_chunk_count,
+                                "char_count": stream_char_count,
+                            },
+                        )
+                        next_chunk_progress += int(analysis_history_settings.get("stream_progress_chunk_interval", 40))
+                        next_char_progress += int(analysis_history_settings.get("stream_progress_char_interval", 1600))
                     yield delta
 
             if re.search(r"</answer>", cur_res, re.IGNORECASE):
@@ -3630,6 +4022,21 @@ def bot_stream(
                 messages.append({"role": "assistant", "content": cur_res})
                 finished = True
                 break
+        history_recorder.log(
+            stage="llm",
+            event="llm_response_completed",
+            status="running",
+            message=f"llm response completed for round {round_count}",
+            details={
+                "round": round_count,
+                "finish_reason": last_finish_reason,
+                "chunk_count": stream_chunk_count,
+                "char_count": stream_char_count,
+                "saw_final_answer": saw_final_answer_this_round,
+                "has_tasktree": bool(re.search(r"<tasktree>", cur_res, re.IGNORECASE)),
+                "has_code": bool(re.search(r"<code>|```", cur_res, re.IGNORECASE)),
+            },
+        )
         if finished:
             # 已因 </Answer> 或 </TaskTree> 结束，跳过后续代码执行逻辑
             continue
@@ -3644,6 +4051,13 @@ def bot_stream(
             assistant_reply += closing_tag
             yield closing_tag
             messages.append({"role": "assistant", "content": cur_res})
+            history_recorder.log(
+                stage="planner",
+                event="tasktree_completed",
+                status="running",
+                message="task tree output was auto-closed after stop sequence",
+                details={"round": round_count},
+            )
             finished = True
             continue
 
@@ -3676,9 +4090,21 @@ def bot_stream(
                     code_str = md_match.group(1).strip()
 
             if code_str:
+                execution_started_ts = time_module.time()
                 code_str = Chinese_matplot_str + "\n" + code_str
                 # 自动将用户提及的原始文件名映射为 converted/ 目录下的实际文件
                 code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
+                history_recorder.log(
+                    stage="code",
+                    event="code_execution_started",
+                    status="running",
+                    message=f"code execution started for round {round_count}",
+                    details={
+                        "round": round_count,
+                        "code_chars": len(code_str),
+                        "code_preview": _truncate_history_text(code_str, 700),
+                    },
+                )
                 # 执行前快照（路径 -> (size, mtime)）
                 try:
                     before_state = {
@@ -3690,6 +4116,7 @@ def bot_stream(
                     before_state = {}
                 # 在子进程中以固定工作区执行
                 exe_output = execute_code_safe(code_str, WORKSPACE_DIR)
+                error_info: Dict[str, Any] = {}
 
                 # ========== 自动检测并记录错误到雨途斩棘录 ==========
                 try:
@@ -3778,6 +4205,27 @@ def bot_stream(
                     lines.append("</File>")
                     file_block = "\n" + "\n".join(lines) + "\n"
                 full_execution_block = exe_str + file_block
+                history_recorder.log(
+                    stage="code",
+                    event="code_execution_completed",
+                    status="warning" if error_info.get("has_error") else "running",
+                    message=(
+                        f"code execution finished with detected error: {error_info.get('error_type', 'unknown')}"
+                        if error_info.get("has_error")
+                        else f"code execution finished for round {round_count}"
+                    ),
+                    details={
+                        "round": round_count,
+                        "duration_ms": int((time_module.time() - execution_started_ts) * 1000),
+                        "output_chars": len(exe_output or ""),
+                        "has_error": bool(error_info.get("has_error")),
+                        "error_type": str(error_info.get("error_type", "") or ""),
+                        "artifact_count": len(artifact_paths),
+                        "artifacts": [Path(path).name for path in artifact_paths[:20]],
+                        "added_file_count": len(added_paths),
+                        "modified_file_count": len(modified_paths),
+                    },
+                )
                 assistant_reply += full_execution_block
                 yield full_execution_block
                 messages.append({"role": "execute", "content": f"{exe_output}"})
@@ -3802,14 +4250,43 @@ def bot_stream(
         if saw_final_answer_this_round:
             if cur_res.strip():
                 messages.append({"role": "assistant", "content": cur_res})
+                history_recorder.log(
+                    stage="answer",
+                    event="final_answer_recorded",
+                    status="running",
+                    message=f"final answer captured in round {round_count}",
+                    details={
+                        "round": round_count,
+                        "answer_chars": len(cur_res),
+                    },
+                )
             finished = True
             continue
 
         # 无代码时也要保留本轮输出，允许模型进入下一轮（例如先 Analyze 再 Code）
         if cur_res.strip():
             messages.append({"role": "assistant", "content": cur_res})
+            history_recorder.log(
+                stage="round",
+                event="assistant_round_saved",
+                status="running",
+                message=f"assistant content retained for next round {round_count}",
+                details={
+                    "round": round_count,
+                    "content_chars": len(cur_res),
+                },
+            )
 
     if not finished and round_count >= MAX_AGENT_ROUNDS:
+        history_final_status = "warning"
+        history_final_message = f"analysis stopped after reaching max rounds ({MAX_AGENT_ROUNDS})"
+        history_recorder.log(
+            stage="session",
+            event="max_round_limit_reached",
+            status="warning",
+            message=history_final_message,
+            details={"round_count": round_count},
+        )
         limit_block = (
             "<Answer>\n"
             f"已达到最大分析轮次（{MAX_AGENT_ROUNDS}轮），为避免无限循环已自动停止。\n"
@@ -3851,6 +4328,16 @@ def bot_stream(
             ]
 
             if missing_types:
+                history_recorder.log(
+                    stage="report",
+                    event="report_fallback_started",
+                    status="running",
+                    message="report fallback started to ensure requested artifacts exist",
+                    details={
+                        "missing_types": missing_types,
+                        "requested_report_types": requested_report_types,
+                    },
+                )
                 report_history = [
                     msg for msg in messages
                     if isinstance(msg, dict) and str(msg.get("role", "")).lower() in {"user", "assistant", "execute"}
@@ -3907,9 +4394,43 @@ def bot_stream(
                     auto_file_block = "\n" + "\n".join(lines) + "\n"
                     assistant_reply += auto_file_block
                     yield auto_file_block
+                    history_recorder.log(
+                        stage="report",
+                        event="report_fallback_completed",
+                        status="running",
+                        message="report fallback generated missing artifacts",
+                        details={
+                            "generated_files": [Path(item).name for item in auto_generated_paths],
+                            "missing_types": missing_types,
+                        },
+                    )
     except Exception as auto_report_error:
+        history_final_status = "warning" if history_final_status == "completed" else history_final_status
+        history_final_message = f"auto report fallback failed: {auto_report_error}"
+        history_recorder.log(
+            stage="report",
+            event="report_fallback_failed",
+            status="warning",
+            message=history_final_message,
+            details={},
+        )
         print(f"Auto report fallback failed: {auto_report_error}")
 
+    final_has_answer = re.search(r"</answer>", assistant_reply, re.IGNORECASE) is not None
+    if history_final_status == "completed" and not final_has_answer:
+        history_final_status = "warning"
+        history_final_message = "analysis finished without a complete </Answer> block"
+    history_recorder.finalize(
+        status=history_final_status,
+        message=history_final_message,
+        details={
+            "round_count": round_count,
+            "assistant_reply_chars": len(assistant_reply),
+            "has_final_answer": final_has_answer,
+            "workspace_dir": WORKSPACE_DIR,
+            "generated_dir": GENERATED_DIR,
+        },
+    )
     os.chdir(original_cwd)
 
 
@@ -7001,6 +7522,67 @@ async def save_user_knowledge_settings(body: dict = Body(...)):
     settings = body.get("settings", {})
     _save_user_config(username, "knowledge_settings.json", settings)
     return {"success": True, "message": "知识库配置已保存到本地"}
+
+
+@app.get("/api/config/analysis-history")
+async def get_analysis_history_settings(username: str = Query("default")):
+    settings = _load_analysis_history_settings(username)
+    return {"success": True, "settings": settings}
+
+
+@app.post("/api/config/analysis-history")
+async def save_analysis_history_settings(body: dict = Body(...)):
+    username = body.get("username", "default")
+    settings = _sanitize_analysis_history_settings(body.get("settings", {}))
+    _save_user_config(username, "analysis_history_settings.json", settings)
+    return {"success": True, "settings": settings, "message": "分析历史配置已保存到本地"}
+
+
+@app.get("/api/analysis/history")
+async def list_analysis_history_runs(username: str = Query("default"), limit: int = Query(30, ge=1, le=200)):
+    settings = _load_analysis_history_settings(username)
+    data = _load_analysis_history_index(username)
+    runs = [item for item in data.get("runs", []) if isinstance(item, dict)][:limit]
+    stats = {
+        "total": len(data.get("runs", [])),
+        "completed": sum(1 for item in data.get("runs", []) if isinstance(item, dict) and item.get("status") == "completed"),
+        "failed": sum(1 for item in data.get("runs", []) if isinstance(item, dict) and item.get("status") == "failed"),
+        "warning": sum(1 for item in data.get("runs", []) if isinstance(item, dict) and item.get("status") == "warning"),
+    }
+    return {"success": True, "settings": settings, "runs": runs, "stats": stats}
+
+
+@app.get("/api/analysis/history/{run_id}")
+async def get_analysis_history_run(run_id: str, username: str = Query("default")):
+    data = _load_analysis_history_index(username)
+    run_summary = next(
+        (item for item in data.get("runs", []) if isinstance(item, dict) and item.get("run_id") == run_id),
+        None,
+    )
+    if not run_summary:
+        raise HTTPException(status_code=404, detail="分析历史不存在")
+
+    run_path = _get_analysis_history_run_path(username, run_id)
+    events: List[Dict[str, Any]] = []
+    if os.path.exists(run_path):
+        with open(run_path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    events.append(payload)
+
+    return {
+        "success": True,
+        "run": run_summary,
+        "events": events,
+        "settings": _load_analysis_history_settings(username),
+    }
 
 
 @app.get("/api/config/export")

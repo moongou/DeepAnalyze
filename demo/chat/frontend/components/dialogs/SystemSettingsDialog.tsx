@@ -23,7 +23,12 @@ import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/componen
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MODEL_PROVIDER_PRESETS, parseModelHeadersInput, type ModelProviderConfig } from "@/lib/config";
 import { Database, RefreshCw, Sparkles, Play, ChevronDown, ChevronRight } from "lucide-react";
-import { DatabaseRelationshipDialog } from "./DatabaseRelationshipDialog";
+import {
+  AnalysisHistorySettingsPanel,
+  type AnalysisHistoryEvent,
+  type AnalysisHistoryRunSummary,
+  type AnalysisHistorySettings,
+} from "./AnalysisHistorySettingsPanel";
 
 interface DbConfig {
   host: string;
@@ -71,8 +76,8 @@ interface ModelTestStatus {
 interface SystemSettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  systemSettingsTab: "model" | "database" | "knowledge";
-  setSystemSettingsTab: (tab: "model" | "database" | "knowledge") => void;
+  systemSettingsTab: "model" | "database" | "knowledge" | "history";
+  setSystemSettingsTab: (tab: "model" | "database" | "knowledge" | "history") => void;
   // Model tab
   modelProviderConfig: ModelProviderConfig;
   setModelProviderConfig: React.Dispatch<React.SetStateAction<ModelProviderConfig>>;
@@ -100,11 +105,8 @@ interface SystemSettingsDialogProps {
   dbContextSummary: string;
   dbKnowledgeSummary: string;
   dbKnowledgeUpdatedAt: string | null;
-  dbSchemaGraph: any | null;
   isLoadingDbContext: boolean;
   handleLoadDbContext: () => void;
-  isLoadingSchemaGraph: boolean;
-  handleLoadSchemaGraph: () => void;
   handleFetchDatabaseNames: () => void;
   handleTestConnection: () => void;
   isTestingDb: boolean;
@@ -128,6 +130,19 @@ interface SystemSettingsDialogProps {
   handleApplySavedDbConnection: (connectionId: string) => void;
   handleDeleteSavedDbConnection: (connectionId: string) => void;
   deletingDbConnectionId: string | null;
+  // Analysis history tab
+  analysisHistorySettings: AnalysisHistorySettings;
+  setAnalysisHistorySettings: React.Dispatch<React.SetStateAction<AnalysisHistorySettings>>;
+  analysisHistoryRuns: AnalysisHistoryRunSummary[];
+  analysisHistoryStats: { total: number; completed: number; failed: number; warning: number };
+  selectedAnalysisHistoryRun: AnalysisHistoryRunSummary | null;
+  analysisHistoryEvents: AnalysisHistoryEvent[];
+  isLoadingAnalysisHistory: boolean;
+  isLoadingAnalysisHistoryDetail: boolean;
+  isSavingAnalysisHistorySettings: boolean;
+  handleRefreshAnalysisHistory: () => void;
+  handleSelectAnalysisHistoryRun: (runId: string) => void;
+  handleSaveAnalysisHistorySettings: () => void;
   // Knowledge tab
   isLoadingKnowledgeConfig: boolean;
   loadKnowledgeConfig: () => void;
@@ -172,8 +187,8 @@ export function SystemSettingsDialog({
   modelTestStatus, availableModels, analysisStrategy, temperature,
   dbType, handleDbTypeChange, dbConfig, setDbConfig, getDefaultPort,
   availableDatabaseNames, isLoadingDatabaseNames, databaseListError,
-  dbContextSummary, dbKnowledgeSummary, dbKnowledgeUpdatedAt, dbSchemaGraph,
-  isLoadingDbContext, handleLoadDbContext, isLoadingSchemaGraph, handleLoadSchemaGraph, handleFetchDatabaseNames,
+  dbContextSummary, dbKnowledgeSummary, dbKnowledgeUpdatedAt,
+  isLoadingDbContext, handleLoadDbContext, handleFetchDatabaseNames,
   handleTestConnection, isTestingDb, isDbTested,
   dbPrompt, setDbPrompt, handleGenerateSql, isGeneratingSql,
   dbGeneratedSql, setDbGeneratedSql, dbDatasetName, setDbDatasetName,
@@ -182,6 +197,12 @@ export function SystemSettingsDialog({
   savedDbConnections, selectedDbSourceIds,
   handleToggleSavedDbSourceSelection, handleApplySavedDbConnection, handleDeleteSavedDbConnection,
   deletingDbConnectionId,
+  analysisHistorySettings, setAnalysisHistorySettings,
+  analysisHistoryRuns, analysisHistoryStats,
+  selectedAnalysisHistoryRun, analysisHistoryEvents,
+  isLoadingAnalysisHistory, isLoadingAnalysisHistoryDetail,
+  isSavingAnalysisHistorySettings,
+  handleRefreshAnalysisHistory, handleSelectAnalysisHistoryRun, handleSaveAnalysisHistorySettings,
   isLoadingKnowledgeConfig, loadKnowledgeConfig,
   knowledgeBaseEnabled, setKnowledgeBaseEnabled,
   yutuRecords, currentUser, isRecordingKnowledge,
@@ -205,7 +226,6 @@ export function SystemSettingsDialog({
 
   const [expandedDbGroups, setExpandedDbGroups] = useState<Record<string, boolean>>({});
   const [pendingDeleteConnection, setPendingDeleteConnection] = useState<SavedDatabaseConnection | null>(null);
-  const [showRelationshipDialog, setShowRelationshipDialog] = useState(false);
   const dbGroupStateStorageKey = useMemo(() => {
     const normalizedUser = String(currentUser || "default").trim() || "default";
     return `dbGroupExpandedState:${normalizedUser}`;
@@ -314,15 +334,16 @@ export function SystemSettingsDialog({
             系统设置
           </DialogTitle>
           <DialogDescription>
-            统一管理模型配置、数据库连接和知识库设置。
+            统一管理模型配置、数据库连接、知识库与分析历史追踪设置。
           </DialogDescription>
         </DialogHeader>
         <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
-          <Tabs value={systemSettingsTab} onValueChange={(value) => setSystemSettingsTab(value as "model" | "database" | "knowledge")} className="h-full flex flex-col">
-            <TabsList className="grid w-full grid-cols-3 max-w-[520px]">
+          <Tabs value={systemSettingsTab} onValueChange={(value) => setSystemSettingsTab(value as "model" | "database" | "knowledge" | "history")} className="h-full flex flex-col">
+            <TabsList className="grid w-full grid-cols-4 max-w-[720px]">
               <TabsTrigger value="model">模型设置</TabsTrigger>
               <TabsTrigger value="database">数据库设置</TabsTrigger>
               <TabsTrigger value="knowledge">知识库设置</TabsTrigger>
+              <TabsTrigger value="history">分析历史</TabsTrigger>
             </TabsList>
 
             <TabsContent value="model" className="mt-4 flex-1 overflow-y-auto space-y-6">
@@ -573,18 +594,6 @@ export function SystemSettingsDialog({
                             <Button
                               variant="outline"
                               size="sm"
-                              onClick={() => {
-                                setShowRelationshipDialog(true);
-                                handleLoadSchemaGraph();
-                              }}
-                              disabled={isLoadingSchemaGraph || !isDbTested}
-                            >
-                              {isLoadingSchemaGraph ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
-                              表关系可视化
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
                               onClick={handleLoadDbContext}
                               disabled={isLoadingDbContext}
                             >
@@ -787,6 +796,23 @@ export function SystemSettingsDialog({
                   </ResizablePanel>
                 </ResizablePanelGroup>
               </div>
+            </TabsContent>
+
+            <TabsContent value="history" className="mt-0 flex-1 overflow-hidden">
+              <AnalysisHistorySettingsPanel
+                settings={analysisHistorySettings}
+                setSettings={setAnalysisHistorySettings}
+                runs={analysisHistoryRuns}
+                stats={analysisHistoryStats}
+                selectedRun={selectedAnalysisHistoryRun}
+                events={analysisHistoryEvents}
+                isLoading={isLoadingAnalysisHistory}
+                isLoadingDetail={isLoadingAnalysisHistoryDetail}
+                isSaving={isSavingAnalysisHistorySettings}
+                onRefresh={handleRefreshAnalysisHistory}
+                onSave={handleSaveAnalysisHistorySettings}
+                onSelectRun={handleSelectAnalysisHistoryRun}
+              />
             </TabsContent>
 
             <TabsContent value="knowledge" className="mt-4 flex-1 overflow-y-auto space-y-6">
@@ -1000,6 +1026,8 @@ export function SystemSettingsDialog({
               ? `当前模型：${modelProviderConfig.model || "-"}`
               : systemSettingsTab === "database"
                 ? `数据库测试状态：${isDbTested ? "已通过" : "未测试"}`
+                : systemSettingsTab === "history"
+                  ? `已加载分析历史 ${analysisHistoryRuns.length} 条`
                 : knowledgeSettingsLoaded
                   ? "配置已加载"
                   : "尚未加载配置"}
@@ -1010,6 +1038,12 @@ export function SystemSettingsDialog({
             ) : null}
             {systemSettingsTab === "database" ? (
               <Button onClick={handleSaveDatabaseConfig}>保存数据库配置</Button>
+            ) : null}
+            {systemSettingsTab === "history" ? (
+              <Button onClick={handleSaveAnalysisHistorySettings} disabled={isSavingAnalysisHistorySettings}>
+                {isSavingAnalysisHistorySettings ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
+                保存历史配置
+              </Button>
             ) : null}
             {systemSettingsTab === "knowledge" ? (
               <Button onClick={handleSaveKnowledgeConfig} disabled={isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
@@ -1022,13 +1056,6 @@ export function SystemSettingsDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-    <DatabaseRelationshipDialog
-      open={showRelationshipDialog}
-      onOpenChange={setShowRelationshipDialog}
-      graph={dbSchemaGraph}
-      loading={isLoadingSchemaGraph}
-      onRefresh={handleLoadSchemaGraph}
-    />
     </>
   );
 }

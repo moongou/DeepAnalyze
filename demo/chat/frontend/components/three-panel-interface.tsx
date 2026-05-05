@@ -62,8 +62,7 @@ import {
   Bot,
   Settings,
   Languages,
-  Cpu,
-  Zap,
+  GitBranch,
   Monitor,
   ListTree,
 } from "lucide-react";
@@ -88,6 +87,13 @@ import { YutuPanel } from "@/components/dialogs/YutuPanel";
 import { SimpleSettingsDialog } from "@/components/dialogs/SimpleSettingsDialog";
 import { KnowledgeSettingsDialog } from "@/components/dialogs/KnowledgeSettingsDialog";
 import { SystemSettingsDialog } from "@/components/dialogs/SystemSettingsDialog";
+import { DatabaseRelationshipDialog } from "@/components/dialogs/DatabaseRelationshipDialog";
+import {
+  type AnalysisHistoryEvent,
+  type AnalysisHistoryRunSummary,
+  type AnalysisHistorySettings,
+} from "@/components/dialogs/AnalysisHistorySettingsPanel";
+import { AnalysisRuntimeSidebar } from "@/components/dialogs/AnalysisRuntimeSidebar";
 import { FileIcon, defaultStyles } from "react-file-icon";
 import {
   Select,
@@ -172,6 +178,15 @@ interface AnalysisSection {
   icon: string;
   color: string;
 }
+
+const DEFAULT_ANALYSIS_HISTORY_SETTINGS: AnalysisHistorySettings = {
+  enabled: true,
+  capture_stream_progress: true,
+  capture_prompt_preview: true,
+  max_runs: 120,
+  stream_progress_chunk_interval: 40,
+  stream_progress_char_interval: 1600,
+};
 
 const createClientId = () =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -759,7 +774,8 @@ export function ThreePanelInterface() {
 
   // 数据库连接相关状态
   const [showSystemSettings, setShowSystemSettings] = useState(false);
-  const [systemSettingsTab, setSystemSettingsTab] = useState<"model" | "database" | "knowledge">("model");
+  const [showDatabaseRelationshipDialog, setShowDatabaseRelationshipDialog] = useState(false);
+  const [systemSettingsTab, setSystemSettingsTab] = useState<"model" | "database" | "knowledge" | "history">("model");
   const [modelProviderConfig, setModelProviderConfig] = useState<ModelProviderConfig>(
     cloneModelProviderConfig()
   );
@@ -826,6 +842,19 @@ export function ThreePanelInterface() {
   const [pendingSendOverrideMessage, setPendingSendOverrideMessage] = useState<string | null>(null);
   const [deletingDbConnectionId, setDeletingDbConnectionId] = useState<string | null>(null);
   const [isGeneratingDataProfileReport, setIsGeneratingDataProfileReport] = useState(false);
+  const [analysisHistorySettings, setAnalysisHistorySettings] = useState<AnalysisHistorySettings>({
+    ...DEFAULT_ANALYSIS_HISTORY_SETTINGS,
+  });
+  const [analysisHistoryRuns, setAnalysisHistoryRuns] = useState<AnalysisHistoryRunSummary[]>([]);
+  const [analysisHistoryStats, setAnalysisHistoryStats] = useState({ total: 0, completed: 0, failed: 0, warning: 0 });
+  const [selectedAnalysisHistoryRun, setSelectedAnalysisHistoryRun] = useState<AnalysisHistoryRunSummary | null>(null);
+  const [analysisHistoryEvents, setAnalysisHistoryEvents] = useState<AnalysisHistoryEvent[]>([]);
+  const [isLoadingAnalysisHistory, setIsLoadingAnalysisHistory] = useState(false);
+  const [isLoadingAnalysisHistoryDetail, setIsLoadingAnalysisHistoryDetail] = useState(false);
+  const [isSavingAnalysisHistorySettings, setIsSavingAnalysisHistorySettings] = useState(false);
+  const [runtimeAnalysisRun, setRuntimeAnalysisRun] = useState<AnalysisHistoryRunSummary | null>(null);
+  const [runtimeAnalysisEvents, setRuntimeAnalysisEvents] = useState<AnalysisHistoryEvent[]>([]);
+  const [isLoadingRuntimeAnalysisTrace, setIsLoadingRuntimeAnalysisTrace] = useState(false);
 
   const selectedDatabaseSources = useMemo(() => {
     if (!savedDbConnections.length || !selectedDbSourceIds.length) {
@@ -1315,6 +1344,203 @@ export function ThreePanelInterface() {
     workspaceFiles.length,
   ]);
 
+  const loadAnalysisHistoryDetail = useCallback(async (runId: string, options?: { silent?: boolean }) => {
+    if (!runId) {
+      setSelectedAnalysisHistoryRun(null);
+      setAnalysisHistoryEvents([]);
+      return;
+    }
+    setIsLoadingAnalysisHistoryDetail(true);
+    try {
+      const username = encodeURIComponent((currentUser || "default").trim() || "default");
+      const response = await fetch(`${API_URLS.ANALYSIS_HISTORY_LIST}/${encodeURIComponent(runId)}?username=${username}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "分析历史详情加载失败");
+      }
+      setSelectedAnalysisHistoryRun(payload.run || null);
+      setAnalysisHistoryEvents(Array.isArray(payload.events) ? payload.events : []);
+    } catch (error) {
+      if (!options?.silent) {
+        const message = error instanceof Error ? error.message : "分析历史详情加载失败";
+        toast({ description: message, variant: "destructive" });
+      }
+    } finally {
+      setIsLoadingAnalysisHistoryDetail(false);
+    }
+  }, [currentUser, toast]);
+
+  const loadAnalysisHistory = useCallback(async (options?: { preferredRunId?: string; silent?: boolean }) => {
+    setIsLoadingAnalysisHistory(true);
+    try {
+      const username = encodeURIComponent((currentUser || "default").trim() || "default");
+      const response = await fetch(`${API_URLS.ANALYSIS_HISTORY_LIST}?username=${username}&limit=40`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "分析历史加载失败");
+      }
+
+      setAnalysisHistorySettings({
+        ...DEFAULT_ANALYSIS_HISTORY_SETTINGS,
+        ...(payload.settings || {}),
+      });
+      const runs = Array.isArray(payload.runs) ? payload.runs : [];
+      setAnalysisHistoryRuns(runs);
+      setAnalysisHistoryStats({
+        total: Number(payload.stats?.total || 0),
+        completed: Number(payload.stats?.completed || 0),
+        failed: Number(payload.stats?.failed || 0),
+        warning: Number(payload.stats?.warning || 0),
+      });
+
+      const preferredRunId =
+        options?.preferredRunId ||
+        selectedAnalysisHistoryRun?.run_id ||
+        (runs[0]?.run_id as string | undefined) ||
+        "";
+
+      if (preferredRunId) {
+        await loadAnalysisHistoryDetail(preferredRunId, { silent: true });
+      } else {
+        setSelectedAnalysisHistoryRun(null);
+        setAnalysisHistoryEvents([]);
+      }
+    } catch (error) {
+      if (!options?.silent) {
+        const message = error instanceof Error ? error.message : "分析历史加载失败";
+        toast({ description: message, variant: "destructive" });
+      }
+    } finally {
+      setIsLoadingAnalysisHistory(false);
+    }
+  }, [currentUser, loadAnalysisHistoryDetail, selectedAnalysisHistoryRun?.run_id, toast]);
+
+  const handleSelectAnalysisHistoryRun = useCallback((runId: string) => {
+    const existingRun = analysisHistoryRuns.find((item) => item.run_id === runId) || null;
+    if (existingRun) {
+      setSelectedAnalysisHistoryRun(existingRun);
+    }
+    void loadAnalysisHistoryDetail(runId);
+  }, [analysisHistoryRuns, loadAnalysisHistoryDetail]);
+
+  const handleSaveAnalysisHistorySettings = useCallback(async () => {
+    setIsSavingAnalysisHistorySettings(true);
+    try {
+      const response = await fetch(API_URLS.CONFIG_ANALYSIS_HISTORY_SAVE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: currentUser || "default",
+          settings: analysisHistorySettings,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "分析历史配置保存失败");
+      }
+      setAnalysisHistorySettings({
+        ...DEFAULT_ANALYSIS_HISTORY_SETTINGS,
+        ...(payload.settings || {}),
+      });
+      toast({ description: payload.message || "分析历史配置已保存" });
+      await loadAnalysisHistory({ preferredRunId: selectedAnalysisHistoryRun?.run_id, silent: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "分析历史配置保存失败";
+      toast({ description: message, variant: "destructive" });
+    } finally {
+      setIsSavingAnalysisHistorySettings(false);
+    }
+  }, [analysisHistorySettings, currentUser, loadAnalysisHistory, selectedAnalysisHistoryRun?.run_id, toast]);
+
+  useEffect(() => {
+    if (showSystemSettings && systemSettingsTab === "history") {
+      void loadAnalysisHistory({ silent: true });
+    }
+  }, [showSystemSettings, systemSettingsTab, loadAnalysisHistory]);
+
+  const loadRuntimeAnalysisTrace = useCallback(async (options?: { silent?: boolean }) => {
+    if (!currentUser) {
+      setRuntimeAnalysisRun(null);
+      setRuntimeAnalysisEvents([]);
+      return;
+    }
+
+    setIsLoadingRuntimeAnalysisTrace(true);
+    try {
+      const username = encodeURIComponent((currentUser || "default").trim() || "default");
+      const response = await fetch(`${API_URLS.ANALYSIS_HISTORY_LIST}?username=${username}&limit=20`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "运行态分析历史加载失败");
+      }
+
+      const runs = Array.isArray(payload.runs) ? payload.runs : [];
+      const latestRunForSession = runs.find((item: AnalysisHistoryRunSummary) => item.session_id === sessionId) || null;
+      if (!latestRunForSession) {
+        setRuntimeAnalysisRun(null);
+        setRuntimeAnalysisEvents([]);
+        return;
+      }
+
+      const unchanged =
+        runtimeAnalysisRun?.run_id === latestRunForSession.run_id &&
+        runtimeAnalysisRun?.event_count === latestRunForSession.event_count &&
+        runtimeAnalysisRun?.updated_at === latestRunForSession.updated_at &&
+        runtimeAnalysisEvents.length > 0;
+
+      setRuntimeAnalysisRun(latestRunForSession);
+      if (unchanged) {
+        return;
+      }
+
+      const detailResponse = await fetch(`${API_URLS.ANALYSIS_HISTORY_LIST}/${encodeURIComponent(latestRunForSession.run_id)}?username=${username}`);
+      const detailPayload = await detailResponse.json().catch(() => ({}));
+      if (!detailResponse.ok || !detailPayload?.success) {
+        throw new Error(detailPayload?.detail || detailPayload?.message || "运行态分析详情加载失败");
+      }
+
+      setRuntimeAnalysisRun(detailPayload.run || latestRunForSession);
+      setRuntimeAnalysisEvents(Array.isArray(detailPayload.events) ? detailPayload.events : []);
+    } catch (error) {
+      if (!options?.silent) {
+        const message = error instanceof Error ? error.message : "运行态分析历史加载失败";
+        toast({ description: message, variant: "destructive" });
+      }
+    } finally {
+      setIsLoadingRuntimeAnalysisTrace(false);
+    }
+  }, [currentUser, runtimeAnalysisEvents.length, runtimeAnalysisRun?.event_count, runtimeAnalysisRun?.run_id, runtimeAnalysisRun?.updated_at, sessionId, toast]);
+
+  const [isAnalyzing, setIsAnalyzing] = useState(false); // 是否正在分析中
+
+  useEffect(() => {
+    const shouldPollRuntimeTrace = isAnalyzing || runtimeAnalysisRun?.status === "running";
+    if (!shouldPollRuntimeTrace) {
+      return;
+    }
+
+    void loadRuntimeAnalysisTrace({ silent: true });
+    const timer = window.setInterval(() => {
+      void loadRuntimeAnalysisTrace({ silent: true });
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [isAnalyzing, loadRuntimeAnalysisTrace, runtimeAnalysisRun?.status]);
+
+  useEffect(() => {
+    setAnalysisHistoryRuns([]);
+    setAnalysisHistoryEvents([]);
+    setSelectedAnalysisHistoryRun(null);
+    setAnalysisHistoryStats({ total: 0, completed: 0, failed: 0, warning: 0 });
+    setAnalysisHistorySettings({ ...DEFAULT_ANALYSIS_HISTORY_SETTINGS });
+    setRuntimeAnalysisRun(null);
+    setRuntimeAnalysisEvents([]);
+  }, [currentUser]);
+
+  useEffect(() => {
+    setRuntimeAnalysisRun(null);
+    setRuntimeAnalysisEvents([]);
+  }, [sessionId]);
+
   // 智能体介绍面板状态
   const [showAgentIntro, setShowAgentIntro] = useState(false);
 
@@ -1322,7 +1548,6 @@ export function ThreePanelInterface() {
   const [sideGuidanceOpen, setSideGuidanceOpen] = useState(false);
   const [sideGuidanceText, setSideGuidanceText] = useState("");
   const [isSubmittingGuidance, setIsSubmittingGuidance] = useState(false);
-  const [isAnalyzing, setIsAnalyzing] = useState(false); // 是否正在分析中
 
   // 预览弹窗状态
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -4671,6 +4896,8 @@ ${analysisContent}
           : [];
 
     setIsAnalyzing(true);
+  setRuntimeAnalysisRun(null);
+  setRuntimeAnalysisEvents([]);
     const baseMessageIndex = messages.length;
     const aiMessageIndex = baseMessageIndex + 1;
 
@@ -4769,6 +4996,8 @@ ${analysisContent}
           await loadWorkspaceTree();
           await loadWorkspaceFiles();
         }
+        void loadAnalysisHistory({ silent: true });
+        void loadRuntimeAnalysisTrace({ silent: true });
         setIsTyping(false);
         setIsAnalyzing(false);
         return;
@@ -4930,12 +5159,16 @@ ${analysisContent}
       // 结束后刷新一次文件列表确保无遗漏
       await loadWorkspaceFiles();
       await loadWorkspaceTree();
+      void loadAnalysisHistory({ silent: true });
+      void loadRuntimeAnalysisTrace({ silent: true });
       setIsTyping(false); // 结束加载状态
       setIsAnalyzing(false);
       setStreamingMessageId(null);
 
     } catch (error) {
       console.error("Error sending message:", error);
+      void loadAnalysisHistory({ silent: true });
+      void loadRuntimeAnalysisTrace({ silent: true });
       setIsTyping(false);
       setIsAnalyzing(false);
       setStreamingMessageId(null);
@@ -5125,73 +5358,147 @@ ${analysisContent}
                 ref={treeContainerRef}
                 className="flex-1 w-full min-h-0 overflow-hidden pl-3 pr-1 py-2"
               >
-                <button
-                  type="button"
-                  onClick={handleGenerateDataProfileReport}
-                  disabled={isGeneratingDataProfileReport}
-                  className="group relative mb-5 h-20 w-full overflow-hidden rounded-md border border-cyan-300/70 bg-slate-950 text-left text-white shadow-sm transition-all hover:border-cyan-200 hover:shadow-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-70"
-                  title="生成数据探查 SKILL 文档"
-                >
-                  <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(14,165,233,0.18)_1px,transparent_1px),linear-gradient(0deg,rgba(14,165,233,0.12)_1px,transparent_1px)] bg-[size:18px_18px]" />
-                  <div className="absolute right-3 top-3 flex h-14 w-14 items-center justify-center rounded-full border border-cyan-300/60 bg-cyan-400/10">
-                    <Cpu className="h-6 w-6 text-cyan-200" />
-                    <Zap className="absolute -right-1 -top-1 h-4 w-4 text-amber-300" />
+                <div className="mb-5 rounded-xl border border-slate-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.96))] p-2.5 shadow-[0_12px_32px_rgba(15,23,42,0.08)] dark:border-slate-800 dark:bg-[linear-gradient(180deg,rgba(2,6,23,0.96),rgba(15,23,42,0.92))]">
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={handleGenerateDataProfileReport}
+                      disabled={isGeneratingDataProfileReport}
+                      className="group relative h-20 w-full overflow-hidden rounded-lg border border-amber-300/60 bg-[linear-gradient(135deg,rgba(41,28,16,1),rgba(88,52,19,0.94)_52%,rgba(17,24,39,1))] text-left text-amber-50 shadow-[0_10px_26px_rgba(120,53,15,0.18)] transition-all duration-200 hover:-translate-y-0.5 hover:border-amber-200 hover:shadow-[0_18px_34px_rgba(245,158,11,0.18)] active:translate-y-[1px] active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-200/70 disabled:cursor-not-allowed disabled:opacity-70"
+                      title="生成数据探查 SKILL 文档"
+                    >
+                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(251,191,36,0.18),transparent_40%),linear-gradient(90deg,rgba(245,158,11,0.14)_1px,transparent_1px),linear-gradient(0deg,rgba(245,158,11,0.08)_1px,transparent_1px)] bg-[size:auto,18px_18px,18px_18px]" />
+                      <div className="absolute inset-0 opacity-0 transition-opacity duration-200 group-hover:opacity-100 bg-[radial-gradient(circle_at_center,rgba(251,191,36,0.12),transparent_52%)]" />
+                      <div className="absolute left-0 top-0 h-full w-24 bg-[linear-gradient(90deg,rgba(251,191,36,0.18),transparent)] opacity-90" />
+                      <div className="absolute right-4 top-3 hidden gap-1.5 sm:flex transition-transform duration-200 group-hover:translate-x-0.5">
+                        <span className="h-1.5 w-10 rounded-full bg-amber-100/60" />
+                        <span className="h-1.5 w-4 rounded-full bg-amber-200/40" />
+                      </div>
+                      <div className="absolute right-4 bottom-3 hidden gap-1 sm:flex">
+                        <span className="h-6 w-1 rounded-full bg-amber-100/30" />
+                        <span className="h-6 w-1 rounded-full bg-amber-200/20" />
+                        <span className="h-6 w-1 rounded-full bg-amber-100/30" />
+                      </div>
+                      <div className="absolute inset-x-3 bottom-2 h-px bg-gradient-to-r from-transparent via-amber-100/60 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+                      <div className="relative z-10 flex h-full items-center gap-3 px-4">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-amber-200/50 bg-amber-100/10 shadow-inner shadow-amber-50/10 transition-transform duration-200 group-hover:scale-105">
+                          {isGeneratingDataProfileReport ? (
+                            <RefreshCw className="h-5 w-5 animate-spin text-amber-100" />
+                          ) : (
+                            <FileText className="h-5 w-5 text-amber-100" />
+                          )}
+                        </div>
+                        <div className="min-w-0 transition-transform duration-200 group-hover:translate-x-0.5">
+                          <div className="text-[10px] font-medium uppercase tracking-[0.24em] text-amber-200/70">Archive</div>
+                          <div className="mt-1 text-sm font-semibold tracking-[0.02em] text-amber-50">沉淀数据探查</div>
+                        </div>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowDatabaseRelationshipDialog(true);
+                        void handleLoadSchemaGraph();
+                      }}
+                      disabled={isLoadingSchemaGraph || !isDbTested}
+                      className="group relative h-20 w-full overflow-hidden rounded-lg border border-emerald-300/60 bg-[linear-gradient(135deg,rgba(8,27,30,1),rgba(5,88,91,0.92)_52%,rgba(15,23,42,1))] text-left text-emerald-50 shadow-[0_10px_26px_rgba(5,150,105,0.16)] transition-all duration-200 hover:-translate-y-0.5 hover:border-emerald-200 hover:shadow-[0_18px_34px_rgba(16,185,129,0.18)] active:translate-y-[1px] active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200/70 disabled:cursor-not-allowed disabled:opacity-70"
+                      title={isDbTested ? "展示数据库表关系与数据脉络" : "请先在系统设置中测试数据库连接"}
+                    >
+                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(52,211,153,0.18),transparent_38%),linear-gradient(90deg,rgba(16,185,129,0.14)_1px,transparent_1px),linear-gradient(0deg,rgba(52,211,153,0.08)_1px,transparent_1px)] bg-[size:auto,18px_18px,18px_18px]" />
+                      <div className="absolute inset-0 opacity-0 transition-opacity duration-200 group-hover:opacity-100 bg-[radial-gradient(circle_at_center,rgba(52,211,153,0.12),transparent_52%)]" />
+                      <div className="absolute inset-y-0 right-0 w-28 bg-[linear-gradient(270deg,rgba(34,197,94,0.14),transparent)]" />
+                      <div className="absolute right-6 top-4 hidden h-12 w-16 sm:block transition-transform duration-200 group-hover:translate-x-0.5">
+                        <span className="absolute left-1 top-1 h-2.5 w-2.5 rounded-full border border-emerald-100/60 bg-emerald-200/20" />
+                        <span className="absolute right-1 top-5 h-2.5 w-2.5 rounded-full border border-emerald-100/60 bg-emerald-200/20" />
+                        <span className="absolute left-5 bottom-1 h-2.5 w-2.5 rounded-full border border-emerald-100/60 bg-emerald-200/20" />
+                        <span className="absolute left-3 top-3 h-px w-8 rotate-[18deg] bg-emerald-100/50" />
+                        <span className="absolute left-4 top-5 h-px w-7 -rotate-[24deg] bg-emerald-100/50" />
+                      </div>
+                      <div className="absolute inset-x-3 bottom-2 h-px bg-gradient-to-r from-transparent via-emerald-100/60 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+                      <div className="relative z-10 flex h-full items-center gap-3 px-4">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-emerald-200/50 bg-emerald-100/10 shadow-inner shadow-emerald-50/10 transition-transform duration-200 group-hover:scale-105">
+                          {isLoadingSchemaGraph ? (
+                            <RefreshCw className="h-5 w-5 animate-spin text-emerald-100" />
+                          ) : (
+                            <GitBranch className="h-5 w-5 text-emerald-100" />
+                          )}
+                        </div>
+                        <div className="min-w-0 transition-transform duration-200 group-hover:translate-x-0.5">
+                          <div className="text-[10px] font-medium uppercase tracking-[0.24em] text-emerald-200/70">Topology</div>
+                          <div className="mt-1 text-sm font-semibold tracking-[0.02em] text-emerald-50">展示数据脉络</div>
+                        </div>
+                      </div>
+                    </button>
                   </div>
-                  <div className="relative z-10 flex h-full items-center gap-3 px-4 pr-20">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-cyan-300/60 bg-cyan-300/10">
-                      {isGeneratingDataProfileReport ? (
-                        <RefreshCw className="h-5 w-5 animate-spin text-cyan-200" />
-                      ) : (
-                        <Database className="h-5 w-5 text-cyan-200" />
-                      )}
+
+                  <div
+                    className={cn(
+                      "group relative mt-2.5 flex h-20 cursor-pointer items-center overflow-hidden rounded-lg border text-xs select-none transition-all duration-200",
+                      dropActive
+                        ? "border-sky-300 bg-[linear-gradient(135deg,rgba(224,242,254,0.98),rgba(240,249,255,0.95))] text-sky-700 shadow-[0_16px_34px_rgba(14,165,233,0.16)] dark:border-sky-500/70 dark:bg-[linear-gradient(135deg,rgba(8,47,73,0.9),rgba(12,74,110,0.84))] dark:text-sky-100"
+                        : "border-slate-300/80 bg-[linear-gradient(135deg,rgba(248,250,252,0.98),rgba(241,245,249,0.95))] text-slate-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] hover:border-slate-400 hover:shadow-[0_14px_30px_rgba(15,23,42,0.08)] dark:border-slate-700 dark:bg-[linear-gradient(135deg,rgba(15,23,42,0.92),rgba(30,41,59,0.88))] dark:text-slate-300",
+                      isUploading ? "border-violet-300/70 text-violet-700 dark:border-violet-500/60 dark:text-violet-100" : "",
+                    )}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      setDropActive(true);
+                    }}
+                    onDragLeave={() => setDropActive(false)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setDropActive(false);
+                      const files = e.dataTransfer.files;
+                      if (files && files.length) uploadToDir("", files);
+                    }}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(148,163,184,0.12)_1px,transparent_1px),linear-gradient(0deg,rgba(148,163,184,0.08)_1px,transparent_1px)] bg-[size:18px_18px] opacity-70" />
+                    <div className="absolute inset-y-0 left-0 w-28 bg-[linear-gradient(90deg,rgba(255,255,255,0.35),transparent)] dark:bg-[linear-gradient(90deg,rgba(255,255,255,0.06),transparent)]" />
+                    <div className="absolute right-4 top-3 hidden sm:flex items-center gap-1.5 text-[10px] uppercase tracking-[0.2em] opacity-60">
+                      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                      <span>{isUploading ? "Transfer" : dropActive ? "Drop" : "Ingress"}</span>
                     </div>
-                    <div className="min-w-0">
-                      <div className="text-sm font-semibold tracking-normal">数据探查报告</div>
-                      <div className="mt-1 truncate text-[11px] text-cyan-100/85">
-                        分析数据库关系与上传文件，生成独立 SKILL 文档
+                    {/* 独立隐藏 input 兼容点击上传 */}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      onChange={handleFileUpload}
+                      className="hidden"
+                      accept="*"
+                      aria-label="上传文件"
+                      title="上传文件"
+                    />
+                    <div className="relative z-10 flex w-full items-center justify-between gap-3 px-4">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-current/20 bg-white/35 dark:bg-white/6 transition-transform duration-200 group-hover:scale-105">
+                          {isUploading ? (
+                            <RefreshCw className="h-5 w-5 animate-spin" />
+                          ) : (
+                            <Upload className="h-5 w-5" />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-medium uppercase tracking-[0.24em] opacity-70">Ingress Bay</div>
+                          <div className="mt-1 truncate text-sm font-semibold">拖拽或点击上传数据文件</div>
+                        </div>
+                      </div>
+                      <div className="hidden shrink-0 sm:flex flex-col items-end gap-1">
+                        <span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] opacity-80">
+                          {isUploading ? "上传中" : "Workspace Root"}
+                        </span>
+                        <span className="text-[10px] opacity-65">支持拖拽批量投递</span>
                       </div>
                     </div>
                   </div>
-                </button>
-                <div
-                  className={`mb-2 rounded border border-dashed flex items-center justify-center h-20 text-xs select-none ${dropActive
-                    ? "bg-blue-50 border-blue-300 text-blue-600"
-                    : "bg-gray-50 dark:bg-gray-900/40 border-gray-300 dark:border-gray-700 text-gray-500"
-                    }`}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setDropActive(true);
-                  }}
-                  onDragLeave={() => setDropActive(false)}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    setDropActive(false);
-                    const files = e.dataTransfer.files;
-                    if (files && files.length) uploadToDir("", files);
-                  }}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  {/* 独立隐藏 input 兼容点击上传 */}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    onChange={handleFileUpload}
-                    className="hidden"
-                    accept="*"
-                    aria-label="上传文件"
-                    title="上传文件"
-                  />
-                  <div className="flex items-center gap-2">
-                    <Upload className="h-4 w-4" />
-                    <span>拖拽或点击此处上传（workspace 根目录）</span>
-                  </div>
+
+                  {uploadMsg && (
+                    <div className="px-1 pt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      {uploadMsg}
+                    </div>
+                  )}
                 </div>
-                {uploadMsg && (
-                  <div className="px-2 pb-2 text-[11px] text-gray-500">
-                    {uploadMsg}
-                  </div>
-                )}
 
                 {workspaceTree ? (
                   <Tree
@@ -5693,7 +6000,7 @@ ${analysisContent}
                   <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-gray-800 shrink-0">
                     <div className="flex items-center gap-3">
                       <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
-                        Code
+                        {showCodeEditor ? "Code" : "分析过程侧栏"}
                       </h2>
                       {/* 热度滑块 - 保留在顶栏 */}
                       <div className="flex items-center gap-1">
@@ -5772,11 +6079,16 @@ ${analysisContent}
                   </div>
 
                   {!showCodeEditor ? (
-                    <div className="flex-1 flex flex-col items-center justify-center text-gray-400 relative">
-                      <div className="text-center select-none relative z-10">
-                        <p className="text-sm">Click a code block to edit</p>
-                      </div>
-                    </div>
+                    <AnalysisRuntimeSidebar
+                      run={runtimeAnalysisRun}
+                      events={runtimeAnalysisEvents}
+                      loading={isLoadingRuntimeAnalysisTrace}
+                      isAnalyzing={isAnalyzing}
+                      onOpenFullHistory={() => {
+                        setSystemSettingsTab("history");
+                        setShowSystemSettings(true);
+                      }}
+                    />
                   ) : (
                       <div
                         className="flex-1 min-h-0 flex flex-col p-4 editor-container overflow-hidden"
@@ -6517,11 +6829,8 @@ ${analysisContent}
         dbContextSummary={dbContextSummary}
         dbKnowledgeSummary={dbKnowledgeSummary}
         dbKnowledgeUpdatedAt={dbKnowledgeUpdatedAt}
-        dbSchemaGraph={dbSchemaGraph}
         isLoadingDbContext={isLoadingDbContext}
         handleLoadDbContext={handleLoadDbContext}
-        isLoadingSchemaGraph={isLoadingSchemaGraph}
-        handleLoadSchemaGraph={handleLoadSchemaGraph}
         handleFetchDatabaseNames={handleFetchDatabaseNames}
         handleTestConnection={handleTestConnection}
         isTestingDb={isTestingDb}
@@ -6545,6 +6854,18 @@ ${analysisContent}
         handleApplySavedDbConnection={handleApplySavedDbConnection}
         handleDeleteSavedDbConnection={handleDeleteSavedDbConnection}
         deletingDbConnectionId={deletingDbConnectionId}
+        analysisHistorySettings={analysisHistorySettings}
+        setAnalysisHistorySettings={setAnalysisHistorySettings}
+        analysisHistoryRuns={analysisHistoryRuns}
+        analysisHistoryStats={analysisHistoryStats}
+        selectedAnalysisHistoryRun={selectedAnalysisHistoryRun}
+        analysisHistoryEvents={analysisHistoryEvents}
+        isLoadingAnalysisHistory={isLoadingAnalysisHistory}
+        isLoadingAnalysisHistoryDetail={isLoadingAnalysisHistoryDetail}
+        isSavingAnalysisHistorySettings={isSavingAnalysisHistorySettings}
+        handleRefreshAnalysisHistory={() => void loadAnalysisHistory()}
+        handleSelectAnalysisHistoryRun={handleSelectAnalysisHistoryRun}
+        handleSaveAnalysisHistorySettings={handleSaveAnalysisHistorySettings}
         isLoadingKnowledgeConfig={isLoadingKnowledgeConfig}
         loadKnowledgeConfig={loadKnowledgeConfig}
         knowledgeBaseEnabled={knowledgeBaseEnabled}
@@ -6570,6 +6891,14 @@ ${analysisContent}
         isSavingKnowledgeConfig={isSavingKnowledgeConfig}
         handleSaveKnowledgeConfig={handleSaveKnowledgeConfig}
         knowledgeSettingsLoaded={knowledgeSettingsLoaded}
+      />
+
+      <DatabaseRelationshipDialog
+        open={showDatabaseRelationshipDialog}
+        onOpenChange={setShowDatabaseRelationshipDialog}
+        graph={dbSchemaGraph}
+        loading={isLoadingSchemaGraph}
+        onRefresh={handleLoadSchemaGraph}
       />
 
       {/* 数据库连接对话框 */}
