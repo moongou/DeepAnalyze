@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import openai
 from typing import Optional, List, Dict, Any, Tuple
 import json
@@ -490,6 +492,211 @@ def execute_code_safe(
         return f"[Timeout]: execution exceeded {timeout_sec} seconds"
     except Exception as e:
         return f"[Error]: {str(e)}"
+    finally:
+        try:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+READONLY_SQL_START_KEYWORDS = {"select", "with", "explain"}
+FORBIDDEN_SQL_KEYWORDS = {
+    "alter",
+    "attach",
+    "call",
+    "copy",
+    "create",
+    "delete",
+    "detach",
+    "drop",
+    "execute",
+    "grant",
+    "insert",
+    "load",
+    "merge",
+    "pragma",
+    "replace",
+    "revoke",
+    "truncate",
+    "unload",
+    "update",
+    "vacuum",
+}
+EXECUTION_LANGUAGE_ALIASES = {
+    "": "python",
+    "py": "python",
+    "python": "python",
+    "python3": "python",
+    "sql": "sql",
+    "postgres": "sql",
+    "postgresql": "sql",
+    "mysql": "sql",
+    "sqlite": "sql",
+    "mssql": "sql",
+    "sqlserver": "sql",
+    "oracle": "sql",
+    "r": "r",
+    "rscript": "r",
+}
+
+
+def _normalize_execution_language(language: str, code: str = "") -> str:
+    normalized = str(language or "").strip().lower()
+    if normalized in EXECUTION_LANGUAGE_ALIASES:
+        return EXECUTION_LANGUAGE_ALIASES[normalized]
+    code_head = str(code or "").strip().lower()
+    if re.match(r"^(with|select|explain)\b", code_head):
+        return "sql"
+    return "python"
+
+
+def _extract_executable_block(response_text: str) -> Dict[str, str]:
+    """Extract the first executable Code/fenced block and normalize its language."""
+    text_body = str(response_text or "")
+    code_match = re.search(r"<code>(.*?)</code>", text_body, re.DOTALL | re.IGNORECASE)
+    search_body = (code_match.group(1) if code_match else text_body).strip()
+    fence_match = re.search(
+        r"```\s*([A-Za-z0-9_+.-]*)\s*\n(.*?)```",
+        search_body,
+        re.DOTALL,
+    )
+    if fence_match:
+        raw_language = fence_match.group(1) or ""
+        code = (fence_match.group(2) or "").strip()
+        return {
+            "language": _normalize_execution_language(raw_language, code),
+            "raw_language": raw_language,
+            "code": code,
+        }
+    return {
+        "language": _normalize_execution_language("", search_body),
+        "raw_language": "",
+        "code": search_body,
+    }
+
+
+def _strip_sql_comments(sql: str) -> str:
+    sql = re.sub(r"/\*.*?\*/", " ", str(sql or ""), flags=re.DOTALL)
+    sql = re.sub(r"--.*?$", " ", sql, flags=re.MULTILINE)
+    return sql.strip()
+
+
+def _validate_readonly_sql(sql: str) -> str:
+    cleaned = _strip_sql_comments(sql).strip()
+    if not cleaned:
+        raise ValueError("SQL 不能为空")
+    cleaned = cleaned.rstrip(";\n\t ")
+    if ";" in cleaned:
+        raise ValueError("当前 SQL Runner 仅允许单条只读 SQL 语句")
+    first_keyword_match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\b", cleaned)
+    first_keyword = first_keyword_match.group(1).lower() if first_keyword_match else ""
+    if first_keyword not in READONLY_SQL_START_KEYWORDS:
+        raise ValueError("当前 SQL Runner 仅允许 SELECT / WITH / EXPLAIN 等只读查询")
+    tokens = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", cleaned.lower()))
+    blocked = sorted(tokens & FORBIDDEN_SQL_KEYWORDS)
+    if blocked:
+        raise ValueError(f"SQL 包含禁止的写入或管理关键字: {', '.join(blocked)}")
+    return cleaned
+
+
+def execute_sql_safe(
+    sql: str,
+    workspace_dir: str,
+    db_source: Optional[Dict[str, Any]],
+    max_rows: int = 50000,
+    timeout_sec: int = 120,
+) -> str:
+    """Execute a single read-only SQL statement and materialize returned rows."""
+    if not db_source or not isinstance(db_source, dict):
+        return "[SQL Error]: 当前分析未选择可执行 SQL 的数据库数据源"
+
+    try:
+        safe_sql = _validate_readonly_sql(sql)
+        db_type = normalize_db_type(db_source.get("db_type") or db_source.get("dbType"))
+        config = db_source.get("config") if isinstance(db_source.get("config"), dict) else {}
+        source_label = str(db_source.get("label") or db_source.get("id") or db_type)
+        engine = build_db_engine(db_type, config)
+        started_at = time_module.time()
+        rows = []
+        columns: List[str] = []
+        truncated = False
+
+        with engine.connect() as conn:
+            try:
+                if db_type == "postgresql":
+                    conn.execute(text(f"SET statement_timeout = {int(timeout_sec * 1000)}"))
+                elif db_type == "mysql":
+                    conn.execute(text(f"SET SESSION MAX_EXECUTION_TIME={int(timeout_sec * 1000)}"))
+            except Exception:
+                pass
+
+            result = conn.execute(text(safe_sql))
+            if result.returns_rows:
+                columns = list(result.keys())
+                fetched = result.fetchmany(max_rows + 1)
+                if len(fetched) > max_rows:
+                    truncated = True
+                    fetched = fetched[:max_rows]
+                rows = [tuple(row) for row in fetched]
+
+        engine.dispose()
+
+        generated_dir = Path(workspace_dir) / "generated"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+        safe_source = re.sub(r"[^A-Za-z0-9_.-]+", "_", source_label).strip("_") or "database"
+        output_path = uniquify_path(generated_dir / f"sql_result_{safe_source}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        dataframe = pd.DataFrame(rows, columns=columns)
+        dataframe.to_csv(output_path, index=False, encoding="utf-8-sig")
+
+        elapsed_ms = int((time_module.time() - started_at) * 1000)
+        preview_lines: List[str] = []
+        if columns:
+            preview_lines.append(" | ".join(map(str, columns[:12])))
+            for row in rows[:8]:
+                preview_lines.append(" | ".join(_truncate_history_text(str(item), 80) for item in row[:12]))
+        preview_text = "\n".join(preview_lines) if preview_lines else "(query returned no rows)"
+        return (
+            f"[SQL OK] source={source_label}, dialect={db_type}, rows={len(rows)}, "
+            f"columns={len(columns)}, truncated={str(truncated).lower()}, duration_ms={elapsed_ms}\n"
+            f"[SQL Output] {output_path.name}\n"
+            f"[SQL Preview]\n{preview_text}"
+        )
+    except Exception as exc:
+        return f"[SQL Error]: {str(exc)}"
+
+
+def execute_r_code_safe(code_str: str, workspace_dir: str = None, timeout_sec: int = 120) -> str:
+    """Execute R code through Rscript in the session workspace."""
+    if shutil.which("Rscript") is None:
+        return "[R Error]: Rscript 未安装或不在 PATH 中，无法执行 R 代码"
+    if workspace_dir is None:
+        workspace_dir = WORKSPACE_BASE_DIR
+    exec_cwd = os.path.abspath(workspace_dir)
+    os.makedirs(exec_cwd, exist_ok=True)
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".R", dir=exec_cwd)
+        os.close(fd)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(code_str)
+        child_env = os.environ.copy()
+        child_env.setdefault("R_DEFAULT_DEVICE", "pdf")
+        completed = subprocess.run(
+            ["Rscript", tmp_path],
+            cwd=exec_cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_sec,
+            env=child_env,
+        )
+        return (completed.stdout or "") + (completed.stderr or "")
+    except subprocess.TimeoutExpired:
+        return f"[R Timeout]: execution exceeded {timeout_sec} seconds"
+    except Exception as exc:
+        return f"[R Error]: {str(exc)}"
     finally:
         try:
             if tmp_path and os.path.exists(tmp_path):
@@ -3761,6 +3968,34 @@ def bot_stream(
         )
 
     language_prompt = build_analysis_language_prompt(analysis_language)
+    runtime_language_prompt = (
+        "\n\n**Executable runtime capabilities**:"
+        "\n- Python: use `<Code>```python ...```</Code>` for local data processing, modeling, visualization, and report generation."
+        "\n- SQL: use `<Code>```sql ...```</Code>` for read-only database extraction. Only SELECT/WITH/EXPLAIN statements are allowed; results are materialized automatically under `workspace/generated/` for later Python/R analysis."
+        "\n- R: use `<Code>```r ...```</Code>` for statistical tests, time series, and modeling when R packages are suitable."
+        if analysis_language == "en"
+        else "\n\n**可执行运行时能力**："
+        "\n- Python：使用 `<Code>```python ...```</Code>` 做本地数据处理、建模、可视化和报告生成。"
+        "\n- SQL：使用 `<Code>```sql ...```</Code>` 做只读数据库取数；仅允许 SELECT/WITH/EXPLAIN，查询结果会自动物化到 `workspace/generated/` 供后续 Python/R 分析读取。"
+        "\n- R：使用 `<Code>```r ...```</Code>` 做统计检验、时间序列和适合 R 包的建模任务。"
+    )
+    sql_first_prompt = ""
+    if active_sources or loaded_db_source:
+        sql_first_prompt = (
+            "\n\n**SQL-first extraction rule for connected databases**:"
+            "\n- For non-trivial database analysis, do not start by scanning large tables from Python/R. Start with an extraction plan."
+            "\n- First identify required entities, grains, metrics, filters, join paths, and expected output tables/files."
+            "\n- Then execute one or more read-only SQL blocks to build smaller materialized extracts, cubes, samples, object lists, or candidate-risk sets."
+            "\n- Use Python/R only after SQL has reduced the data to a manageable analytical dataset."
+            "\n- Prefer multiple targeted SQL blocks over one huge query; each block should state its purpose in `<Analyze>` before execution."
+            if analysis_language == "en"
+            else "\n\n**已连接数据库的 SQL-first 取数规则**："
+            "\n- 面对非平凡数据库分析任务时，不要一开始就用 Python/R 扫描大表；必须先制定取数计划。"
+            "\n- 先识别分析所需主体、粒度、指标、过滤条件、Join 路径和预期输出数据集。"
+            "\n- 然后用一段或多段只读 SQL 构建更小的物化取数结果、汇总立方体、样本、对象清单或风险候选集。"
+            "\n- 只有在 SQL 已经把数据压缩为可承载的分析数据集之后，再使用 Python/R 做深度分析、统计建模和可视化。"
+            "\n- 优先使用多段有明确目的的小 SQL，而不是一条巨大 SQL；每段 SQL 执行前应在 `<Analyze>` 中说明目的。"
+        )
     signature_safety_prompt = (
         "\n\n**函数调用安全（必须遵守）**："
         "\n- 先核对函数签名与参数，再执行。"
@@ -3786,6 +4021,8 @@ def bot_stream(
             methodology_integration_prompt,
             report_prompt,
             database_source_prompt,
+            runtime_language_prompt,
+            sql_first_prompt,
             language_prompt,
         ],
         max_chars=5600,
@@ -4063,7 +4300,7 @@ def bot_stream(
 
         has_code_open = re.search(r"<code>", cur_res, re.IGNORECASE) is not None
         has_code_close = re.search(r"</code>", cur_res, re.IGNORECASE) is not None
-        has_fenced_code = re.search(r"```(?:python)?(.*?)```", cur_res, re.DOTALL | re.IGNORECASE) is not None
+        has_fenced_code = re.search(r"```\s*(?:python|py|sql|postgresql|mysql|sqlite|mssql|oracle|r|rscript)?\s*\n.*?```", cur_res, re.DOTALL | re.IGNORECASE) is not None
 
         if last_finish_reason == "stop" and has_code_open and not has_code_close:
             if not re.search(r"</code>\s*$", cur_res, re.IGNORECASE):
@@ -4077,30 +4314,29 @@ def bot_stream(
 
         if should_execute_code:
             messages.append({"role": "assistant", "content": cur_res})
-            code_match = re.search(r"<code>(.*?)</code>", cur_res, re.DOTALL | re.IGNORECASE)
-            code_str = None
-            if code_match:
-                code_content = (code_match.group(1) or "").strip()
-                md_match = re.search(r"```(?:python)?(.*?)```", code_content, re.DOTALL | re.IGNORECASE)
-                code_str = md_match.group(1).strip() if md_match else code_content
-            else:
-                # 对通用模型兜底：即使没用 <Code> 标签，也尝试提取 fenced code
-                md_match = re.search(r"```(?:python)?(.*?)```", cur_res, re.DOTALL | re.IGNORECASE)
-                if md_match:
-                    code_str = md_match.group(1).strip()
+            executable_block = _extract_executable_block(cur_res)
+            code_str = executable_block.get("code") or None
+            code_language = executable_block.get("language") or "python"
+            execution_stage = "sql" if code_language == "sql" else "r" if code_language == "r" else "code"
+            execution_label = "SQL" if code_language == "sql" else "R" if code_language == "r" else "code"
 
             if code_str:
                 execution_started_ts = time_module.time()
-                code_str = Chinese_matplot_str + "\n" + code_str
-                # 自动将用户提及的原始文件名映射为 converted/ 目录下的实际文件
-                code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
+                if code_language == "python":
+                    code_str = Chinese_matplot_str + "\n" + code_str
+                    # 自动将用户提及的原始文件名映射为 converted/ 目录下的实际文件
+                    code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
+                elif code_language == "r":
+                    code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
                 history_recorder.log(
-                    stage="code",
-                    event="code_execution_started",
+                    stage=execution_stage,
+                    event=f"{execution_stage}_execution_started",
                     status="running",
-                    message=f"code execution started for round {round_count}",
+                    message=f"{execution_label} execution started for round {round_count}",
                     details={
                         "round": round_count,
+                        "language": code_language,
+                        "raw_language": executable_block.get("raw_language") or "",
                         "code_chars": len(code_str),
                         "code_preview": _truncate_history_text(code_str, 700),
                     },
@@ -4114,8 +4350,14 @@ def bot_stream(
                     }
                 except Exception:
                     before_state = {}
-                # 在子进程中以固定工作区执行
-                exe_output = execute_code_safe(code_str, WORKSPACE_DIR)
+                # 在固定工作区按语言执行
+                if code_language == "sql":
+                    sql_source = active_sources[0] if active_sources else None
+                    exe_output = execute_sql_safe(code_str, WORKSPACE_DIR, sql_source)
+                elif code_language == "r":
+                    exe_output = execute_r_code_safe(code_str, WORKSPACE_DIR)
+                else:
+                    exe_output = execute_code_safe(code_str, WORKSPACE_DIR)
                 error_info: Dict[str, Any] = {}
 
                 # ========== 自动检测并记录错误到雨途斩棘录 ==========
@@ -4206,16 +4448,17 @@ def bot_stream(
                     file_block = "\n" + "\n".join(lines) + "\n"
                 full_execution_block = exe_str + file_block
                 history_recorder.log(
-                    stage="code",
-                    event="code_execution_completed",
+                    stage=execution_stage,
+                    event=f"{execution_stage}_execution_completed",
                     status="warning" if error_info.get("has_error") else "running",
                     message=(
-                        f"code execution finished with detected error: {error_info.get('error_type', 'unknown')}"
+                        f"{execution_label} execution finished with detected error: {error_info.get('error_type', 'unknown')}"
                         if error_info.get("has_error")
-                        else f"code execution finished for round {round_count}"
+                        else f"{execution_label} execution finished for round {round_count}"
                     ),
                     details={
                         "round": round_count,
+                        "language": code_language,
                         "duration_ms": int((time_module.time() - execution_started_ts) * 1000),
                         "output_chars": len(exe_output or ""),
                         "has_error": bool(error_info.get("has_error")),

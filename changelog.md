@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.10 - 2026-05-05
+
+### Added (v1.1.10)
+
+- Added a SQL-first execution path for demo/chat analysis so connected database tasks can start with read-only SQL extraction before Python/R deep analysis.
+- Added a safe SQL runner that accepts `<Code>```sql ...```</Code>` blocks, restricts execution to single-statement read-only queries, materializes returned rows to `workspace/generated/`, and records SQL execution events in analysis history.
+- Added an R runner path for `<Code>```r ...```</Code>` blocks via `Rscript`, enabling statistical analysis steps alongside Python and SQL when the local R runtime is available.
+- Added runtime analysis sidebar labels and stall thresholds for SQL取数 and R分析 stages.
+
+### Changed (v1.1.10)
+
+- Changed the agent runtime prompt to explicitly advertise Python/SQL/R executable blocks and require SQL-first extraction plans for non-trivial connected-database analysis tasks.
+
 ## v1.1.9 - 2026-05-05
 
 ### Added (v1.1.9)

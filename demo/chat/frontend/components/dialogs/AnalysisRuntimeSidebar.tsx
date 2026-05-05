@@ -28,6 +28,8 @@ const stageLabelMap: Record<string, string> = {
   planner: "任务规划",
   llm: "模型推理",
   code: "代码执行",
+  sql: "SQL取数",
+  r: "R分析",
   report: "报告整理",
   database: "数据库处理",
   guidance: "过程指导",
@@ -102,6 +104,20 @@ const stageStallRuleMap: Record<string, StageStallRule> = {
     criticalMs: 90000,
     warningTitle: "代码执行变慢",
     criticalTitle: "代码执行疑似超时",
+  },
+  sql: {
+    label: "SQL取数",
+    warningMs: 15000,
+    criticalMs: 60000,
+    warningTitle: "SQL取数变慢",
+    criticalTitle: "SQL取数疑似超时",
+  },
+  r: {
+    label: "R分析",
+    warningMs: 30000,
+    criticalMs: 90000,
+    warningTitle: "R分析变慢",
+    criticalTitle: "R分析疑似超时",
   },
   database: {
     label: "数据库读取",
@@ -209,6 +225,14 @@ function buildStageAdvice(
       if (level === "healthy") return hasDatabaseSources ? "代码执行仍在推进，若当前代码连库可同时关注 SQL 返回速度。" : "代码执行仍在推进，通常处于 Python 子进程、文件 IO 或图表渲染阶段。";
       if (level === "warning") return hasDatabaseSources ? "优先检查 SQL 查询、数据库网络、权限、文件 IO 和 Python 子进程输出。" : "优先检查 Python 子进程、第三方库调用、文件 IO 和图表导出。";
       return hasDatabaseSources ? "代码执行长时间未推进，可能卡在数据库查询、网络等待、权限校验或外部依赖。" : "代码执行长时间未推进，建议检查死循环、阻塞 IO、外部依赖或子进程挂起。";
+    case "sql":
+      if (level === "healthy") return "SQL 取数仍在推进，系统会将查询结果物化到 workspace/generated 供后续分析读取。";
+      if (level === "warning") return "优先检查 SQL 执行计划、过滤条件、Join 路径、索引命中和返回行数。";
+      return "SQL 长时间未返回，建议先改为更小粒度的聚合、采样或增加时间/主体过滤条件。";
+    case "r":
+      if (level === "healthy") return "R 代码仍在执行，通常处于统计建模、检验或图表导出阶段。";
+      if (level === "warning") return "优先检查 R 包加载、输入文件大小、模型拟合复杂度和输出目录写入。";
+      return "R 分析长时间未推进，建议降低样本规模、简化模型或先用 SQL/Python 做预聚合。";
     case "database":
       if (level === "healthy") return "数据库上下文仍在装配，正在整理已连接数据源与会话快照。";
       if (level === "warning") return "优先检查数据库连通性、Schema 快照、权限、知识库检索和数据源选择是否正确。";
