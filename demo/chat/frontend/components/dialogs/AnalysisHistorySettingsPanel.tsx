@@ -1,8 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -237,11 +236,51 @@ export function AnalysisHistorySettingsPanel({
   onSelectRun,
 }: AnalysisHistorySettingsPanelProps) {
   const [selectedGroup, setSelectedGroup] = useState<AnalysisEventGroup | null>(null);
+  const [detailKeyword, setDetailKeyword] = useState("");
   const selectedRequestSummary = selectedRun?.request_summary;
   const groupedEvents = useMemo(() => buildEventGroups(events), [events]);
 
+  useEffect(() => {
+    if (!selectedRun || groupedEvents.length === 0) {
+      setSelectedGroup(null);
+      return;
+    }
+
+    setSelectedGroup((previous) => {
+      if (!previous) {
+        return groupedEvents[0];
+      }
+      const next = groupedEvents.find(
+        (group) => group.id === previous.id && group.firstEvent.sequence === previous.firstEvent.sequence
+      );
+      return next || groupedEvents[0];
+    });
+  }, [groupedEvents, selectedRun]);
+
+  const currentGroup = selectedGroup || groupedEvents[0] || null;
+
+  const selectedGroupEvents = useMemo(() => {
+    if (!currentGroup) return [];
+    const keyword = detailKeyword.trim().toLowerCase();
+    if (!keyword) return currentGroup.events;
+
+    return currentGroup.events.filter((event) => {
+      const detailJson = formatDetailJson(event.details as Record<string, unknown> | undefined);
+      const haystack = [
+        event.event,
+        event.stage,
+        event.status,
+        event.message,
+        detailJson,
+      ]
+        .map((item) => String(item || "").toLowerCase())
+        .join("\n");
+      return haystack.includes(keyword);
+    });
+  }, [currentGroup, detailKeyword]);
+
   return (
-    <div className="mt-4 flex h-full min-h-0 flex-col gap-4 overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col gap-4 overflow-hidden">
       <section className="grid shrink-0 gap-4 xl:grid-cols-[1.35fr_1fr]">
         <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-gray-950">
           <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-[linear-gradient(120deg,rgba(15,23,42,1),rgba(8,47,73,0.96))] px-4 py-3 text-white dark:border-slate-800">
@@ -266,13 +305,7 @@ export function AnalysisHistorySettingsPanel({
             </div>
           </div>
 
-          <div className="grid gap-3 px-4 py-4 md:grid-cols-[1.2fr_1fr]">
-            <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 text-[12px] leading-6 text-slate-600 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-300">
-              <div className="font-medium text-slate-900 dark:text-slate-100">当前视图重点</div>
-              <div className="mt-1">下方区域主要用于显示 run 与过程分组，不再把大量空间消耗在统计大卡片和内联 JSON 上。</div>
-              <div className="mt-2">如果某次分析长时间没有新事件，但状态还停在 running，后端会自动归一化为 warning，避免前台一直显示同步中。</div>
-            </div>
-
+          <div className="px-4 py-4">
             <div className="rounded-lg border border-slate-200 bg-white p-3 text-[11px] text-slate-500 dark:border-slate-800 dark:bg-gray-950 dark:text-slate-400">
               <div className="flex items-center gap-2 text-sm font-medium text-slate-900 dark:text-slate-100">
                 <Workflow className="h-4 w-4 text-cyan-600" />
@@ -297,11 +330,6 @@ export function AnalysisHistorySettingsPanel({
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-gray-950">
-          <div className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
-            <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">记录方式</div>
-            <div className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">追踪开关、保留策略和统计概览全部收拢在这里。</div>
-          </div>
-
           <div className="space-y-4 px-4 py-4">
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
@@ -390,7 +418,7 @@ export function AnalysisHistorySettingsPanel({
         </div>
       </section>
 
-      <section className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[320px_1fr]">
+      <section className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(300px,360px)_1fr]">
         <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-gray-950">
           <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800">
             <div>
@@ -400,7 +428,7 @@ export function AnalysisHistorySettingsPanel({
             {isLoading ? <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> : null}
           </div>
 
-          <div className="flex-1 space-y-2 overflow-auto p-3">
+          <div className="flex-1 min-h-0 space-y-2 overflow-y-auto p-3">
             {runs.length === 0 ? (
               <div className="text-xs leading-6 text-slate-500 dark:text-slate-400">暂无分析历史。启用后，从下一次分析开始会持续记录每一步。</div>
             ) : (
@@ -418,7 +446,7 @@ export function AnalysisHistorySettingsPanel({
                       <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] ${statusTone[run.status] || statusTone.info}`}>{run.status}</span>
                     </div>
                     <div className="mt-2 space-y-1 text-[11px] text-slate-500 dark:text-slate-400">
-                      <div>Session: {run.session_id}</div>
+                      <div className="break-all" title={run.session_id}>Session: {run.session_id}</div>
                       <div>开始: {formatDateTime(run.started_at)}</div>
                       <div>耗时: {formatDuration(run.duration_ms)} · 事件: {run.event_count || 0}</div>
                     </div>
@@ -443,21 +471,24 @@ export function AnalysisHistorySettingsPanel({
               {selectedRun ? "分层过程记录" : "选择左侧 run 查看分层过程"}
             </div>
             {selectedRun ? (
-              <div className="mt-3 grid gap-2 text-[11px] text-slate-500 dark:text-slate-400 md:grid-cols-2 xl:grid-cols-3">
-                <div>运行状态: <span className="text-slate-800 dark:text-slate-200">{selectedRun.status}</span></div>
-                <div>耗时: <span className="text-slate-800 dark:text-slate-200">{formatDuration(selectedRun.duration_ms)}</span></div>
-                <div>最近事件: <span className="text-slate-800 dark:text-slate-200">{getStageLabel(selectedRun.last_stage)} / {selectedRun.last_event || "-"}</span></div>
-                <div>报告类型: <span className="text-slate-800 dark:text-slate-200">{(selectedRequestSummary?.report_types || []).join(", ") || "-"}</span></div>
-                <div>语言: <span className="text-slate-800 dark:text-slate-200">{selectedRequestSummary?.analysis_language || "-"}</span></div>
-                <div>Provider: <span className="text-slate-800 dark:text-slate-200">{selectedRequestSummary?.model_provider?.providerType || "-"}</span></div>
-                <div className="md:col-span-2 xl:col-span-3">问题提示: <span className="text-slate-800 dark:text-slate-200">{selectedRun.last_problem || selectedRun.last_message || "-"}</span></div>
-              </div>
+              <>
+                <div className="mt-3 grid gap-2 text-[11px] text-slate-500 dark:text-slate-400 md:grid-cols-2 xl:grid-cols-3">
+                  <div>运行状态: <span className="text-slate-800 dark:text-slate-200">{selectedRun.status}</span></div>
+                  <div>耗时: <span className="text-slate-800 dark:text-slate-200">{formatDuration(selectedRun.duration_ms)}</span></div>
+                  <div>最近事件: <span className="text-slate-800 dark:text-slate-200">{getStageLabel(selectedRun.last_stage)} / {selectedRun.last_event || "-"}</span></div>
+                  <div>报告类型: <span className="text-slate-800 dark:text-slate-200">{(selectedRequestSummary?.report_types || []).join(", ") || "-"}</span></div>
+                  <div>语言: <span className="text-slate-800 dark:text-slate-200">{selectedRequestSummary?.analysis_language || "-"}</span></div>
+                  <div>Provider: <span className="text-slate-800 dark:text-slate-200">{selectedRequestSummary?.model_provider?.providerType || "-"}</span></div>
+                  <div className="md:col-span-2 xl:col-span-3">问题提示: <span className="text-slate-800 dark:text-slate-200">{selectedRun.last_problem || selectedRun.last_message || "-"}</span></div>
+                </div>
+                <div className="mt-2 text-xs text-cyan-700 dark:text-cyan-300">左侧先选分组，右侧立即查看原始事件与 details，不再弹窗跳转。</div>
+              </>
             ) : (
-              <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">右侧主区域现在优先用于滚动浏览分层事件，原始 details 放到点击后的弹窗里查看。</div>
+              <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">选中 run 后即可在同屏连续浏览分组与原始 details。</div>
             )}
           </div>
 
-          <div className="flex-1 overflow-auto bg-slate-50/80 p-4 dark:bg-slate-950/70">
+          <div className="flex min-h-0 flex-1 gap-3 overflow-hidden bg-slate-50/80 p-4 dark:bg-slate-950/70">
             {isLoadingDetail ? (
               <div className="flex h-full items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 h-4 w-4 animate-spin" />正在加载运行明细...</div>
             ) : !selectedRun ? (
@@ -465,100 +496,116 @@ export function AnalysisHistorySettingsPanel({
             ) : groupedEvents.length === 0 ? (
               <div className="flex h-full items-center justify-center text-sm text-slate-500">当前 run 暂无事件明细。</div>
             ) : (
-              <div className="space-y-3">
-                {groupedEvents.map((group) => (
-                  <button
-                    key={`${group.id}-${group.firstEvent.sequence}`}
-                    type="button"
-                    onClick={() => setSelectedGroup(group)}
-                    className="w-full rounded-lg border border-slate-200 bg-white p-4 text-left transition-colors hover:border-cyan-300 dark:border-slate-800 dark:bg-gray-950 dark:hover:border-cyan-900"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-medium text-slate-900 dark:text-slate-100">
-                            {group.count > 1 ? `${group.stageLabel} ${group.count} 个事件` : `${group.stageLabel} / ${group.firstEvent.event}`}
-                          </span>
-                          <span className="rounded-full border border-slate-200 px-2 py-0.5 text-[10px] text-slate-500 dark:border-slate-700 dark:text-slate-400">{group.roundLabel}</span>
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500 dark:text-slate-400">
-                          <span>序号 {group.firstEvent.sequence} - {group.lastEvent.sequence}</span>
-                          <span>{formatDateTime(group.firstEvent.timestamp)}</span>
-                          <span>至</span>
-                          <span>{formatDateTime(group.lastEvent.timestamp)}</span>
-                        </div>
-                        <div className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-300">{group.summary || "点击查看该分组的原始事件与 details"}</div>
-                        {group.eventLabels.length > 0 ? (
-                          <div className="mt-3 flex flex-wrap gap-1.5 text-[10px] text-slate-500 dark:text-slate-400">
-                            {group.eventLabels.slice(0, 6).map((label) => (
-                              <span key={label} className="rounded-full border border-slate-200 px-2 py-0.5 dark:border-slate-700">{label}</span>
-                            ))}
+              <>
+                <div className="flex min-h-0 w-full flex-col overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-gray-950 xl:w-[360px]">
+                  <div className="shrink-0 border-b border-slate-200 px-3 py-2 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
+                    分组列表 · 共 {groupedEvents.length} 组
+                  </div>
+                  <div className="flex-1 space-y-2 overflow-auto p-2">
+                    {groupedEvents.map((group) => {
+                      const active = currentGroup && group.id === currentGroup.id && group.firstEvent.sequence === currentGroup.firstEvent.sequence;
+                      return (
+                        <button
+                          key={`${group.id}-${group.firstEvent.sequence}`}
+                          type="button"
+                          onClick={() => setSelectedGroup(group)}
+                          className={`w-full rounded-lg border p-3 text-left transition-colors ${active ? "border-cyan-400 bg-cyan-50 dark:border-cyan-800 dark:bg-cyan-950/20" : "border-slate-200 bg-white hover:border-cyan-300 dark:border-slate-800 dark:bg-gray-950 dark:hover:border-cyan-900"}`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="text-xs font-medium text-slate-900 dark:text-slate-100">
+                                {group.count > 1 ? `${group.stageLabel} ${group.count} 个事件` : `${group.stageLabel} / ${group.firstEvent.event}`}
+                              </div>
+                              <div className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">{group.roundLabel} · 序号 {group.firstEvent.sequence}-{group.lastEvent.sequence}</div>
+                              <div className="mt-1 text-[11px] leading-5 text-slate-700 dark:text-slate-300">{group.summary || "查看详情"}</div>
+                            </div>
+                            <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] ${statusTone[group.status] || statusTone.info}`}>{group.status}</span>
                           </div>
-                        ) : null}
-                      </div>
-                      <div className="flex shrink-0 flex-col items-end gap-2">
-                        <span className={`rounded-full border px-2 py-0.5 text-[10px] ${statusTone[group.status] || statusTone.info}`}>{group.status}</span>
-                        <span className="text-[10px] text-slate-400 dark:text-slate-500">展开详情</span>
-                      </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-gray-950">
+                  <div className="shrink-0 border-b border-slate-200 px-3 py-3 dark:border-slate-800">
+                    {currentGroup ? (
+                      <>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                            {currentGroup.count > 1 ? `${currentGroup.stageLabel} ${currentGroup.count} 个事件` : `${currentGroup.stageLabel} / ${currentGroup.firstEvent.event}`}
+                          </div>
+                          <span className={`rounded-full border px-2 py-0.5 text-[10px] ${statusTone[currentGroup.status] || statusTone.info}`}>{currentGroup.status}</span>
+                        </div>
+                        <div className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">
+                          {currentGroup.roundLabel} · {formatDateTime(currentGroup.firstEvent.timestamp)} 至 {formatDateTime(currentGroup.lastEvent.timestamp)}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-sm text-slate-500">请选择一个分组</div>
+                    )}
+                    <div className="mt-3">
+                      <Input
+                        value={detailKeyword}
+                        onChange={(event) => setDetailKeyword(event.target.value)}
+                        placeholder="按事件名、消息、details 关键词过滤"
+                        className="h-8"
+                      />
                     </div>
-                  </button>
-                ))}
-              </div>
+                    <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      当前显示 {selectedGroupEvents.length} / {currentGroup?.events.length || 0} 条原始事件
+                    </div>
+                  </div>
+
+                  <div className="flex-1 space-y-3 overflow-auto p-3">
+                    {selectedGroupEvents.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                        没有匹配到事件，请调整关键词。
+                      </div>
+                    ) : (
+                      selectedGroupEvents.map((event) => {
+                        const detailJson = formatDetailJson(event.details as Record<string, unknown> | undefined);
+                        return (
+                          <div key={`${event.run_id}-${event.sequence}`} className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-gray-950">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-slate-900 px-2 text-[10px] text-white">{event.sequence}</span>
+                                <span className="truncate text-xs font-medium text-slate-900 dark:text-slate-100">{getStageLabel(event.stage)} / {event.event}</span>
+                              </div>
+                              <div className="flex shrink-0 items-center gap-2">
+                                <span className={`rounded-full border px-2 py-0.5 text-[10px] ${statusTone[event.status] || statusTone.info}`}>{event.status}</span>
+                                <span className="text-[10px] text-slate-500 dark:text-slate-400">{formatDuration(event.elapsed_ms)}</span>
+                              </div>
+                            </div>
+                            <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-slate-500 dark:text-slate-400">
+                              <span>{formatDateTime(event.timestamp)}</span>
+                              <span>{getRoundLabel(event)}</span>
+                            </div>
+                            {event.message ? <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-800 dark:text-slate-200">{event.message}</div> : null}
+                            {detailJson ? (
+                              <details className="mt-3 rounded-md border border-slate-200 bg-slate-50/80 p-2 text-[11px] dark:border-slate-700 dark:bg-slate-900/40">
+                                <summary className="cursor-pointer select-none text-[11px] text-slate-600 dark:text-slate-300">查看 details JSON</summary>
+                                <pre className="mt-2 overflow-auto rounded-md bg-slate-950 p-3 text-[11px] leading-5 text-cyan-100">{detailJson}</pre>
+                              </details>
+                            ) : null}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </>
             )}
           </div>
 
           <div className="shrink-0 border-t border-slate-200 px-4 py-3 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
             <div className="flex items-center gap-2">
               <Database className="h-3.5 w-3.5" />
-              历史明细优先展示可复盘的过程分组；原始事件与 details 在点击后弹窗查看，避免主视图被 JSON 挤占。
+              历史明细已改为“同屏浏览”：左侧分组，右侧连续查看事件与 details，便于逐条复盘。
             </div>
           </div>
         </div>
       </section>
-
-      <Dialog open={Boolean(selectedGroup)} onOpenChange={(open) => { if (!open) setSelectedGroup(null); }}>
-        <DialogContent className="flex h-[80vh] max-w-4xl flex-col overflow-hidden">
-          <DialogHeader>
-            <DialogTitle>
-              {selectedGroup ? (selectedGroup.count > 1 ? `${selectedGroup.stageLabel} ${selectedGroup.count} 个事件` : `${selectedGroup.stageLabel} / ${selectedGroup.firstEvent.event}`) : "事件详情"}
-            </DialogTitle>
-          </DialogHeader>
-
-          {selectedGroup ? (
-            <div className="flex-1 space-y-3 overflow-auto pr-1">
-              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 text-[11px] text-slate-500 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-400">
-                <div>{selectedGroup.roundLabel}</div>
-                <div className="mt-1">{formatDateTime(selectedGroup.firstEvent.timestamp)} 至 {formatDateTime(selectedGroup.lastEvent.timestamp)}</div>
-                <div className="mt-1">事件类型: {selectedGroup.eventLabels.join(" / ") || "-"}</div>
-              </div>
-
-              {selectedGroup.events.map((event) => {
-                const detailJson = formatDetailJson(event.details as Record<string, unknown> | undefined);
-                return (
-                  <div key={`${event.run_id}-${event.sequence}`} className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-gray-950">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex min-w-0 items-center gap-2">
-                        <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-slate-900 px-2 text-[10px] text-white">{event.sequence}</span>
-                        <span className="truncate text-xs font-medium text-slate-900 dark:text-slate-100">{getStageLabel(event.stage)} / {event.event}</span>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <span className={`rounded-full border px-2 py-0.5 text-[10px] ${statusTone[event.status] || statusTone.info}`}>{event.status}</span>
-                        <span className="text-[10px] text-slate-500 dark:text-slate-400">{formatDuration(event.elapsed_ms)}</span>
-                      </div>
-                    </div>
-                    <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-slate-500 dark:text-slate-400">
-                      <span>{formatDateTime(event.timestamp)}</span>
-                      <span>{getRoundLabel(event)}</span>
-                    </div>
-                    {event.message ? <div className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-800 dark:text-slate-200">{event.message}</div> : null}
-                    {detailJson ? <pre className="mt-3 overflow-auto rounded-md bg-slate-950 p-3 text-[11px] leading-5 text-cyan-100">{detailJson}</pre> : null}
-                  </div>
-                );
-              })}
-            </div>
-          ) : null}
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

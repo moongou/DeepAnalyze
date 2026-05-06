@@ -29,6 +29,10 @@ import {
   type AnalysisHistoryRunSummary,
   type AnalysisHistorySettings,
 } from "./AnalysisHistorySettingsPanel";
+import {
+  DataDictionarySettingsPanel,
+  type DataDictionaryKnowledgeEntry,
+} from "./DataDictionarySettingsPanel";
 
 interface DbConfig {
   host: string;
@@ -76,8 +80,8 @@ interface ModelTestStatus {
 interface SystemSettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  systemSettingsTab: "model" | "database" | "knowledge" | "history";
-  setSystemSettingsTab: (tab: "model" | "database" | "knowledge" | "history") => void;
+  systemSettingsTab: "model" | "database" | "knowledge" | "history" | "dictionary";
+  setSystemSettingsTab: (tab: "model" | "database" | "knowledge" | "history" | "dictionary") => void;
   // Model tab
   modelProviderConfig: ModelProviderConfig;
   setModelProviderConfig: React.Dispatch<React.SetStateAction<ModelProviderConfig>>;
@@ -91,8 +95,6 @@ interface SystemSettingsDialogProps {
   handleSaveModelConfig: () => void;
   modelTestStatus: ModelTestStatus;
   availableModels: string[];
-  analysisStrategy: string;
-  temperature: number | null;
   // Database tab
   dbType: string;
   handleDbTypeChange: (type: string) => void;
@@ -143,6 +145,13 @@ interface SystemSettingsDialogProps {
   handleRefreshAnalysisHistory: () => void;
   handleSelectAnalysisHistoryRun: (runId: string) => void;
   handleSaveAnalysisHistorySettings: () => void;
+  // Data dictionary tab
+  dataDictionaryEntries: DataDictionaryKnowledgeEntry[];
+  dataDictionaryTotal: number;
+  isLoadingDataDictionary: boolean;
+  isDeletingDataDictionary: boolean;
+  handleRefreshDataDictionary: () => void;
+  handleDeleteDataDictionaryEntries: (ids: string[]) => Promise<void>;
   // Knowledge tab
   isLoadingKnowledgeConfig: boolean;
   loadKnowledgeConfig: () => void;
@@ -184,7 +193,7 @@ export function SystemSettingsDialog({
   modelProviderConfig, setModelProviderConfig, applyModelPreset,
   showRawModelHeaders, setShowRawModelHeaders, modelHeadersInput, setModelHeadersInput,
   handleFetchModelList, isFetchingModelList, handleSaveModelConfig,
-  modelTestStatus, availableModels, analysisStrategy, temperature,
+  modelTestStatus, availableModels,
   dbType, handleDbTypeChange, dbConfig, setDbConfig, getDefaultPort,
   availableDatabaseNames, isLoadingDatabaseNames, databaseListError,
   dbContextSummary, dbKnowledgeSummary, dbKnowledgeUpdatedAt,
@@ -203,6 +212,9 @@ export function SystemSettingsDialog({
   isLoadingAnalysisHistory, isLoadingAnalysisHistoryDetail,
   isSavingAnalysisHistorySettings,
   handleRefreshAnalysisHistory, handleSelectAnalysisHistoryRun, handleSaveAnalysisHistorySettings,
+  dataDictionaryEntries, dataDictionaryTotal,
+  isLoadingDataDictionary, isDeletingDataDictionary,
+  handleRefreshDataDictionary, handleDeleteDataDictionaryEntries,
   isLoadingKnowledgeConfig, loadKnowledgeConfig,
   knowledgeBaseEnabled, setKnowledgeBaseEnabled,
   yutuRecords, currentUser, isRecordingKnowledge,
@@ -334,21 +346,53 @@ export function SystemSettingsDialog({
             系统设置
           </DialogTitle>
           <DialogDescription>
-            统一管理模型配置、数据库连接、知识库与分析历史追踪设置。
+            统一管理模型配置、数据库连接、知识库、数据字典与分析历史追踪设置。
           </DialogDescription>
         </DialogHeader>
         <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
-          <Tabs value={systemSettingsTab} onValueChange={(value) => setSystemSettingsTab(value as "model" | "database" | "knowledge" | "history")} className="h-full flex flex-col">
-            <TabsList className="grid w-full grid-cols-4 max-w-[720px]">
+          <Tabs value={systemSettingsTab} onValueChange={(value) => setSystemSettingsTab(value as "model" | "database" | "knowledge" | "history" | "dictionary")} className="h-full flex flex-col">
+            <TabsList className="grid w-full grid-cols-5 max-w-[920px]">
               <TabsTrigger value="model">模型设置</TabsTrigger>
               <TabsTrigger value="database">数据库设置</TabsTrigger>
               <TabsTrigger value="knowledge">知识库设置</TabsTrigger>
+              <TabsTrigger value="dictionary">数据字典</TabsTrigger>
               <TabsTrigger value="history">分析历史</TabsTrigger>
             </TabsList>
 
-            <TabsContent value="model" className="mt-4 flex-1 overflow-y-auto space-y-6">
+            <TabsContent value="model" className="mt-4 flex-1 overflow-y-auto">
               <section className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
+                <div className="rounded-lg border bg-white p-4 dark:bg-gray-950">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium">模型配置测试</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        先获取当前提供商可用模型，再直接选择目标模型。
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleFetchModelList}
+                        disabled={isFetchingModelList}
+                      >
+                        {isFetchingModelList ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                        获取模型名称
+                      </Button>
+                      <Button size="sm" onClick={handleSaveModelConfig}>
+                        保存当前提供商
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-2 text-xs text-gray-600 dark:text-gray-300 sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 dark:bg-gray-900/30">状态：{modelTestStatus.status}</div>
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 dark:bg-gray-900/30">结果：{modelTestStatus.message}</div>
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 dark:bg-gray-900/30">时间：{modelTestStatus.testedAt || "-"}</div>
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 dark:bg-gray-900/30">当前模型：{modelProviderConfig.model || "-"}</div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                   <div className="space-y-1.5">
                     <Label htmlFor="model-preset">预设模型</Label>
                     <Select value={modelProviderConfig.id} onValueChange={applyModelPreset}>
@@ -364,6 +408,7 @@ export function SystemSettingsDialog({
                       </SelectContent>
                     </Select>
                   </div>
+
                   <div className="space-y-1.5">
                     <Label htmlFor="model-provider-type">Provider 类型</Label>
                     <Input
@@ -377,6 +422,7 @@ export function SystemSettingsDialog({
                       }
                     />
                   </div>
+
                   <div className="space-y-1.5">
                     <Label htmlFor="model-label">显示名称</Label>
                     <Input
@@ -387,15 +433,9 @@ export function SystemSettingsDialog({
                       }
                     />
                   </div>
+
                   <div className="space-y-1.5">
                     <Label htmlFor="model-name">模型名</Label>
-                    <Input
-                      id="model-name"
-                      value={modelProviderConfig.model}
-                      onChange={(e) =>
-                        setModelProviderConfig((prev) => ({ ...prev, model: e.target.value }))
-                      }
-                    />
                     {availableModels.length > 0 ? (
                       <Select
                         value={modelProviderConfig.model}
@@ -403,7 +443,7 @@ export function SystemSettingsDialog({
                           setModelProviderConfig((prev) => ({ ...prev, model: value }))
                         }
                       >
-                        <SelectTrigger className="mt-2">
+                        <SelectTrigger id="model-name">
                           <SelectValue placeholder="从已获取模型列表中选择" />
                         </SelectTrigger>
                         <SelectContent>
@@ -414,19 +454,23 @@ export function SystemSettingsDialog({
                           ))}
                         </SelectContent>
                       </Select>
-                    ) : null}
+                    ) : (
+                      <Input
+                        id="model-name"
+                        value={modelProviderConfig.model}
+                        onChange={(e) =>
+                          setModelProviderConfig((prev) => ({ ...prev, model: e.target.value }))
+                        }
+                      />
+                    )}
+                    <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                      {availableModels.length > 0
+                        ? `已获取 ${availableModels.length} 个模型，选择即生效。`
+                        : "未获取模型列表时可手动输入模型名称。"}
+                    </div>
                   </div>
-                  <div className="col-span-2 space-y-1.5">
-                    <Label htmlFor="model-description">描述</Label>
-                    <Input
-                      id="model-description"
-                      value={modelProviderConfig.description}
-                      onChange={(e) =>
-                        setModelProviderConfig((prev) => ({ ...prev, description: e.target.value }))
-                      }
-                    />
-                  </div>
-                  <div className="col-span-2 space-y-1.5">
+
+                  <div className="space-y-1.5 md:col-span-2 xl:col-span-2">
                     <Label htmlFor="model-base-url">Base URL</Label>
                     <Input
                       id="model-base-url"
@@ -436,7 +480,8 @@ export function SystemSettingsDialog({
                       }
                     />
                   </div>
-                  <div className="col-span-2 space-y-1.5">
+
+                  <div className="space-y-1.5 md:col-span-2 xl:col-span-1">
                     <Label htmlFor="model-api-key">API Key</Label>
                     <Input
                       id="model-api-key"
@@ -447,9 +492,20 @@ export function SystemSettingsDialog({
                       }
                     />
                   </div>
+
+                  <div className="space-y-1.5 md:col-span-2 xl:col-span-3">
+                    <Label htmlFor="model-description">描述</Label>
+                    <Input
+                      id="model-description"
+                      value={modelProviderConfig.description}
+                      onChange={(e) =>
+                        setModelProviderConfig((prev) => ({ ...prev, description: e.target.value }))
+                      }
+                    />
+                  </div>
                 </div>
 
-                <div className="rounded-lg border p-4 space-y-3 bg-gray-50 dark:bg-gray-900/30">
+                <div className="rounded-lg border bg-gray-50 p-4 dark:bg-gray-900/30">
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="text-sm font-medium">自定义请求头</div>
@@ -472,49 +528,10 @@ export function SystemSettingsDialog({
                           headers: parseModelHeadersInput(nextValue),
                         }));
                       }}
-                      className="min-h-[120px] font-mono text-xs"
+                      className="mt-3 min-h-[96px] font-mono text-xs"
                       placeholder={"Authorization: Bearer xxx\nX-Trace-Id: demo"}
                     />
                   ) : null}
-                </div>
-
-                <div className="rounded-lg border p-4 space-y-4 bg-white dark:bg-gray-950">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="text-sm font-medium">模型配置测试</div>
-                      <div className="text-xs text-gray-500 dark:text-gray-400">
-                        获取当前提供商可用模型名称，并从列表中确认实际使用的模型。
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleFetchModelList}
-                        disabled={isFetchingModelList}
-                      >
-                        {isFetchingModelList ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
-                        获取模型名称
-                      </Button>
-                      <Button size="sm" onClick={handleSaveModelConfig}>
-                        保存模型配置
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="rounded-md border bg-gray-50 dark:bg-gray-900/30 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
-                    <div>状态：{modelTestStatus.status}</div>
-                    <div>结果：{modelTestStatus.message}</div>
-                    <div>时间：{modelTestStatus.testedAt || "-"}</div>
-                    <div>当前生效模型：{modelProviderConfig.model || "-"}</div>
-                  </div>
-                </div>
-
-                <div className="rounded-lg border p-4 space-y-2 bg-blue-50 dark:bg-blue-950/20 text-sm">
-                  <div className="font-medium text-blue-700 dark:text-blue-300">当前分析参数</div>
-                  <div className="text-xs text-blue-700 dark:text-blue-300">分析策略与温度仍保留在聊天输入区，不从那里移除，避免影响现有分析流程。</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">当前模型：{modelProviderConfig.model}</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">当前分析策略：{analysisStrategy}</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">当前温度：{temperature ?? "自动"}</div>
                 </div>
               </section>
             </TabsContent>
@@ -798,7 +815,7 @@ export function SystemSettingsDialog({
               </div>
             </TabsContent>
 
-            <TabsContent value="history" className="mt-0 flex-1 overflow-hidden">
+            <TabsContent value="history" className="mt-0 flex-1 min-h-0 overflow-hidden">
               <AnalysisHistorySettingsPanel
                 settings={analysisHistorySettings}
                 setSettings={setAnalysisHistorySettings}
@@ -812,6 +829,17 @@ export function SystemSettingsDialog({
                 onRefresh={handleRefreshAnalysisHistory}
                 onSave={handleSaveAnalysisHistorySettings}
                 onSelectRun={handleSelectAnalysisHistoryRun}
+              />
+            </TabsContent>
+
+            <TabsContent value="dictionary" className="mt-0 flex-1 overflow-hidden">
+              <DataDictionarySettingsPanel
+                entries={dataDictionaryEntries}
+                total={dataDictionaryTotal}
+                isLoading={isLoadingDataDictionary}
+                isDeleting={isDeletingDataDictionary}
+                onRefresh={handleRefreshDataDictionary}
+                onDelete={handleDeleteDataDictionaryEntries}
               />
             </TabsContent>
 
@@ -1023,9 +1051,11 @@ export function SystemSettingsDialog({
         <DialogFooter className="px-6 py-4 border-t justify-between">
           <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
             {systemSettingsTab === "model"
-              ? `当前模型：${modelProviderConfig.model || "-"}`
+              ? "模型提供商配置编辑中"
               : systemSettingsTab === "database"
                 ? `数据库测试状态：${isDbTested ? "已通过" : "未测试"}`
+                : systemSettingsTab === "dictionary"
+                  ? `已确认数据字典 ${dataDictionaryTotal} 条`
                 : systemSettingsTab === "history"
                   ? `已加载分析历史 ${analysisHistoryRuns.length} 条`
                 : knowledgeSettingsLoaded

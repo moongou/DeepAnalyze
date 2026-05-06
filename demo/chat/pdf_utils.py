@@ -532,19 +532,34 @@ def generate_pdf(
 
                     if os.path.exists(full_img_path):
                         img = Image(full_img_path)
-                        # 自动调整图像大小以适应页面宽度
-                        available_width = doc.width
-                        if img.drawWidth > available_width:
-                            ratio = available_width / img.drawWidth
-                            img.drawWidth = available_width
-                            img.drawHeight = img.drawHeight * ratio
-
+                        # 自动缩放图像，兼顾页面宽度与视觉高度，避免“撑满整页”
+                        available_width = doc.width * 0.92
+                        max_height = A4[1] * 0.43
+                        width_ratio = available_width / img.drawWidth if img.drawWidth else 1.0
+                        height_ratio = max_height / img.drawHeight if img.drawHeight else 1.0
+                        ratio = min(width_ratio, height_ratio, 1.0)
+                        img.drawWidth = max(1, img.drawWidth * ratio)
+                        img.drawHeight = max(1, img.drawHeight * ratio)
                         img.hAlign = 'CENTER'
-                        story.append(img)
+
+                        # 使用卡片容器包裹图像，提升阅读层次感
+                        image_card = Table([[img]], colWidths=[doc.width], hAlign='CENTER')
+                        image_card.setStyle(TableStyle([
+                            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#FAFBFD')),
+                            ('BOX', (0, 0), (-1, -1), 0.6, colors.HexColor('#D7DFE9')),
+                            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+                            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+                            ('TOPPADDING', (0, 0), (-1, -1), 8),
+                            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                        ]))
+
+                        story.append(Spacer(1, 4))
+                        story.append(image_card)
                         # 添加图片说明
-                        if block.get("alt"):
+                        caption_text = (block.get("alt") or Path(full_img_path).stem).strip()
+                        if caption_text:
                             caption_style = get_chinese_style("caption")
-                            story.append(Paragraph(block["alt"], caption_style))
+                            story.append(Paragraph(caption_text, caption_style))
                         story.append(Spacer(1, 12))
                     else:
                         logger.warning(f"图像文件不存在，跳过: {full_img_path}")

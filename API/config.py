@@ -50,7 +50,7 @@ HTTP_SERVER_BASE = f"http://localhost:{HTTP_SERVER_PORT}"
 API_HOST = "0.0.0.0"
 API_PORT = _get_int_env("DEEPANALYZE_API_PORT", 8200)
 API_TITLE = "DeepAnalyze OpenAI-Compatible API"
-API_VERSION = "1.1.16"
+API_VERSION = "1.1.17"
 
 # Thread cleanup configuration
 CLEANUP_TIMEOUT_HOURS = _get_int_env("DEEPANALYZE_CLEANUP_TIMEOUT_HOURS", 12)

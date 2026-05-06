@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Activity, AlertTriangle, Clock3, History, Loader2, ShieldCheck, Workflow } from "lucide-react";
+import { Activity, AlertTriangle, ChevronDown, ChevronRight, History, Loader2, ShieldCheck, Workflow } from "lucide-react";
 import type { AnalysisHistoryEvent, AnalysisHistoryRunSummary } from "./AnalysisHistorySettingsPanel";
 
 interface AnalysisRuntimeSidebarProps {
@@ -331,6 +331,8 @@ function buildStallSignal(run: AnalysisHistoryRunSummary | null, events: Analysi
 export function AnalysisRuntimeSidebar({ run, events, loading, isAnalyzing, onOpenFullHistory }: AnalysisRuntimeSidebarProps) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [selectedGroup, setSelectedGroup] = useState<AnalysisEventGroup | null>(null);
+  const [showRunOverview, setShowRunOverview] = useState(true);
+  const [showEventFlow, setShowEventFlow] = useState(true);
 
   useEffect(() => {
     setNowMs(Date.now());
@@ -378,94 +380,119 @@ export function AnalysisRuntimeSidebar({ run, events, loading, isAnalyzing, onOp
         </div>
       ) : (
         <>
-          <div className="shrink-0 space-y-3 border-b border-gray-200 bg-white px-4 py-3 dark:border-gray-800 dark:bg-gray-950">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="truncate text-xs font-medium text-gray-800 dark:text-gray-100">{run.run_id}</div>
-                <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">session: {run.session_id}</div>
+          <div className="shrink-0 border-b border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
+            <button
+              type="button"
+              onClick={() => setShowRunOverview((prev) => !prev)}
+              className="flex w-full items-center justify-between px-4 py-2 text-left hover:bg-gray-50 dark:hover:bg-gray-900/50"
+            >
+              <div className="flex items-center gap-2 text-[11px] font-medium text-gray-700 dark:text-gray-200">
+                {showRunOverview ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                分析过程
               </div>
-              <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] ${statusClassMap[run.status] || statusClassMap.info}`}>{run.status}</span>
-            </div>
+              <span className="text-[10px] text-gray-400 dark:text-gray-500">点击下拉缩放显示</span>
+            </button>
 
-            <div className="flex flex-wrap gap-2 text-[10px] text-gray-500 dark:text-gray-400">
-              <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">开始 {formatDateTime(run.started_at)}</span>
-              <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">耗时 {formatDuration(run.duration_ms)}</span>
-              <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">事件 {run.event_count || 0}</span>
-              <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">阶段 {getStageLabel(run.last_stage)} / {run.last_event || "-"}</span>
-              <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">模式 {run.request_summary?.analysis_mode || "-"}</span>
-              <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">策略 {run.request_summary?.strategy || "-"}</span>
-            </div>
-
-            {run.last_problem ? (
-              <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                <span>{run.last_problem}</span>
-              </div>
-            ) : run.last_message ? (
-              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] leading-5 text-gray-600 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-300">{run.last_message}</div>
-            ) : null}
-
-            {stallSignal ? (
-              <div className={`rounded-lg border px-3 py-3 ${stallToneMap[stallSignal.level]}`}>
-                <div className="flex items-start gap-2">
-                  {stallSignal.level === "healthy" ? <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" /> : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
+            {showRunOverview ? (
+              <div className="space-y-3 px-4 pb-3">
+                <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="text-[11px] font-medium">{stallSignal.label}</div>
-                    <div className="mt-1 text-[11px] leading-5">{stallSignal.message}</div>
-                    {stallSignal.latestEvent ? <div className="mt-2 text-[10px] opacity-80">最近事件: {stallSignal.stageLabel} / {stallSignal.latestEvent.event} · {formatDateTime(stallSignal.latestEvent.timestamp)}</div> : null}
+                    <div className="break-all text-xs font-medium text-gray-800 dark:text-gray-100" title={run.run_id}>{run.run_id}</div>
+                    <div className="mt-1 break-all text-[11px] text-gray-500 dark:text-gray-400" title={run.session_id}>session: {run.session_id}</div>
                   </div>
+                  <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] ${statusClassMap[run.status] || statusClassMap.info}`}>{run.status}</span>
                 </div>
+
+                <div className="flex flex-wrap gap-2 text-[10px] text-gray-500 dark:text-gray-400">
+                  <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">开始 {formatDateTime(run.started_at)}</span>
+                  <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">耗时 {formatDuration(run.duration_ms)}</span>
+                  <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">事件 {run.event_count || 0}</span>
+                  <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">阶段 {getStageLabel(run.last_stage)} / {run.last_event || "-"}</span>
+                  <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">模式 {run.request_summary?.analysis_mode || "-"}</span>
+                  <span className="rounded-full border border-gray-200 px-2 py-1 dark:border-gray-800">策略 {run.request_summary?.strategy || "-"}</span>
+                </div>
+
+                {run.last_problem ? (
+                  <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>{run.last_problem}</span>
+                  </div>
+                ) : run.last_message ? (
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-[11px] leading-5 text-gray-600 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-300">{run.last_message}</div>
+                ) : null}
+
+                {stallSignal ? (
+                  <div className={`rounded-lg border px-3 py-3 ${stallToneMap[stallSignal.level]}`}>
+                    <div className="flex items-start gap-2">
+                      {stallSignal.level === "healthy" ? <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" /> : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-medium">{stallSignal.label}</div>
+                        <div className="mt-1 text-[11px] leading-5">{stallSignal.message}</div>
+                        {stallSignal.latestEvent ? <div className="mt-2 text-[10px] opacity-80">最近事件: {stallSignal.stageLabel} / {stallSignal.latestEvent.event} · {formatDateTime(stallSignal.latestEvent.timestamp)}</div> : null}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </div>
 
-          <div className="min-h-0 flex-1 overflow-auto px-3 py-3">
-            <div className="mb-2 flex items-center justify-between gap-3 px-1">
-              <div className="text-[11px] font-medium text-gray-600 dark:text-gray-300">分层事件流</div>
-              <div className="text-[10px] text-gray-400 dark:text-gray-500">点击分组展开原始事件</div>
-            </div>
-
-            {groupedEvents.length === 0 ? (
-              <div className="text-xs leading-6 text-gray-500 dark:text-gray-400">当前 run 尚未写入事件。若正在执行，几秒后会自动刷新。</div>
-            ) : (
-              <div className="space-y-2">
-                {groupedEvents.map((group) => (
-                  <button
-                    key={`${group.id}-${group.firstEvent.sequence}`}
-                    type="button"
-                    onClick={() => setSelectedGroup(group)}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-3 py-3 text-left transition-colors hover:border-cyan-300 dark:border-gray-800 dark:bg-gray-950 dark:hover:border-cyan-900"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-[12px] font-medium text-gray-800 dark:text-gray-100">{group.count > 1 ? `${group.stageLabel} ${group.count} 个事件` : `${group.stageLabel} / ${group.firstEvent.event}`}</span>
-                          <span className="rounded-full border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 dark:border-gray-700 dark:text-gray-400">{group.roundLabel}</span>
-                        </div>
-                        <div className="mt-2 text-[11px] leading-5 text-gray-700 dark:text-gray-300">{group.summary || "点击查看该分组的原始事件与 details"}</div>
-                        <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-gray-400 dark:text-gray-500">
-                          <span>序号 {group.firstEvent.sequence} - {group.lastEvent.sequence}</span>
-                          <span>{formatDateTime(group.firstEvent.timestamp)}</span>
-                          <span>至</span>
-                          <span>{formatDateTime(group.lastEvent.timestamp)}</span>
-                        </div>
-                        {group.eventLabels.length > 0 ? (
-                          <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-gray-400 dark:text-gray-500">
-                            {group.eventLabels.slice(0, 4).map((label) => (
-                              <span key={label} className="rounded-full border border-gray-200 px-2 py-0.5 dark:border-gray-700">{label}</span>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                      <div className="flex shrink-0 flex-col items-end gap-2">
-                        <span className={`rounded-full border px-2 py-0.5 text-[10px] ${statusClassMap[group.status] || statusClassMap.info}`}>{group.status}</span>
-                        <span className="text-[10px] text-gray-400 dark:text-gray-500">展开</span>
-                      </div>
-                    </div>
-                  </button>
-                ))}
+          <div className={`${showEventFlow ? "min-h-0 flex-1 overflow-auto px-3 py-3" : "shrink-0 border-b border-gray-200 px-3 py-2 dark:border-gray-800"}`}>
+            <button
+              type="button"
+              onClick={() => setShowEventFlow((prev) => !prev)}
+              className="mb-2 flex w-full items-center justify-between rounded-md px-1 py-1 text-left hover:bg-gray-100 dark:hover:bg-gray-800/60"
+            >
+              <div className="flex items-center gap-2 text-[11px] font-medium text-gray-600 dark:text-gray-300">
+                {showEventFlow ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                分层事件流
               </div>
-            )}
+              <div className="text-[10px] text-gray-400 dark:text-gray-500">点击分组展开原始事件</div>
+            </button>
+
+            {showEventFlow ? (
+              groupedEvents.length === 0 ? (
+                <div className="text-xs leading-6 text-gray-500 dark:text-gray-400">当前 run 尚未写入事件。若正在执行，几秒后会自动刷新。</div>
+              ) : (
+                <div className="space-y-2">
+                  {groupedEvents.map((group) => (
+                    <button
+                      key={`${group.id}-${group.firstEvent.sequence}`}
+                      type="button"
+                      onClick={() => setSelectedGroup(group)}
+                      className="w-full rounded-lg border border-gray-200 bg-white px-3 py-3 text-left transition-colors hover:border-cyan-300 dark:border-gray-800 dark:bg-gray-950 dark:hover:border-cyan-900"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-[12px] font-medium text-gray-800 dark:text-gray-100">{group.count > 1 ? `${group.stageLabel} ${group.count} 个事件` : `${group.stageLabel} / ${group.firstEvent.event}`}</span>
+                            <span className="rounded-full border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 dark:border-gray-700 dark:text-gray-400">{group.roundLabel}</span>
+                          </div>
+                          <div className="mt-2 text-[11px] leading-5 text-gray-700 dark:text-gray-300">{group.summary || "点击查看该分组的原始事件与 details"}</div>
+                          <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-gray-400 dark:text-gray-500">
+                            <span>序号 {group.firstEvent.sequence} - {group.lastEvent.sequence}</span>
+                            <span>{formatDateTime(group.firstEvent.timestamp)}</span>
+                            <span>至</span>
+                            <span>{formatDateTime(group.lastEvent.timestamp)}</span>
+                          </div>
+                          {group.eventLabels.length > 0 ? (
+                            <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-gray-400 dark:text-gray-500">
+                              {group.eventLabels.slice(0, 4).map((label) => (
+                                <span key={label} className="rounded-full border border-gray-200 px-2 py-0.5 dark:border-gray-700">{label}</span>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="flex shrink-0 flex-col items-end gap-2">
+                          <span className={`rounded-full border px-2 py-0.5 text-[10px] ${statusClassMap[group.status] || statusClassMap.info}`}>{group.status}</span>
+                          <span className="text-[10px] text-gray-400 dark:text-gray-500">展开</span>
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )
+            ) : null}
           </div>
 
           <div className="shrink-0 border-t border-gray-200 bg-white px-4 py-2 text-[10px] text-gray-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-400">

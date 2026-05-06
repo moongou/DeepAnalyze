@@ -79,6 +79,7 @@ from datetime import datetime
 from pdf_utils import (
     register_chinese_fonts,
     get_chinese_style,
+    get_chinese_font_name,
     extract_markdown_sections,
     clean_md_text,
     generate_pdf as generate_pdf_module,
@@ -769,6 +770,13 @@ ANALYSIS_HISTORY_STALE_RUNNING_MS = 120000
 LLM_RETRY_MAX_ATTEMPTS = 3
 LLM_RETRY_BACKOFF_SECONDS = [0.4, 0.8]
 LLM_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+EXECUTE_CONTEXT_MAX_CHARS = 7000
+INTERACTIVE_TASK_SELECTION_MARKERS = (
+    "用户选择了以下分析任务",
+    "the user selected the following analysis tasks",
+)
+RUNTIME_NOISE_DIR_PARTS = {".lib", "__pycache__", ".pytest_cache"}
+RUNTIME_NOISE_SUFFIXES = {".dylib", ".so", ".dll", ".a", ".o"}
 
 
 # Initialize OpenAI client
@@ -810,6 +818,33 @@ def verify_builtin_superuser_password(password: str) -> bool:
     if BUILTIN_SUPERUSER_PASSWORD_HASH:
         return hash_password(password or "") == BUILTIN_SUPERUSER_PASSWORD_HASH
     return (password or "") == ""
+
+
+def _is_runtime_noise_relative_path(relative_path: Path) -> bool:
+    path_parts = {part.lower() for part in relative_path.parts}
+    if path_parts.intersection(RUNTIME_NOISE_DIR_PARTS):
+        return True
+    suffix = relative_path.suffix.lower()
+    if suffix in RUNTIME_NOISE_SUFFIXES:
+        return True
+    return False
+
+
+def _collect_workspace_file_state(workspace_dir: str) -> Dict[Path, Tuple[int, int]]:
+    workspace_root = Path(workspace_dir).resolve()
+    state: Dict[Path, Tuple[int, int]] = {}
+    for candidate in workspace_root.rglob("*"):
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            relative_path = candidate.relative_to(workspace_root)
+            if _is_runtime_noise_relative_path(relative_path):
+                continue
+            candidate_stat = candidate.stat()
+            state[candidate.resolve()] = (candidate_stat.st_size, candidate_stat.st_mtime_ns)
+        except OSError:
+            continue
+    return state
 
 
 def ensure_builtin_superuser(cursor: sqlite3.Cursor) -> None:
@@ -1599,38 +1634,82 @@ def _create_chat_completion_with_retry(llm_client: openai.OpenAI, request_kwargs
     raise RuntimeError("LLM request failed after retries")
 
 
-def _normalize_messages_for_llm_request(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    normalized_messages: List[Dict[str, Any]] = []
-    for message in messages or []:
-        if not isinstance(message, dict):
+def _summarize_execution_output_for_prompt(execution_output: str) -> str:
+    text = str(execution_output or "").strip()
+    if not text:
+        return "(no execution output)"
+
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 180:
+        lines = lines[:130] + ["...(中间输出已省略)..."] + lines[-35:]
+    condensed = "\n".join(lines)
+    if len(condensed) <= EXECUTE_CONTEXT_MAX_CHARS:
+        return condensed
+
+    head_len = max(2000, EXECUTE_CONTEXT_MAX_CHARS // 2)
+    tail_len = max(1200, EXECUTE_CONTEXT_MAX_CHARS - head_len)
+    return (
+        condensed[:head_len]
+        + "\n...(执行输出已截断)...\n"
+        + condensed[-tail_len:]
+    )
+
+
+def _normalize_messages_for_llm_request(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    normalized: List[Dict[str, str]] = []
+    for item in messages or []:
+        if not isinstance(item, dict):
             continue
-        role = str(message.get("role", "") or "").strip().lower()
-        content = message.get("content", "")
-        if not isinstance(content, str):
-            content = json.dumps(content, ensure_ascii=False)
+        role = str(item.get("role") or "user").strip().lower()
+        content_obj = item.get("content", "")
+        if isinstance(content_obj, str):
+            content = content_obj
+        else:
+            content = json.dumps(content_obj, ensure_ascii=False)
 
         if role == "execute":
-            normalized_messages.append(
+            execution_summary = _summarize_execution_output_for_prompt(content)
+            normalized.append(
                 {
                     "role": "user",
                     "content": (
-                        "以下是上一轮代码或 SQL 的真实执行结果。"
-                        "请基于这些结果继续分析，不要把它当成新的用户需求，也不要重复执行完全相同的代码。"
-                        "如果现有证据已经足够，请直接给出结论。\n\n"
-                        f"<Execute>\n```\n{content}\n```\n</Execute>"
+                        "上一轮代码执行结果如下，请继续推进分析并给出下一步动作：\n"
+                        "<Execute>\n"
+                        "```text\n"
+                        f"{execution_summary}\n"
+                        "```\n"
+                        "</Execute>"
                     ),
                 }
             )
             continue
 
-        normalized_messages.append(
+        if role not in {"system", "user", "assistant"}:
+            role = "user"
+
+        normalized.append(
             {
-                "role": role or "user",
+                "role": role,
                 "content": content,
             }
         )
 
-    return normalized_messages
+    return normalized
+
+
+def _has_user_task_selection(messages: List[Dict[str, Any]]) -> bool:
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role != "user":
+            continue
+        content = str(item.get("content") or "")
+        lowered = content.lower()
+        for marker in INTERACTIVE_TASK_SELECTION_MARKERS:
+            if marker.lower() in lowered:
+                return True
+    return False
 
 
 def fetch_model_names(model_provider: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -1914,8 +1993,8 @@ def build_analysis_language_prompt(analysis_language: str) -> str:
             "\n\n**Output language override (highest priority): English**"
             "\n- This preference overrides default language rules in the base prompt."
             "\n- All user-facing narrative text must be in English, including `<Analyze>`, `<Understand>`, `<Answer>`, and report body text."
-            "\n- In interactive mode, task names/descriptions in `<TaskTree>` and all follow-up user guidance text must also be in English."
-            "\n- Keep structural tags unchanged (`<Analyze>`, `<Code>`, `<TaskTree>`, etc.); only change natural-language content."
+            "\n- In interactive mode, task names/descriptions in `<TaskTree>` and semantic confirmation text in `<DataDictionary>` must also be in English."
+            "\n- Keep structural tags unchanged (`<Analyze>`, `<Code>`, `<TaskTree>`, `<DataDictionary>`, etc.); only change natural-language content."
             "\n- Do not output Chinese characters in user-facing text. If any Chinese appears, rewrite it in English before continuing."
         )
 
@@ -1923,8 +2002,8 @@ def build_analysis_language_prompt(analysis_language: str) -> str:
         "\n\n**输出语言覆盖规则（最高优先级）：中文（简体）**"
         "\n- 本规则覆盖基础提示词中的默认语言描述。"
         "\n- 所有面向用户的自然语言内容必须使用简体中文，包括 `<Analyze>`、`<Understand>`、`<Answer>` 和最终报告正文。"
-        "\n- 在交互模式下，`<TaskTree>` 中任务名称/描述与后续引导文案也必须使用简体中文。"
-        "\n- 结构化标签保持不变（如 `<Analyze>`、`<Code>`、`<TaskTree>` 等），仅改变自然语言内容。"
+        "\n- 在交互模式下，`<TaskTree>` 任务名称/描述与 `<DataDictionary>` 待确认语义说明也必须使用简体中文。"
+        "\n- 结构化标签保持不变（如 `<Analyze>`、`<Code>`、`<TaskTree>`、`<DataDictionary>` 等），仅改变自然语言内容。"
     )
 
 HTTP_SERVER_PORT = 8100
@@ -1975,6 +2054,7 @@ _V1_REWRITE = {
     "/v1/config/models":          "/api/config/models",
     "/v1/config/databases":       "/api/config/databases",
     "/v1/config/knowledge":       "/api/config/knowledge",
+    "/v1/config/data-dictionary": "/api/config/data-dictionary",
     "/v1/config/analysis-history": "/api/config/analysis-history",
     "/v1/config/export":          "/api/config/export",
     "/v1/knowledge/settings":     "/api/kb/settings",
@@ -2711,6 +2791,94 @@ def build_tree(path: Path, root: Optional[Path] = None) -> dict:
     return node
 
 
+def _load_encoding_map_summary(workspace_dir: str) -> Dict[str, Any]:
+    """读取编码映射摘要文件，失败时返回空结构。"""
+    map_path = Path(workspace_dir) / ".encoding_map.json"
+    if not map_path.exists() or not map_path.is_file():
+        return {"files": []}
+
+    try:
+        with open(map_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            return {"files": []}
+        files = payload.get("files")
+        if not isinstance(files, list):
+            payload["files"] = []
+        return payload
+    except Exception:
+        return {"files": []}
+
+
+def _persist_encoding_map_entries(workspace_dir: str, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """持久化编码映射，并自动清理已不存在的原始文件映射。"""
+    workspace_root = Path(workspace_dir).resolve()
+    map_path = workspace_root / ".encoding_map.json"
+
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+
+        original_name = str(raw.get("original_name") or "").strip()
+        if not original_name:
+            continue
+
+        rel_path = str(raw.get("path") or original_name).strip().replace("\\", "/")
+        if not rel_path:
+            continue
+
+        try:
+            original_abs = (workspace_root / rel_path).resolve()
+        except Exception:
+            continue
+
+        if workspace_root not in original_abs.parents and original_abs != workspace_root:
+            continue
+        if not original_abs.exists() or not original_abs.is_file():
+            continue
+
+        converted_name = str(raw.get("converted_name") or original_name).strip() or original_name
+        original_encoding = str(raw.get("original_encoding") or "unknown").strip() or "unknown"
+        is_converted = bool(raw.get("is_converted"))
+
+        normalized[rel_path] = {
+            "original_name": original_name,
+            "converted_name": converted_name,
+            "original_encoding": original_encoding,
+            "is_converted": is_converted,
+            "path": rel_path,
+        }
+
+    final_entries = sorted(normalized.values(), key=lambda item: item.get("path", ""))
+    if not final_entries:
+        try:
+            map_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return {
+            "all_files_utf8": True,
+            "converted_count": 0,
+            "total_files": 0,
+            "files": [],
+        }
+
+    encoding_summary = {
+        "all_files_utf8": all(
+            str(item.get("original_encoding") or "").lower() in {"utf-8", "binary"}
+            for item in final_entries
+        ),
+        "converted_count": sum(1 for item in final_entries if bool(item.get("is_converted"))),
+        "total_files": len(final_entries),
+        "files": final_entries,
+    }
+
+    with open(map_path, "w", encoding="utf-8") as handle:
+        json.dump(encoding_summary, handle, indent=2, ensure_ascii=False)
+
+    return encoding_summary
+
+
 @app.get("/workspace/tree")
 async def workspace_tree(session_id: str = Query("default"), username: str = Query("default")):
     workspace_dir = get_session_workspace(session_id, username)
@@ -2746,9 +2914,73 @@ async def delete_workspace_file(
         raise HTTPException(status_code=404, detail="Not found")
     if target.is_dir():
         raise HTTPException(status_code=400, detail="Folder deletion not allowed")
+
+    rel_target = target.relative_to(abs_workspace).as_posix()
+    encoding_summary = _load_encoding_map_summary(workspace_dir)
+    encoding_entries = encoding_summary.get("files") if isinstance(encoding_summary, dict) else []
+    if not isinstance(encoding_entries, list):
+        encoding_entries = []
+
+    removed_converted_files: List[str] = []
+    should_sync_converted = (
+        target.parent == abs_workspace
+        and not rel_target.startswith("converted/")
+        and not target.name.startswith(".")
+    )
+
     try:
+        if should_sync_converted:
+            related_candidates = {(abs_workspace / "converted" / target.name).resolve()}
+            for entry in encoding_entries:
+                if not isinstance(entry, dict):
+                    continue
+                entry_original_name = str(entry.get("original_name") or "").strip()
+                entry_path = str(entry.get("path") or entry_original_name).strip().replace("\\", "/")
+                if entry_original_name == target.name or entry_path == rel_target:
+                    converted_name = str(entry.get("converted_name") or "").strip()
+                    if converted_name:
+                        related_candidates.add((abs_workspace / "converted" / converted_name).resolve())
+
+            for candidate in related_candidates:
+                if abs_workspace not in candidate.parents and candidate != abs_workspace:
+                    continue
+                if candidate.exists() and candidate.is_file():
+                    candidate.unlink()
+                    removed_converted_files.append(candidate.relative_to(abs_workspace).as_posix())
+
         target.unlink()
-        return {"message": "deleted"}
+
+        filtered_entries: List[Dict[str, Any]] = []
+        removed_converted_set = set(removed_converted_files)
+        removed_converted_names = {Path(path).name for path in removed_converted_files}
+        for entry in encoding_entries:
+            if not isinstance(entry, dict):
+                continue
+
+            entry_original_name = str(entry.get("original_name") or "").strip()
+            entry_path = str(entry.get("path") or entry_original_name).strip().replace("\\", "/")
+            entry_converted_name = str(entry.get("converted_name") or "").strip()
+
+            if entry_original_name == target.name or entry_path == rel_target:
+                continue
+            if rel_target.startswith("converted/") and entry_converted_name == Path(rel_target).name:
+                continue
+            if entry_converted_name and f"converted/{entry_converted_name}" in removed_converted_set:
+                continue
+            if entry_converted_name and entry_converted_name in removed_converted_names:
+                continue
+
+            filtered_entries.append(entry)
+
+        try:
+            _persist_encoding_map_entries(workspace_dir, filtered_entries)
+        except Exception as encoding_error:
+            print(f"[workspace/file] failed to update encoding map: {encoding_error}")
+
+        return {
+            "message": "deleted",
+            "removed_converted_files": removed_converted_files,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2928,21 +3160,10 @@ async def upload_files(
                 }
             )
 
-    # 生成编码状态汇总
-    all_utf8 = all(item["original_encoding"] == "utf-8" or item["original_encoding"] == "binary" for item in encoding_report)
-    converted_count = sum(1 for item in encoding_report if item["is_converted"])
-
-    encoding_summary = {
-        "all_files_utf8": all_utf8,
-        "converted_count": converted_count,
-        "total_files": len(encoding_report),
-        "files": encoding_report
-    }
-
-    # 保存编码映射文件，供智能体后续分析时读取
-    encoding_map_path = Path(workspace_dir) / ".encoding_map.json"
-    with open(encoding_map_path, "w", encoding="utf-8") as f:
-        json.dump(encoding_summary, f, indent=2, ensure_ascii=False)
+    existing_entries = _load_encoding_map_summary(workspace_dir).get("files", [])
+    if not isinstance(existing_entries, list):
+        existing_entries = []
+    encoding_summary = _persist_encoding_map_entries(workspace_dir, [*existing_entries, *encoding_report])
 
     return {
         "message": f"Successfully uploaded {len(uploaded_files)} files",
@@ -2993,6 +3214,7 @@ async def upload_to_dir(
                 "converted_name": utf8_dst.name if utf8_dst else dst.name,
                 "original_encoding": original_encoding,
                 "is_converted": (utf8_dst != dst) if utf8_dst else False,
+                "path": str(dst.relative_to(abs_workspace)),
             })
 
             saved.append(
@@ -3013,20 +3235,10 @@ async def upload_to_dir(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Save failed: {e}")
 
-    all_utf8 = all(item["original_encoding"] == "utf-8" or item["original_encoding"] == "binary" for item in encoding_report)
-    converted_count = sum(1 for item in encoding_report if item["is_converted"])
-
-    encoding_summary = {
-        "all_files_utf8": all_utf8,
-        "converted_count": converted_count,
-        "total_files": len(encoding_report),
-        "files": encoding_report
-    }
-
-    # 保存编码映射文件，供智能体后续分析时读取
-    encoding_map_path = Path(workspace_dir) / ".encoding_map.json"
-    with open(encoding_map_path, "w", encoding="utf-8") as f:
-        json.dump(encoding_summary, f, indent=2, ensure_ascii=False)
+    existing_entries = _load_encoding_map_summary(workspace_dir).get("files", [])
+    if not isinstance(existing_entries, list):
+        existing_entries = []
+    encoding_summary = _persist_encoding_map_entries(workspace_dir, [*existing_entries, *encoding_report])
 
     return {"message": f"uploaded {len(saved)} files", "files": saved, "encoding_info": encoding_summary}
 
@@ -3097,7 +3309,7 @@ def fix_tags_and_codeblock(s: str) -> str:
     修复未闭合的tags，并确保</Code>后代码块闭合。
     """
     pattern = re.compile(
-        r"<(Analyze|Understand|Code|Execute|Answer|TaskTree)>(.*?)(?:</\1>|(?=$))", re.DOTALL
+        r"<(Analyze|Understand|Code|Execute|Answer|TaskTree|DataDictionary)>(.*?)(?:</\1>|(?=$))", re.DOTALL
     )
 
     # 找所有匹配
@@ -3840,7 +4052,7 @@ def get_compact_system_prompt_with_fonts() -> str:
         "你是 DeepAnalyze，负责中国海关风险分析与数据研判。"
         "你的结论必须数据驱动、可解释、可复现，不得臆造字段或结论。\n\n"
         "【输出协议】\n"
-        "1) 按需使用 <Analyze>/<Understand>/<Code>/<Execute>/<Answer>/<TaskTree> 标签。\n"
+        "1) 按需使用 <Analyze>/<Understand>/<Code>/<Execute>/<Answer>/<TaskTree>/<DataDictionary> 标签。\n"
         "2) 每轮应先说明思路，再执行可运行代码，再给结论。\n"
         "3) 无论任务成功、证据不足、需求不合理、条件缺失或执行失败，最终都必须输出一个 <Answer> 结论块，说明可得结论或明确写出无法完成的理由。\n"
         "4) 代码必须包含必要 import、异常处理，并打印关键中间结果。\n\n"
@@ -3960,6 +4172,7 @@ def bot_stream(
 - 首先执行数据探测代码，获取所有数据文件的字段名、类型、缺失值、基本统计信息。
 - 建立「用户语义 → 数据字段」映射表。
 - 将数据探索结果整理为「数据字典」，向用户展示。
+- 若关键表/字段语义存在歧义，必须先输出 `<DataDictionary>{"items":[...]}</DataDictionary>` 供用户确认，再进入后续规划。
 
 **第二步：分析规划与用户确认（强制步骤 - 不得跳过）**
 - 基于数据字典和用户的分析目标，设计有层次的分析计划。
@@ -4011,6 +4224,7 @@ def bot_stream(
                 "\n\n**Current mode: Interactive analysis (strictly required)**"
                 "\nYou must follow this workflow and do not skip steps:"
                 "\n1) Data exploration and data dictionary."
+                "\n- If key table/field semantics are uncertain, output `<DataDictionary>{\"items\":[...]}</DataDictionary>` for user confirmation first."
                 "\n2) Planning and user confirmation. You MUST output the plan using `<TaskTree>`."
                 "\n- Inside `<TaskTree>`, output only one valid JSON object."
                 "\n- Do not repeat the task tree JSON outside `<TaskTree>`."
@@ -4095,8 +4309,6 @@ def bot_stream(
         configured_sources = []
 
     active_sources = normalized_selected_sources
-    if not active_sources and len(configured_sources) == 1:
-        active_sources = [configured_sources[0]]
 
     database_source_prompt = ""
     database_data_context = ""
@@ -4162,8 +4374,6 @@ def bot_stream(
         for item in active_sources
         if str(item.get("label", "") or "").strip()
     ]
-    if loaded_db_source and loaded_db_source not in preferred_source_labels:
-        preferred_source_labels.append(loaded_db_source)
 
     analysis_history_settings = _load_analysis_history_settings(username)
     history_recorder = AnalysisHistoryRecorder(
@@ -4192,7 +4402,7 @@ def bot_stream(
         },
     )
 
-    if loaded_db_source:
+    if active_sources and loaded_db_source:
         if analysis_language == "en":
             database_source_prompt += (
                 "\n\n**Session DB context loaded**: "
@@ -4213,7 +4423,7 @@ def bot_stream(
             break
 
     database_context_started_ts = None
-    if active_sources or loaded_db_source:
+    if active_sources:
         database_context_started_ts = time_module.time()
         history_recorder.log(
             stage="database",
@@ -4229,16 +4439,29 @@ def bot_stream(
             },
         )
 
-    db_kb_context = build_database_knowledge_context(
-        username=username,
-        user_query=latest_user_query,
-        preferred_source_labels=preferred_source_labels,
-        analysis_language=analysis_language,
-    )
-    if db_kb_context:
-        database_data_context = (
-            f"{database_data_context}\n\n" if database_data_context else ""
-        ) + db_kb_context
+    db_kb_context = ""
+    data_dictionary_context = ""
+    if active_sources:
+        db_kb_context = build_database_knowledge_context(
+            username=username,
+            user_query=latest_user_query,
+            preferred_source_labels=preferred_source_labels,
+            analysis_language=analysis_language,
+        )
+        if db_kb_context:
+            database_data_context = (
+                f"{database_data_context}\n\n" if database_data_context else ""
+            ) + db_kb_context
+        data_dictionary_context = build_confirmed_data_dictionary_context(
+            username=username,
+            user_query=latest_user_query,
+            preferred_source_labels=preferred_source_labels,
+            analysis_language=analysis_language,
+        )
+        if data_dictionary_context:
+            database_data_context = (
+                f"{database_data_context}\n\n" if database_data_context else ""
+            ) + data_dictionary_context
     if database_data_context:
         database_data_context = trim_text_for_budget(database_data_context, max_chars=2800)
     if database_context_started_ts is not None:
@@ -4254,6 +4477,7 @@ def bot_stream(
                 "loaded_column_count": loaded_db_column_count,
                 "context_chars": len(database_data_context or ""),
                 "has_knowledge_context": bool(db_kb_context),
+                "has_data_dictionary_context": bool(data_dictionary_context),
                 "duration_ms": int((time_module.time() - database_context_started_ts) * 1000),
             },
         )
@@ -4271,7 +4495,7 @@ def bot_stream(
         "\n- R：使用 `<Code>```r ...```</Code>` 做统计检验、时间序列和适合 R 包的建模任务。"
     )
     sql_first_prompt = ""
-    if active_sources or loaded_db_source:
+    if active_sources:
         sql_first_prompt = (
             "\n\n**SQL-first extraction rule for connected databases**:"
             "\n- For non-trivial database analysis, do not start by scanning large tables from Python/R. Start with an extraction plan."
@@ -4287,6 +4511,21 @@ def bot_stream(
             "\n- 只有在 SQL 已经把数据压缩为可承载的分析数据集之后，再使用 Python/R 做深度分析、统计建模和可视化。"
             "\n- 优先使用多段有明确目的的小 SQL，而不是一条巨大 SQL；每段 SQL 执行前应在 `<Analyze>` 中说明目的。"
         )
+    data_dictionary_prompt = (
+        "\n\n**Data exploration and semantic confirmation (mandatory before deep analysis)**:"
+        "\n- Before large-scale extraction/modeling, infer business meaning of key tables/fields from schema names, sample values, and join relationships."
+        "\n- When confidence is insufficient or multiple interpretations exist, output only one `<DataDictionary>` block with a single valid JSON object."
+        "\n- JSON schema: {\"items\":[{\"id\":\"1\",\"source_label\":\"optional\",\"table\":\"table_name\",\"field\":\"field_name\",\"proposed_meaning\":\"business meaning\",\"question\":\"what to confirm\",\"confidence\":\"low|medium|high\",\"analysis_usage\":\"how this affects analysis\"}]}"
+        "\n- Do not wrap JSON in markdown code fences. Do not output extra text outside `<DataDictionary>` in that round."
+        "\n- After outputting `<DataDictionary>`, stop immediately and wait for user confirmation to continue."
+        if analysis_language == "en"
+        else "\n\n**数据探索与语义确认规则（深度分析前必须执行）**："
+        "\n- 在大规模取数/建模前，必须先基于表名、字段名、样例值和表间关联路径推测关键字段的业务含义。"
+        "\n- 若存在歧义或置信度不足，必须输出且仅输出一个 `<DataDictionary>` 标签块，内部仅包含一个合法 JSON 对象。"
+        "\n- JSON 结构：{\"items\":[{\"id\":\"1\",\"source_label\":\"可选\",\"table\":\"表名\",\"field\":\"字段名\",\"proposed_meaning\":\"推测业务含义\",\"question\":\"需要用户确认的问题\",\"confidence\":\"low|medium|high\",\"analysis_usage\":\"该含义对分析的影响\"}]}"
+        "\n- 禁止使用 markdown 代码块包裹 JSON，且该轮 `<DataDictionary>` 之外不得输出其他说明文字。"
+        "\n- 输出 `<DataDictionary>` 后立即停止，等待用户确认后再继续分析。"
+    )
     signature_safety_prompt = (
         "\n\n**函数调用安全（必须遵守）**："
         "\n- 先核对函数签名与参数，再执行。"
@@ -4314,6 +4553,7 @@ def bot_stream(
             database_source_prompt,
             runtime_language_prompt,
             sql_first_prompt,
+            data_dictionary_prompt,
             language_prompt,
         ],
         max_chars=5600,
@@ -4321,10 +4561,10 @@ def bot_stream(
 
     language_enforcer_prompt = (
         "CRITICAL OUTPUT RULE: Respond in English only for all user-facing narrative text. "
-        "Do not output Chinese characters in Analyze/Understand/Answer/TaskTree/report text. "
+        "Do not output Chinese characters in Analyze/Understand/Answer/TaskTree/DataDictionary/report text. "
         "Keep structural tags unchanged."
         if analysis_language == "en"
-        else "关键输出规则：所有面向用户的自然语言文本必须使用简体中文（包括 Analyze/Understand/Answer/TaskTree/报告正文）。结构化标签保持不变。"
+        else "关键输出规则：所有面向用户的自然语言文本必须使用简体中文（包括 Analyze/Understand/Answer/TaskTree/DataDictionary/报告正文）。结构化标签保持不变。"
     )
 
     # Check if system prompt is already there, if not, insert it
@@ -4359,25 +4599,6 @@ def bot_stream(
     # 创建 converted 子文件夹用于存放 UTF-8 转换后的文件
     CONVERTED_DIR = os.path.join(WORKSPACE_DIR, "converted")
     os.makedirs(CONVERTED_DIR, exist_ok=True)
-
-    workspace_root = Path(WORKSPACE_DIR)
-
-    def collect_workspace_file_state():
-        state = {}
-        excluded_parts = {".lib", "__pycache__"}
-        for candidate in workspace_root.rglob("*"):
-            try:
-                if candidate.is_symlink() or not candidate.is_file():
-                    continue
-                relative_path = candidate.relative_to(workspace_root)
-                if any(part in excluded_parts for part in relative_path.parts):
-                    continue
-                candidate_stat = candidate.stat()
-            except OSError:
-                continue
-            state[relative_path] = (candidate_stat.st_size, candidate_stat.st_mtime_ns)
-        return state
-
     history_recorder.log(
         stage="prompt",
         event="prompt_prepared",
@@ -4475,20 +4696,27 @@ def bot_stream(
             )
 
         request_messages = _normalize_messages_for_llm_request(messages)
+        stop_sequences = [
+            "</Code>",
+            "</code>",
+            "</TaskTree>",
+            "</tasktree>",
+            "</DataDictionary>",
+            "</datadictionary>",
+        ]
+        if _provider_supports_vllm_controls(runtime_provider):
+            stop_sequences.extend([
+                "</s>",
+                "<|endoftext|>",
+                "<|im_end|>",
+            ])
+
         request_kwargs: Dict[str, Any] = {
             "model": llm_model,
             "messages": request_messages,
             "temperature": effective_temperature,
             "stream": True,
-            "stop": [
-                "</Code>",
-                "</code>",
-                "</TaskTree>",
-                "</tasktree>",
-                "</s>",
-                "<|endoftext|>",
-                "<|im_end|>",
-            ],
+            "stop": stop_sequences,
         }
         if _provider_supports_vllm_controls(runtime_provider):
             request_kwargs["extra_body"] = {
@@ -4506,6 +4734,7 @@ def bot_stream(
                 "provider": runtime_provider,
                 "model": llm_model,
                 "message_count": len(request_messages),
+                "raw_message_count": len(messages),
                 "temperature": effective_temperature,
                 "has_extra_body": "extra_body" in request_kwargs,
             },
@@ -4573,7 +4802,13 @@ def bot_stream(
                 messages.append({"role": "assistant", "content": cur_res})
                 finished = True
                 break
+            # ---- DataDictionary 检测（流式中途发现完整闭合标签） ----
+            if re.search(r"</datadictionary>", cur_res, re.IGNORECASE):
+                messages.append({"role": "assistant", "content": cur_res})
+                finished = True
+                break
         llm_has_tasktree = bool(re.search(r"<tasktree>", cur_res, re.IGNORECASE))
+        llm_has_datadictionary = bool(re.search(r"<datadictionary>", cur_res, re.IGNORECASE))
         llm_has_code = bool(re.search(r"<code>|```", cur_res, re.IGNORECASE))
         llm_has_visible_output = bool(cur_res.strip())
         history_recorder.log(
@@ -4588,6 +4823,7 @@ def bot_stream(
                 "char_count": stream_char_count,
                 "saw_final_answer": saw_final_answer_this_round,
                 "has_tasktree": llm_has_tasktree,
+                "has_datadictionary": llm_has_datadictionary,
                 "has_code": llm_has_code,
                 "has_visible_output": llm_has_visible_output,
             },
@@ -4597,6 +4833,7 @@ def bot_stream(
             last_finish_reason == "stop"
             and not saw_final_answer_this_round
             and not llm_has_tasktree
+            and not llm_has_datadictionary
             and not llm_has_code
             and not llm_has_visible_output
         )
@@ -4632,11 +4869,30 @@ def bot_stream(
                 yield empty_round_block
                 finished = True
                 continue
+            recovery_prompt = (
+                "上一轮模型返回了空响应。请继续推进分析，不要停在空输出。\n"
+                "要求：\n"
+                "1. 若处于 interactive 模式且尚未给出任务清单，请先输出 <TaskTree>。\n"
+                "2. 若已收到用户任务选择，请继续输出下一步 <Analyze>/<Code> 或直接给出 <Answer>。\n"
+                "3. 禁止返回空内容。"
+            )
+            messages.append({"role": "user", "content": recovery_prompt})
+            history_recorder.log(
+                stage="llm",
+                event="llm_empty_round_recovery_prompt_injected",
+                status="running",
+                message="empty llm round recovery prompt injected",
+                details={
+                    "round": round_count,
+                    "consecutive_empty_rounds": consecutive_empty_llm_rounds,
+                },
+            )
+            continue
         else:
             consecutive_empty_llm_rounds = 0
 
         if finished:
-            # 已因 </Answer> 或 </TaskTree> 结束，跳过后续代码执行逻辑
+            # 已因 </Answer> / </TaskTree> / </DataDictionary> 结束，跳过后续代码执行逻辑
             continue
 
         # ---- TaskTree 检测（stop sequence 截断时，LLM 输出了 <TaskTree> 但未闭合） ----
@@ -4659,6 +4915,24 @@ def bot_stream(
             finished = True
             continue
 
+        has_dictionary_open = re.search(r"<datadictionary>", cur_res, re.IGNORECASE) is not None
+        has_dictionary_close = re.search(r"</datadictionary>", cur_res, re.IGNORECASE) is not None
+        if has_dictionary_open and not has_dictionary_close:
+            closing_tag = "</DataDictionary>"
+            cur_res += closing_tag
+            assistant_reply += closing_tag
+            yield closing_tag
+            messages.append({"role": "assistant", "content": cur_res})
+            history_recorder.log(
+                stage="planner",
+                event="data_dictionary_completed",
+                status="running",
+                message="data dictionary output was auto-closed after stop sequence",
+                details={"round": round_count},
+            )
+            finished = True
+            continue
+
         has_code_open = re.search(r"<code>", cur_res, re.IGNORECASE) is not None
         has_code_close = re.search(r"</code>", cur_res, re.IGNORECASE) is not None
         has_fenced_code = re.search(r"```\s*(?:python|py|sql|postgresql|mysql|sqlite|mssql|oracle|r|rscript)?\s*\n.*?```", cur_res, re.DOTALL | re.IGNORECASE) is not None
@@ -4674,6 +4948,28 @@ def bot_stream(
         should_execute_code = (has_code_open and has_code_close) or ((not has_code_open) and has_fenced_code)
 
         if should_execute_code:
+            interactive_mode_enabled = str(analysis_mode or "").strip().lower() == "interactive"
+            if interactive_mode_enabled and not _has_user_task_selection(messages):
+                if cur_res.strip():
+                    messages.append({"role": "assistant", "content": cur_res})
+                selection_gate_prompt = (
+                    "当前为 interactive 模式，但尚未检测到用户对任务清单的确认。"
+                    "请先输出 <TaskTree> 任务分解清单并等待用户勾选确认；"
+                    "在收到用户确认前不要执行代码。"
+                )
+                messages.append({"role": "user", "content": selection_gate_prompt})
+                history_recorder.log(
+                    stage="planner",
+                    event="interactive_gate_blocked_code_execution",
+                    status="running",
+                    message="interactive mode blocked code execution before task selection",
+                    details={
+                        "round": round_count,
+                        "has_tasktree": has_tasktree_open,
+                    },
+                )
+                continue
+
             executable_blocks = _extract_executable_blocks(cur_res)
             if executable_blocks:
                 messages.append({"role": "assistant", "content": cur_res})
@@ -4709,11 +5005,8 @@ def bot_stream(
                             "block_count": total_executable_blocks,
                         },
                     )
-                    # 执行前快照（路径 -> (size, mtime)）
-                    try:
-                        before_state = collect_workspace_file_state()
-                    except Exception:
-                        before_state = {}
+                    # 执行前快照（路径 -> (size, mtime)），过滤运行时噪声文件
+                    before_state = _collect_workspace_file_state(WORKSPACE_DIR)
                     # 在固定工作区按语言执行
                     if code_language == "sql":
                         sql_source = active_sources[0] if active_sources else None
@@ -4737,11 +5030,8 @@ def bot_stream(
                         print(f"[雨途斩棘录] 错误检测失败: {e}")
                     # ========== 错误检测结束 ==========
 
-                    # 执行后快照
-                    try:
-                        after_state = collect_workspace_file_state()
-                    except Exception:
-                        after_state = {}
+                    # 执行后快照，过滤运行时噪声文件
+                    after_state = _collect_workspace_file_state(WORKSPACE_DIR)
                     # 计算新增与修改
                     added_paths = [p for p in after_state.keys() if p not in before_state]
                     modified_paths = [
@@ -4752,32 +5042,30 @@ def bot_stream(
 
                     # 将新增和修改的文件移动到 generated 文件夹
                     artifact_paths = []
-                    for relative_path in added_paths:
-                        source_path = workspace_root / relative_path
+                    for p in added_paths:
                         try:
                             # 如果文件不在 generated 文件夹中，移动它
-                            if not relative_path.parts or relative_path.parts[0] != "generated":
-                                dest_path = Path(GENERATED_DIR) / source_path.name
+                            if not str(p).startswith(GENERATED_DIR):
+                                dest_path = Path(GENERATED_DIR) / p.name
                                 dest_path = uniquify_path(dest_path)
-                                shutil.copy2(str(source_path), str(dest_path))
+                                shutil.copy2(str(p), str(dest_path))
                                 artifact_paths.append(dest_path.resolve())
                             else:
-                                artifact_paths.append(source_path.resolve())
+                                artifact_paths.append(p)
                         except Exception as e:
-                            print(f"Error moving file {source_path}: {e}")
-                            artifact_paths.append(source_path.resolve())
+                            print(f"Error moving file {p}: {e}")
+                            artifact_paths.append(p)
 
                     # 为修改的文件生成副本并移动到 generated 文件夹
-                    for relative_path in modified_paths:
-                        source_path = workspace_root / relative_path
+                    for p in modified_paths:
                         try:
-                            dest_name = f"{source_path.stem}_modified{source_path.suffix}"
+                            dest_name = f"{Path(p).stem}_modified{Path(p).suffix}"
                             dest_path = Path(GENERATED_DIR) / dest_name
                             dest_path = uniquify_path(dest_path)
-                            shutil.copy2(source_path, dest_path)
+                            shutil.copy2(p, dest_path)
                             artifact_paths.append(dest_path.resolve())
                         except Exception as e:
-                            print(f"Error copying modified file {source_path}: {e}")
+                            print(f"Error copying modified file {p}: {e}")
 
                     # 旧：Execute 内部放控制台输出；新：追加 <File> 段落给前端渲染卡片
                     exe_str = f"\n<Execute>\n```\n{exe_output}\n```\n</Execute>\n"
@@ -4835,7 +5123,16 @@ def bot_stream(
                     )
                     assistant_reply += full_execution_block
                     yield full_execution_block
-                    messages.append({"role": "execute", "content": f"{exe_output}"})
+                    messages.append(
+                        {
+                            "role": "execute",
+                            "content": trim_text_for_budget(
+                                str(exe_output or ""),
+                                max_chars=14000,
+                                tail_marker="\n...(execute 输出已截断)",
+                            ),
+                        }
+                    )
                     # 刷新工作区快照（路径集合）
                     current_files = set(
                         [
@@ -4929,6 +5226,47 @@ def bot_stream(
                     if ext in current_report_files:
                         current_report_files[ext].add(current_file.name)
 
+            report_history = [
+                msg for msg in messages
+                if isinstance(msg, dict) and str(msg.get("role", "")).lower() in {"user", "assistant", "execute"}
+            ]
+            if not report_history or str(report_history[-1].get("role", "")).lower() != "assistant":
+                report_history.append({"role": "assistant", "content": assistant_reply})
+
+            md_text = _extract_sections_from_messages(report_history)
+            if not md_text:
+                md_text = (
+                    "No structured report sections were extracted; fallback to final answer text."
+                    if analysis_language == "en"
+                    else "未提取到结构化报告段落，已回退使用最终回答文本。"
+                )
+                md_text += "\n\n" + (assistant_reply or "")
+
+            generated_image_names = _collect_generated_image_names(GENERATED_DIR)
+            if generated_image_names:
+                md_text = _inject_images_into_report_text(md_text, generated_image_names)
+
+            new_pdf_files = sorted(current_report_files.get("pdf", set()) - preexisting_report_files.get("pdf", set()))
+            if "pdf" in requested_report_types and new_pdf_files and generated_image_names and md_text:
+                new_pdf_paths = [
+                    generated_dir_path / name
+                    for name in new_pdf_files
+                    if (generated_dir_path / name).exists()
+                ]
+                if new_pdf_paths:
+                    latest_pdf_path = max(new_pdf_paths, key=lambda path: path.stat().st_mtime)
+                    if _enhance_pdf_report_in_place(latest_pdf_path, md_text):
+                        history_recorder.log(
+                            stage="report",
+                            event="report_pdf_enhanced_in_place",
+                            status="running",
+                            message="existing pdf report enhanced with in-body chart layout",
+                            details={
+                                "pdf_name": latest_pdf_path.name,
+                                "image_count": len(generated_image_names),
+                            },
+                        )
+
             missing_types = [
                 ext for ext in requested_report_types
                 if not (current_report_files.get(ext, set()) - preexisting_report_files.get(ext, set()))
@@ -4945,21 +5283,6 @@ def bot_stream(
                         "requested_report_types": requested_report_types,
                     },
                 )
-                report_history = [
-                    msg for msg in messages
-                    if isinstance(msg, dict) and str(msg.get("role", "")).lower() in {"user", "assistant", "execute"}
-                ]
-                if not report_history or str(report_history[-1].get("role", "")).lower() != "assistant":
-                    report_history.append({"role": "assistant", "content": assistant_reply})
-
-                md_text = _extract_sections_from_messages(report_history)
-                if not md_text:
-                    md_text = (
-                        "No structured report sections were extracted; fallback to final answer text."
-                        if analysis_language == "en"
-                        else "未提取到结构化报告段落，已回退使用最终回答文本。"
-                    )
-                    md_text += "\n\n" + (assistant_reply or "")
 
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 base_name = f"Auto_Report_{ts}"
@@ -5118,6 +5441,212 @@ async def chat(body: dict = Body(...)):
 # -------- Export Report (PDF + MD) --------
 from datetime import datetime
 
+REPORT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+REPORT_IMAGE_TOKEN_STOPWORDS = {
+    "chart",
+    "charts",
+    "plot",
+    "img",
+    "image",
+    "figure",
+    "analysis",
+    "report",
+    "auto",
+    "final",
+    "v1",
+    "v2",
+    "v3",
+    "top",
+    "now",
+}
+REPORT_IMAGE_KEYWORD_ALIASES: Dict[str, List[str]] = {
+    "vehicle": ["vehicles", "车辆", "车", "运输工具"],
+    "vehicles": ["vehicle", "车辆", "车", "运输工具"],
+    "area": ["areas", "区域", "地区", "口岸"],
+    "areas": ["area", "区域", "地区", "口岸"],
+    "hour": ["hourly", "小时", "时段", "时刻"],
+    "hourly": ["hour", "小时", "时段", "时刻"],
+    "daily": ["day", "trend", "每日", "日", "趋势"],
+    "day": ["daily", "日期", "日", "天"],
+    "trend": ["daily", "趋势", "变化"],
+    "distribution": ["分布", "占比", "频次"],
+    "heatmap": ["热力图", "热度", "矩阵"],
+    "stacked": ["堆叠", "累计"],
+    "top20": ["前20", "top20", "排名", "top"],
+}
+
+
+def _extract_image_filenames_from_file_sections(file_sections: List[str]) -> List[str]:
+    image_names: List[str] = []
+    seen = set()
+    link_pattern = re.compile(r"\(([^)]+)\)")
+
+    for section in file_sections:
+        section_text = str(section or "")
+        if not section_text.strip():
+            continue
+        for target in link_pattern.findall(section_text):
+            normalized = str(target or "").strip().strip('"\'')
+            if not normalized:
+                continue
+            normalized = normalized.split("?", 1)[0].split("#", 1)[0]
+            candidate_name = os.path.basename(normalized)
+            if not candidate_name:
+                continue
+            if Path(candidate_name).suffix.lower() not in REPORT_IMAGE_EXTENSIONS:
+                continue
+            dedup_key = candidate_name.lower()
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            image_names.append(candidate_name)
+
+    return image_names
+
+
+def _strip_chart_appendix_section(report_text: str) -> str:
+    if not report_text:
+        return ""
+    appendix_pattern = re.compile(
+        r"(?:\n|\A)\s*(?:#+\s*)?(?:附录|appendix)\s*[:：]\s*(?:分析图表|图表|charts?)\b[\s\S]*$",
+        re.IGNORECASE,
+    )
+    return appendix_pattern.sub("", report_text).strip()
+
+
+def _build_image_keywords(image_name: str) -> List[str]:
+    stem = Path(image_name).stem.lower()
+    raw_tokens = [
+        token
+        for token in re.split(r"[^a-z0-9\u4e00-\u9fff]+", stem)
+        if token
+    ]
+    keyword_set = set()
+    for token in raw_tokens:
+        if token in REPORT_IMAGE_TOKEN_STOPWORDS:
+            continue
+        keyword_set.add(token)
+        if token.endswith("s") and len(token) > 3:
+            keyword_set.add(token[:-1])
+        for alias in REPORT_IMAGE_KEYWORD_ALIASES.get(token, []):
+            keyword_set.add(alias.lower())
+    if not keyword_set and stem:
+        keyword_set.add(stem)
+    return sorted(keyword_set, key=len, reverse=True)
+
+
+def _build_image_caption(image_name: str, figure_index: int) -> str:
+    stem = Path(image_name).stem
+    display = re.sub(r"[_\-]+", " ", stem).strip()
+    display = re.sub(r"\s+", " ", display)
+    if not display:
+        display = f"分析图表{figure_index}"
+    return f"图{figure_index}：{display}"
+
+
+def _inject_images_into_report_text(report_text: str, image_names: List[str]) -> str:
+    if not report_text or not image_names:
+        return report_text
+
+    cleaned_text = _strip_chart_appendix_section(report_text)
+    if not cleaned_text:
+        cleaned_text = report_text.strip()
+    if not cleaned_text:
+        return cleaned_text
+
+    paragraphs = [chunk.strip() for chunk in re.split(r"\n{2,}", cleaned_text) if chunk.strip()]
+    if not paragraphs:
+        paragraphs = [cleaned_text]
+
+    used_image_names = set()
+    image_blocks_by_paragraph: Dict[int, List[str]] = {}
+
+    for figure_index, image_name in enumerate(image_names, start=1):
+        normalized_image_name = str(image_name or "").strip()
+        if not normalized_image_name:
+            continue
+        image_key = normalized_image_name.lower()
+        if image_key in used_image_names:
+            continue
+        if f"({normalized_image_name})" in cleaned_text:
+            used_image_names.add(image_key)
+            continue
+
+        keywords = _build_image_keywords(normalized_image_name)
+        best_paragraph_index = len(paragraphs) - 1
+        best_score = 0
+
+        for idx, paragraph in enumerate(paragraphs):
+            paragraph_lower = paragraph.lower()
+            score = 0
+            for keyword in keywords:
+                if len(keyword) < 2:
+                    continue
+                if keyword in paragraph_lower:
+                    score += 2 if len(keyword) >= 4 else 1
+            if score > best_score:
+                best_score = score
+                best_paragraph_index = idx
+
+        caption = _build_image_caption(normalized_image_name, figure_index)
+        figure_block = (
+            "如下图所示：\n\n"
+            f"![{caption}]({normalized_image_name})\n\n"
+            f"*{caption}*"
+        )
+        image_blocks_by_paragraph.setdefault(best_paragraph_index, []).append(figure_block)
+        used_image_names.add(image_key)
+
+    if not image_blocks_by_paragraph:
+        return cleaned_text
+
+    merged_paragraphs: List[str] = []
+    for idx, paragraph in enumerate(paragraphs):
+        merged_paragraphs.append(paragraph)
+        figure_blocks = image_blocks_by_paragraph.get(idx, [])
+        if figure_blocks:
+            merged_paragraphs.extend(figure_blocks)
+
+    return "\n\n".join(merged_paragraphs).strip()
+
+
+def _collect_generated_image_names(generated_dir: str) -> List[str]:
+    dir_path = Path(generated_dir)
+    if not dir_path.exists() or not dir_path.is_dir():
+        return []
+
+    image_files = [
+        item
+        for item in dir_path.iterdir()
+        if item.is_file() and item.suffix.lower() in REPORT_IMAGE_EXTENSIONS
+    ]
+    image_files.sort(key=lambda item: item.stat().st_mtime)
+    return [item.name for item in image_files]
+
+
+def _enhance_pdf_report_in_place(target_pdf_path: Path, md_text: str) -> bool:
+    if not md_text or not target_pdf_path:
+        return False
+    target_pdf_path = Path(target_pdf_path)
+    if not target_pdf_path.parent.exists():
+        return False
+
+    temp_pdf = target_pdf_path.with_name(f"{target_pdf_path.stem}.__enhance__.pdf")
+    try:
+        success = generate_pdf_module(md_text, str(temp_pdf), title=target_pdf_path.stem)
+        if not success or not temp_pdf.exists() or temp_pdf.stat().st_size <= 0:
+            return False
+        temp_pdf.replace(target_pdf_path)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            if temp_pdf.exists():
+                temp_pdf.unlink()
+        except Exception:
+            pass
+
 
 def _extract_sections_from_messages(messages: list[dict]) -> str:
     """从历史消息中抽取报告内容。
@@ -5131,13 +5660,16 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
         return ""
     import re as _re
 
-    tag_pattern = r"<(Analyze|Understand|Code|Execute|File|Answer|TaskTree)>([\s\S]*?)</\1>"
+    tag_pattern = _re.compile(
+        r"<\s*(Analyze|Understand|Code|Execute|File|Answer|TaskTree|DataDictionary)\s*>([\s\S]*?)<\s*/\s*(Analyze|Understand|Code|Execute|File|Answer|TaskTree|DataDictionary)\s*>",
+        _re.IGNORECASE,
+    )
 
     # 收集所有助手消息内容
     all_content = ""
     for idx, m in enumerate(messages, start=1):
         role = (m or {}).get("role")
-        if role != "assistant":
+        if role not in ("assistant", "ai"):
             continue
         all_content += str((m or {}).get("content") or "") + "\n"
 
@@ -5145,26 +5677,86 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
     answer_sections = []
     analyze_sections = []
     execute_data = []
+    file_sections = []
 
-    for match in _re.finditer(tag_pattern, all_content, _re.DOTALL):
-        tag, seg = match.groups()
+    for match in tag_pattern.finditer(all_content):
+        open_tag, seg, close_tag = match.groups()
+        if str(open_tag).lower() != str(close_tag).lower():
+            continue
+        tag = str(open_tag).strip().lower()
         seg = seg.strip()
         if not seg:
             continue
-        if tag == "Answer":
+        if tag == "answer":
             answer_sections.append(seg)
-        elif tag == "Analyze":
+        elif tag == "analyze":
             # 去掉预测推理和短代码测试部分，只保留正式分析内容
             clean_seg = _re.sub(r"#\s*(预测推理|短代码测试与结果)\s*\n[\s\S]*?(?=\n#\s*正式分析|$)", "", seg, flags=_re.DOTALL).strip()
             if clean_seg and len(clean_seg) > 50:  # 只保留有实质内容的分析
                 analyze_sections.append(clean_seg)
-        elif tag == "Execute":
+        elif tag == "execute":
             # 提取执行结果中的有用数据（排除纯错误信息）
             if seg and "Traceback" not in seg and "Error" not in seg and len(seg) > 20:
                 # 截断过长的执行输出
                 if len(seg) > 2000:
                     seg = seg[:2000] + "\n...(输出已截断)"
                 execute_data.append(seg)
+        elif tag == "file":
+            file_sections.append(seg)
+
+    # 去重：避免多轮重复内容在自动报告中反复出现
+    def _dedup_sections(sections: list[str]) -> list[str]:
+        seen = set()
+        deduped: list[str] = []
+        for section in sections:
+            normalized = _re.sub(r"\s+", " ", section).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(section.strip())
+        return deduped
+
+    answer_sections = _dedup_sections(answer_sections)
+    analyze_sections = _dedup_sections(analyze_sections)
+    execute_data = _dedup_sections(execute_data)
+    file_sections = _dedup_sections(file_sections)
+
+    confirmation_event_patterns = [
+        r"用户已确认以下数据字典条目",
+        r"The user confirmed the following data dictionary entries",
+    ]
+    has_real_data_dictionary_confirmation = False
+    for message in messages:
+        role = str((message or {}).get("role", "") or "").strip().lower()
+        if role != "user":
+            continue
+        content = str((message or {}).get("content") or "")
+        if any(_re.search(pattern, content, _re.IGNORECASE) for pattern in confirmation_event_patterns):
+            has_real_data_dictionary_confirmation = True
+            break
+
+    def _strip_unconfirmed_dictionary_claims(text: str) -> str:
+        if not text:
+            return text
+        claim_patterns = [
+            r"(?:用户|user).{0,16}(?:已确认|confirmed).{0,24}(?:数据字典|data dictionary)",
+            r"(?:数据字典|data dictionary).{0,20}(?:已确认|确认完成|confirmed)",
+            r"(?:语义|semantic).{0,20}(?:已确认|确认完成|confirmed)",
+            r"confirmed\s+semantics",
+        ]
+        sentences = _re.findall(r"[^。！？!?\n]+[。！？!?]?", text)
+        if not sentences:
+            sentences = [line for line in text.splitlines() if line.strip()]
+
+        kept: list[str] = []
+        for sentence in sentences:
+            snippet = sentence.strip()
+            if not snippet:
+                continue
+            if any(_re.search(pattern, snippet, _re.IGNORECASE) for pattern in claim_patterns):
+                continue
+            kept.append(snippet)
+        return "\n".join(kept).strip()
 
     # 构建最终报告文本
     final_text = ""
@@ -5173,8 +5765,24 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
     if answer_sections:
         final_text = "\n\n".join(answer_sections).strip()
 
+    # 若最终结论本身是“自动停止/失败”类告警，则不再回填 Analyze 过程文字，
+    # 以避免把计划性描述误当成已发生事实写入最终报告。
+    terminal_answer_markers = [
+        r"模型连续返回空响应",
+        r"已自动停止",
+        r"达到最大分析轮次",
+        r"analysis stopped",
+        r"consecutive empty",
+        r"max(?:imum)? analysis rounds",
+        r"fallback conclusion",
+    ]
+    has_terminal_answer = bool(
+        final_text
+        and any(_re.search(pattern, final_text, _re.IGNORECASE) for pattern in terminal_answer_markers)
+    )
+
     # 2. 如果 Answer 内容过短或为空，用 Analyze 内容补充
-    if not final_text or len(final_text) < 200:
+    if (not final_text or len(final_text) < 200) and not has_terminal_answer:
         if analyze_sections:
             analyze_text = "\n\n".join(analyze_sections).strip()
             if final_text:
@@ -5200,14 +5808,25 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
     # 4. 如果仍然没有内容，从整体对话中提取
     if not final_text:
         # 最后兜底：取所有助手消息中有实质内容的部分
+        collected_chunks = []
         for m in messages:
             role = (m or {}).get("role")
-            if role == "assistant":
+            if role in ("assistant", "ai"):
                 content = str((m or {}).get("content") or "")
                 # 移除标签
-                clean = _re.sub(r'</?(?:Analyze|Understand|Code|Execute|File|Answer|TaskTree)>', '', content).strip()
-                if clean and len(clean) > 100:
-                    final_text += clean + "\n\n"
+                clean = _re.sub(r'</?(?:Analyze|Understand|Code|Execute|File|Answer|TaskTree|DataDictionary)>', '', content).strip()
+                if clean and len(clean) > 20:
+                    collected_chunks.append(clean)
+
+        if collected_chunks:
+            final_text = "\n\n".join(collected_chunks)
+
+    if final_text and not has_real_data_dictionary_confirmation:
+        final_text = _strip_unconfirmed_dictionary_claims(final_text)
+
+    image_names = _extract_image_filenames_from_file_sections(file_sections)
+    if image_names:
+        final_text = _inject_images_into_report_text(final_text, image_names)
 
     return final_text.strip()
 
@@ -5310,6 +5929,36 @@ def _find_chinese_font() -> tuple[str | None, str]:
     return None, "Helvetica"
 
 
+def _pdf_has_visible_content(pdf_path: Path) -> bool:
+    """检测 PDF 是否包含可见文本，避免把空白文件当成成功结果。"""
+    try:
+        if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
+            return False
+
+        # 体积过小通常意味着只有空白页/元数据
+        if pdf_path.stat().st_size < 1024:
+            return False
+
+        try:
+            import importlib
+
+            pypdf_module = importlib.import_module("pypdf")
+            reader = pypdf_module.PdfReader(str(pdf_path))
+            text_chunks = []
+            for page in reader.pages[:5]:
+                text_chunks.append((page.extract_text() or "").strip())
+            merged = "\n".join(chunk for chunk in text_chunks if chunk).strip()
+            if merged:
+                return True
+        except Exception as extract_err:
+            print(f"PDF 文本提取检测失败，回退到文件大小判断: {extract_err}")
+
+        # 如果无法提取文本，则用体积做保守兜底
+        return pdf_path.stat().st_size >= 4096
+    except Exception:
+        return False
+
+
 def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
     """使用 R with Cairo 生成中文 PDF（优先），失败则降级到 reportlab"""
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
@@ -5317,9 +5966,16 @@ def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
     # 先尝试 R Cairo 方案（对 CJK 字体支持最完整）
     r_result = _save_pdf_with_r(md_text, base_name, workspace_dir)
-    if r_result:
+    if r_result and _pdf_has_visible_content(r_result):
         print(f"PDF generated with R Cairo: {r_result}")
         return r_result
+
+    if r_result:
+        print(f"R Cairo 生成的 PDF 疑似空白，回退到 reportlab: {r_result}")
+        try:
+            r_result.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     # 降级到 reportlab
     return _save_pdf_with_reportlab(md_text, base_name, workspace_dir)
@@ -5783,134 +6439,20 @@ def _save_docx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
 def _save_pdf_with_reportlab(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
     """
-    使用 reportlab + simhei.ttf 生成中文 PDF（降级方案）
-
-    优化要点：
-    1. 使用模块化的字体注册函数 register_chinese_fonts()
-    2. 使用 get_chinese_style() 获取预定义样式
-    3. 使用 extract_markdown_sections() 提取结构化内容
-    4. 使用 clean_md_text() 清理 Markdown 标记
-    5. 完善的错误处理和日志记录
+    使用模块化 PDF 引擎生成中文 PDF（降级方案）。
+    统一调用 pdf_utils.generate_pdf，确保图文混排行为与导出接口一致。
     """
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     pdf_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pdf")
 
     try:
-        print(f"开始生成 PDF (ReportLab): {pdf_path}")
-
-        # 1. 注册中文字体（使用模块化函数，只注册一次）
-        registered = register_chinese_fonts(force=False)
-        if not registered:
-            print("警告：没有成功注册中文字体，PDF 可能无法正常显示中文")
-        else:
-            print(f"已注册字体: {list(registered.keys())}")
-
-        # 2. 提取 Markdown 内容块
-        clean_text = clean_md_text(md_text)
-        blocks = extract_markdown_sections(clean_text)
-        print(f"提取到 {len(blocks)} 个内容块")
-
-        # 3. 初始化 PDF 文档
-        doc = SimpleDocTemplate(
-            str(pdf_path),
-            pagesize=A4,
-            rightMargin=50,
-            leftMargin=50,
-            topMargin=50,
-            bottomMargin=50,
-        )
-
-        # 4. 准备故事（PDF 内容）
-        story = []
-
-        # 5. 处理每个内容块
-        for block in blocks:
-            block_type = block["type"]
-            content = block["content"]
-
-            if block_type == "heading1":
-                style = get_chinese_style("heading1")
-                story.append(Paragraph(content, style))
-                story.append(Spacer(1, 12))
-
-            elif block_type == "heading2":
-                style = get_chinese_style("heading2")
-                story.append(Paragraph(content, style))
-                story.append(Spacer(1, 8))
-
-            elif block_type == "heading3":
-                style = get_chinese_style("heading3")
-                story.append(Paragraph(content, style))
-                story.append(Spacer(1, 6))
-
-            elif block_type == "paragraph":
-                style = get_chinese_style("normal")
-                story.append(Paragraph(content, style))
-                story.append(Spacer(1, 8))
-
-            elif block_type == "table":
-                # 使用 reportlab Table 渲染
-                try:
-                    from reportlab.platypus import Table, TableStyle
-                    from reportlab.lib import colors as rl_colors
-
-                    table_data = content
-                    headers = table_data.get("headers", [])
-                    rows = table_data.get("rows", [])
-                    font_name = get_chinese_font_name()
-
-                    all_rows = [headers] + rows
-                    max_cols = max(len(r) for r in all_rows) if all_rows else 0
-                    normalized = []
-                    for row in all_rows:
-                        padded = list(row) + [''] * (max_cols - len(row))
-                        normalized.append(padded[:max_cols])
-
-                    if normalized and max_cols > 0:
-                        available_width = A4[0] - 100
-                        col_width = available_width / max_cols
-                        table = Table(normalized, colWidths=[col_width] * max_cols)
-                        table.setStyle(TableStyle([
-                            ('FONTNAME', (0, 0), (-1, -1), font_name),
-                            ('FONTSIZE', (0, 0), (-1, -1), 9),
-                            ('FONTNAME', (0, 0), (-1, 0), font_name),
-                            ('FONTSIZE', (0, 0), (-1, 0), 10),
-                            ('BACKGROUND', (0, 0), (-1, 0), rl_colors.HexColor('#003366')),
-                            ('TEXTCOLOR', (0, 0), (-1, 0), rl_colors.white),
-                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                            ('GRID', (0, 0), (-1, -1), 0.5, rl_colors.grey),
-                            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor('#F0F4F8')]),
-                            ('TOPPADDING', (0, 0), (-1, -1), 4),
-                            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                        ]))
-                        story.append(table)
-                        story.append(Spacer(1, 12))
-                except Exception as table_err:
-                    print(f"表格渲染失败: {table_err}")
-                    style = get_chinese_style("normal")
-                    raw_text = block.get("raw", str(content))
-                    story.append(Paragraph(raw_text.replace('\n', '<br/>'), style))
-
-            elif block_type == "list":
-                style = get_chinese_style("list")
-                for item in content:
-                    para_text = f"• {item}"
-                    story.append(Paragraph(para_text, style))
-                    story.append(Spacer(1, 4))
-                story.append(Spacer(1, 8))
-
-        # 6. 构建 PDF
-        doc.build(story)
-
-        # 7. 验证生成结果
-        if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
-            file_size = os.path.getsize(pdf_path) / 1024
+        success = generate_pdf_module(md_text, str(pdf_path), title=base_name)
+        if success and pdf_path.exists() and pdf_path.stat().st_size > 0:
+            file_size = pdf_path.stat().st_size / 1024
             print(f"PDF 生成成功: {pdf_path.name} ({file_size:.1f} KB)")
             return pdf_path
-        else:
-            print(f"PDF 生成失败: 文件不存在或为空")
-            return None
+        print("PDF 生成失败: 模块化引擎未产出有效文件")
+        return None
 
     except Exception as e:
         error_msg = f"PDF 生成失败: {e}"
@@ -7182,6 +7724,318 @@ def build_database_knowledge_context(
     return context_text
 
 
+def _normalize_source_labels(raw_source_labels: Any) -> List[str]:
+    if not isinstance(raw_source_labels, list):
+        return []
+
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in raw_source_labels:
+        if isinstance(item, dict):
+            candidate = str(
+                item.get("source_label")
+                or item.get("label")
+                or item.get("database")
+                or ""
+            ).strip()
+        else:
+            candidate = str(item or "").strip()
+
+        if not candidate:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized
+
+
+def _normalize_data_dictionary_item(raw_item: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_item, dict):
+        return None
+
+    table_name = str(
+        raw_item.get("table")
+        or raw_item.get("table_name")
+        or raw_item.get("tableName")
+        or ""
+    ).strip()
+    field_name = str(
+        raw_item.get("field")
+        or raw_item.get("column")
+        or raw_item.get("field_name")
+        or raw_item.get("column_name")
+        or raw_item.get("fieldName")
+        or ""
+    ).strip()
+    meaning = str(
+        raw_item.get("proposed_meaning")
+        or raw_item.get("meaning")
+        or raw_item.get("business_meaning")
+        or raw_item.get("description")
+        or raw_item.get("desc")
+        or ""
+    ).strip()
+
+    if not table_name and not field_name and not meaning:
+        return None
+
+    source_label = str(
+        raw_item.get("source_label")
+        or raw_item.get("source")
+        or raw_item.get("database")
+        or ""
+    ).strip()
+    question = str(
+        raw_item.get("question")
+        or raw_item.get("confirm_question")
+        or raw_item.get("uncertainty")
+        or ""
+    ).strip()
+    confidence = str(raw_item.get("confidence") or raw_item.get("certainty") or "").strip().lower()
+    analysis_usage = str(
+        raw_item.get("analysis_usage")
+        or raw_item.get("usage")
+        or raw_item.get("use_case")
+        or ""
+    ).strip()
+
+    aliases_raw = raw_item.get("aliases") or []
+    aliases: List[str] = []
+    if isinstance(aliases_raw, list):
+        for alias_item in aliases_raw:
+            alias_text = str(alias_item or "").strip()
+            if alias_text and alias_text not in aliases:
+                aliases.append(alias_text)
+
+    raw_id = str(raw_item.get("id") or "").strip()
+    if raw_id:
+        item_id = raw_id
+    else:
+        id_seed = f"{source_label}|{table_name}|{field_name}|{meaning}"
+        item_id = hashlib.sha1(id_seed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+    return {
+        "id": item_id,
+        "source_label": source_label,
+        "table": table_name,
+        "field": field_name,
+        "meaning": meaning,
+        "question": question,
+        "confidence": confidence,
+        "analysis_usage": analysis_usage,
+        "aliases": aliases,
+    }
+
+
+def upsert_confirmed_data_dictionary(
+    username: str,
+    session_id: str,
+    source_labels: Any,
+    dictionary_items: Any,
+    selected_ids: Any = None,
+) -> Dict[str, Any]:
+    username = str(username or "default").strip() or "default"
+    session_id = str(session_id or "").strip()
+    normalized_sources = _normalize_source_labels(source_labels)
+    default_source = normalized_sources[0] if normalized_sources else ""
+
+    selected_id_set = {
+        str(item or "").strip()
+        for item in (selected_ids or [])
+        if str(item or "").strip()
+    }
+
+    normalized_items: List[Dict[str, Any]] = []
+    for raw_item in (dictionary_items or []):
+        normalized = _normalize_data_dictionary_item(raw_item)
+        if not normalized:
+            continue
+        if selected_id_set and normalized["id"] not in selected_id_set:
+            continue
+        if not normalized.get("source_label") and default_source:
+            normalized["source_label"] = default_source
+        normalized_items.append(normalized)
+
+    if not normalized_items:
+        return {
+            "added_count": 0,
+            "updated_count": 0,
+            "total_count": len(_load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []}).get("entries", [])),
+            "saved_item_ids": [],
+            "source_labels": normalized_sources,
+        }
+
+    kb_data = _load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []})
+    entries = kb_data.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    added_count = 0
+    updated_count = 0
+    saved_item_ids: List[str] = []
+
+    def _entry_key(item: Dict[str, Any]) -> str:
+        return "|".join([
+            str(item.get("source_label", "") or "").strip().lower(),
+            str(item.get("table", "") or "").strip().lower(),
+            str(item.get("field", "") or "").strip().lower(),
+        ])
+
+    for item in normalized_items:
+        saved_item_ids.append(item["id"])
+        candidate = {
+            **item,
+            "session_id": session_id,
+            "confirmed_at": now_iso,
+            "updated_at": now_iso,
+        }
+        key = _entry_key(candidate)
+        matched_index = -1
+        for idx, existing in enumerate(entries):
+            if not isinstance(existing, dict):
+                continue
+            if _entry_key(existing) == key:
+                matched_index = idx
+                break
+
+        if matched_index >= 0:
+            existing_entry = entries[matched_index] if isinstance(entries[matched_index], dict) else {}
+            candidate["created_at"] = str(existing_entry.get("created_at") or existing_entry.get("confirmed_at") or now_iso)
+            entries[matched_index] = candidate
+            updated_count += 1
+        else:
+            candidate["created_at"] = now_iso
+            entries.append(candidate)
+            added_count += 1
+
+    entries = sorted(
+        [item for item in entries if isinstance(item, dict)],
+        key=lambda item: _safe_iso_ts(item.get("updated_at") or item.get("confirmed_at") or ""),
+        reverse=True,
+    )[:800]
+    kb_data["entries"] = entries
+    _save_user_config(username, "data_dictionary_knowledge_base.json", kb_data)
+
+    return {
+        "added_count": added_count,
+        "updated_count": updated_count,
+        "total_count": len(entries),
+        "saved_item_ids": saved_item_ids,
+        "source_labels": normalized_sources,
+    }
+
+
+def build_confirmed_data_dictionary_context(
+    username: str,
+    user_query: str,
+    preferred_source_labels: Optional[List[str]] = None,
+    analysis_language: str = "zh-CN",
+    max_items: int = 18,
+    max_chars: int = 1800,
+) -> str:
+    username = str(username or "default").strip() or "default"
+    kb_data = _load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []})
+    raw_entries = kb_data.get("entries", [])
+    if not isinstance(raw_entries, list) or not raw_entries:
+        return ""
+
+    entries = [item for item in raw_entries if isinstance(item, dict)]
+    if not entries:
+        return ""
+
+    preferred_labels = set(
+        str(item or "").strip()
+        for item in (preferred_source_labels or [])
+        if str(item or "").strip()
+    )
+    if preferred_labels:
+        matched_entries = [
+            item for item in entries
+            if str(item.get("source_label", "") or "").strip() in preferred_labels
+        ]
+        if matched_entries:
+            entries = matched_entries
+
+    query_text = str(user_query or "").lower()
+    query_tokens = [
+        token
+        for token in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]{2,}", query_text)
+        if token
+    ]
+
+    def _entry_score(entry: Dict[str, Any]) -> int:
+        source_label = str(entry.get("source_label", "") or "").lower()
+        table_name = str(entry.get("table", "") or "").lower()
+        field_name = str(entry.get("field", "") or "").lower()
+        meaning = str(entry.get("meaning", "") or "").lower()
+        question = str(entry.get("question", "") or "").lower()
+        usage = str(entry.get("analysis_usage", "") or "").lower()
+        aliases = " ".join(str(alias or "") for alias in entry.get("aliases", [])).lower()
+        blob = f"{source_label} {table_name} {field_name} {meaning} {question} {usage} {aliases}"
+        if not query_tokens:
+            return 1
+        score = 0
+        for token in query_tokens:
+            if token in table_name or token in field_name:
+                score += 6
+            if token in meaning or token in question or token in usage:
+                score += 4
+            if token in source_label or token in aliases:
+                score += 2
+            if token in blob:
+                score += 1
+        return score
+
+    ranked_entries = sorted(
+        entries,
+        key=lambda item: (_entry_score(item), _safe_iso_ts(item.get("updated_at") or item.get("confirmed_at") or "")),
+        reverse=True,
+    )
+
+    selected_entries = ranked_entries[:max_items]
+    if not selected_entries:
+        return ""
+
+    lines: List[str] = []
+    if analysis_language == "en":
+        lines.append("User-confirmed data dictionary context:")
+    else:
+        lines.append("用户确认的数据字典上下文：")
+
+    for item in selected_entries:
+        source_label = str(item.get("source_label", "") or "").strip()
+        table_name = str(item.get("table", "") or "").strip()
+        field_name = str(item.get("field", "") or "").strip()
+        meaning = _shorten_text(item.get("meaning", ""), max_len=120)
+        confidence = str(item.get("confidence", "") or "").strip()
+        usage = _shorten_text(item.get("analysis_usage", ""), max_len=80)
+
+        subject = f"{table_name}.{field_name}" if table_name and field_name else table_name or field_name or "(unknown)"
+        if source_label:
+            subject = f"{source_label}::{subject}"
+
+        if analysis_language == "en":
+            line = f"- {subject} => {meaning or 'confirmed business meaning'}"
+            if confidence:
+                line += f" (confidence: {confidence})"
+            if usage:
+                line += f"; usage: {usage}"
+        else:
+            line = f"- {subject} => {meaning or '已确认业务含义'}"
+            if confidence:
+                line += f"（置信度：{confidence}）"
+            if usage:
+                line += f"；分析用途：{usage}"
+        lines.append(line)
+
+    context_text = "\n".join(lines).strip()
+    if len(context_text) > max_chars:
+        context_text = context_text[: max_chars - 1] + "…"
+    return context_text
+
+
 def build_database_context_snapshot(db_type: str, config: dict) -> Dict[str, Any]:
     """提取数据库结构快照，用于注入分析上下文。"""
     normalized_type = normalize_db_type(db_type)
@@ -8148,6 +9002,89 @@ async def save_user_knowledge_settings(body: dict = Body(...)):
     settings = body.get("settings", {})
     _save_user_config(username, "knowledge_settings.json", settings)
     return {"success": True, "message": "知识库配置已保存到本地"}
+
+
+@app.get("/api/config/data-dictionary")
+async def get_user_data_dictionary(username: str = Query("default"), limit: int = Query(200, ge=1, le=800)):
+    data = _load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []})
+    entries = data.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+    normalized_entries = [item for item in entries if isinstance(item, dict)]
+    return {
+        "success": True,
+        "entries": normalized_entries[:limit],
+        "total": len(normalized_entries),
+    }
+
+
+@app.post("/api/config/data-dictionary")
+async def save_user_data_dictionary(body: dict = Body(...)):
+    username = body.get("username", "default")
+    session_id = body.get("session_id", "")
+    source_labels = body.get("source_labels", [])
+    selected_ids = body.get("selected_ids", [])
+
+    dictionary_items: Any = []
+    raw_dictionary = body.get("dictionary", {})
+    if isinstance(raw_dictionary, dict) and isinstance(raw_dictionary.get("items"), list):
+        dictionary_items = raw_dictionary.get("items", [])
+    elif isinstance(body.get("items"), list):
+        dictionary_items = body.get("items", [])
+
+    result = upsert_confirmed_data_dictionary(
+        username=username,
+        session_id=session_id,
+        source_labels=source_labels,
+        dictionary_items=dictionary_items,
+        selected_ids=selected_ids,
+    )
+    return {
+        "success": True,
+        "result": result,
+        "message": "数据字典确认结果已保存到本地知识库",
+    }
+
+
+@app.delete("/api/config/data-dictionary")
+async def delete_user_data_dictionary(body: dict = Body(...)):
+    username = body.get("username", "default")
+    raw_ids = body.get("ids", [])
+    ids = {
+        str(item or "").strip()
+        for item in (raw_ids if isinstance(raw_ids, list) else [])
+        if str(item or "").strip()
+    }
+
+    if not ids:
+        return {
+            "success": False,
+            "message": "请提供需要删除的条目 id",
+            "removed_count": 0,
+        }
+
+    data = _load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []})
+    entries = data.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+
+    normalized_entries = [item for item in entries if isinstance(item, dict)]
+    remaining_entries = [
+        item
+        for item in normalized_entries
+        if str(item.get("id", "") or "").strip() not in ids
+    ]
+    removed_count = len(normalized_entries) - len(remaining_entries)
+
+    data["entries"] = remaining_entries
+    _save_user_config(username, "data_dictionary_knowledge_base.json", data)
+
+    return {
+        "success": True,
+        "message": f"已撤销 {removed_count} 条已确认数据字典记录",
+        "removed_count": removed_count,
+        "total": len(remaining_entries),
+    }
 
 
 @app.get("/api/config/analysis-history")

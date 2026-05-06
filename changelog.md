@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.1.17 - 2026-05-06
+
+### Fixed (v1.1.17)
+
+- Fixed critical data source consistency issue where users who did not select any database sources were still implicitly analyzed against a single configured database due to automatic fallback logic. Now both frontend and backend strictly honor user's explicit source selection without fallback.
+- Fixed frontend data source file filtering to exclude hidden system metadata files (`.encoding_map.json`, `.venv/`, etc.) and only count genuine data files (CSV, TSV, JSON, JSONL, XLSX, Parquet, etc.) in left-panel source count display.
+- Fixed frontend data source display area layout to match input box height (min-h-120px) for consistent visual alignment.
+
+### Changed (v1.1.17)
+
+- Removed unnecessary hint text "发送分析前请先确认数据库或文件数据源，避免分析过程无法落地。" from data source panel as it was redundant with UI constraints.
+- Frontend data source selection now correctly prevents single-database implicit explicitness flag, ensuring `source_selection_explicit` is only set by explicit user confirmation.
+- Backend database context injection and SQL-first prompt generation now only activate when user has explicitly selected at least one database source, not when merely configured without selection.
+
 ## v1.1.16 - 2026-05-06
 
 ### Added (v1.1.16)

@@ -12,7 +12,6 @@ import { configureMonaco } from "@/lib/monaco-config";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Slider } from "@/components/ui/slider";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -60,11 +59,11 @@ import {
   Terminal,
   BookOpen,
   Bot,
-  Settings,
   Languages,
   GitBranch,
-  Monitor,
   ListTree,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Tree, NodeApi } from "react-arborist";
@@ -77,6 +76,7 @@ import { useWorkspace } from "@/hooks/useWorkspace";
 import { AgentIntroDialog } from "@/components/dialogs/AgentIntroDialog";
 import { SideGuidanceDialog } from "@/components/dialogs/SideGuidanceDialog";
 import { TaskTreeDialog, type TaskTreeNode, parseTaskTreeContent } from "@/components/dialogs/TaskTreeDialog";
+import { DataDictionaryDialog, type DataDictionaryItem, parseDataDictionaryContent } from "@/components/dialogs/DataDictionaryDialog";
 import { ProjectSaveDialog } from "@/components/dialogs/ProjectSaveDialog";
 import { ProjectManagerDialog } from "@/components/dialogs/ProjectManagerDialog";
 import { BackupRestoreDialog } from "@/components/dialogs/BackupRestoreDialog";
@@ -87,6 +87,7 @@ import { YutuPanel } from "@/components/dialogs/YutuPanel";
 import { SimpleSettingsDialog } from "@/components/dialogs/SimpleSettingsDialog";
 import { KnowledgeSettingsDialog } from "@/components/dialogs/KnowledgeSettingsDialog";
 import { SystemSettingsDialog } from "@/components/dialogs/SystemSettingsDialog";
+import { type DataDictionaryKnowledgeEntry } from "@/components/dialogs/DataDictionarySettingsPanel";
 import { DatabaseRelationshipDialog } from "@/components/dialogs/DatabaseRelationshipDialog";
 import {
   type AnalysisHistoryEvent,
@@ -147,6 +148,20 @@ interface WorkspaceFile {
 }
 
 const DATA_PROFILE_REPORT_PATTERN = /^Data_Exploration_SKILL_.*\.md$/i;
+const DATA_SOURCE_FILE_EXTENSIONS = new Set([
+  "csv",
+  "tsv",
+  "txt",
+  "json",
+  "jsonl",
+  "xls",
+  "xlsx",
+  "parquet",
+  "feather",
+  "orc",
+  "db",
+  "sqlite",
+]);
 
 interface SavedDatabaseConnection {
   id: string;
@@ -203,6 +218,9 @@ const createClientId = () =>
 const MODEL_PROVIDER_STORE_KEY = "modelProviderStore";
 const ANALYSIS_LANGUAGE_STORE_KEY = "analysisLanguage";
 const LEGACY_DB_SETTINGS_STORE_KEY = "systemDbSettings";
+const LEFT_PANEL_DOCKED_STORE_KEY = "leftPanelDocked";
+const LEFT_PANEL_DOCKED_DEFAULT_SIZE = 6;
+const LEFT_PANEL_DOCKED_MIN_SIZE = 4;
 
 const getUserDbSettingsStorageKey = (username?: string | null) => {
   const normalized = String(username || "default").trim() || "default";
@@ -575,7 +593,8 @@ type StructuredSectionType =
   | "Execute"
   | "Answer"
   | "File"
-  | "TaskTree";
+  | "TaskTree"
+  | "DataDictionary";
 
 const StreamingMarkdownBlock = memo(
   function StreamingMarkdownBlock({
@@ -614,6 +633,13 @@ const StreamingSectionBody = memo(
         return (
           <div className="p-3 text-sm text-amber-600 dark:text-amber-400 animate-pulse">
             正在生成分析任务树...
+          </div>
+        );
+      }
+      if (type === "DataDictionary") {
+        return (
+          <div className="p-3 text-sm text-amber-600 dark:text-amber-400 animate-pulse">
+            正在生成待确认数据字典...
           </div>
         );
       }
@@ -661,6 +687,33 @@ const StreamingSectionBody = memo(
         );
       }
       return <div className="text-sm text-gray-500">任务树数据格式异常，请重新生成</div>;
+    }
+    if (type === "DataDictionary") {
+      const parsed = parseDataDictionaryContent(content);
+      if (parsed) {
+        const items = parsed.items;
+        return (
+          <div className="text-sm text-amber-700 dark:text-amber-300">
+            <div className="mb-2 font-medium">已生成 {items.length} 条待确认数据语义</div>
+            <div className="space-y-1">
+              {items.slice(0, 8).map((item) => {
+                const subject = [item.table, item.field].filter(Boolean).join(".") || "(未命名字段)";
+                return (
+                  <div key={item.id} className="flex items-start gap-2">
+                    <span className="text-amber-500 font-mono shrink-0">[{item.id}]</span>
+                    <span>{subject}</span>
+                    {item.proposed_meaning ? (
+                      <span className="text-gray-400 text-xs ml-1">→ {item.proposed_meaning}</span>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-3 text-xs text-gray-500">数据字典确认面板已自动弹出，请勾选后继续分析</div>
+          </div>
+        );
+      }
+      return <div className="text-sm text-gray-500">数据字典数据格式异常，请重新生成</div>;
     }
     return <div className="markdown-content">{renderSectionContent(content)}</div>;
   },
@@ -740,6 +793,8 @@ export function ThreePanelInterface() {
   const [inputValue, setInputValue] = useState("");
   const [historyInputs, setHistoryInputs] = useState<string[]>([]);
   const [isTyping, setIsTyping] = useState(false);
+  const [isLeftPanelDocked, setIsLeftPanelDocked] = useState(false);
+  const [showModelConfigAlert, setShowModelConfigAlert] = useState(false);
   // 抑制轮询刷新的计数器（>0 时轮询不更新状态）
   const {
     attachments, setAttachments,
@@ -782,7 +837,7 @@ export function ThreePanelInterface() {
   // 数据库连接相关状态
   const [showSystemSettings, setShowSystemSettings] = useState(false);
   const [showDatabaseRelationshipDialog, setShowDatabaseRelationshipDialog] = useState(false);
-  const [systemSettingsTab, setSystemSettingsTab] = useState<"model" | "database" | "knowledge" | "history">("model");
+  const [systemSettingsTab, setSystemSettingsTab] = useState<"model" | "database" | "knowledge" | "history" | "dictionary">("model");
   const [modelProviderConfig, setModelProviderConfig] = useState<ModelProviderConfig>(
     cloneModelProviderConfig()
   );
@@ -859,29 +914,65 @@ export function ThreePanelInterface() {
   const [isLoadingAnalysisHistory, setIsLoadingAnalysisHistory] = useState(false);
   const [isLoadingAnalysisHistoryDetail, setIsLoadingAnalysisHistoryDetail] = useState(false);
   const [isSavingAnalysisHistorySettings, setIsSavingAnalysisHistorySettings] = useState(false);
+  const [dataDictionaryEntries, setDataDictionaryEntries] = useState<DataDictionaryKnowledgeEntry[]>([]);
+  const [dataDictionaryTotal, setDataDictionaryTotal] = useState(0);
+  const [isLoadingDataDictionary, setIsLoadingDataDictionary] = useState(false);
+  const [isDeletingDataDictionary, setIsDeletingDataDictionary] = useState(false);
   const [runtimeAnalysisRun, setRuntimeAnalysisRun] = useState<AnalysisHistoryRunSummary | null>(null);
   const [runtimeAnalysisEvents, setRuntimeAnalysisEvents] = useState<AnalysisHistoryEvent[]>([]);
   const [isLoadingRuntimeAnalysisTrace, setIsLoadingRuntimeAnalysisTrace] = useState(false);
 
-  const selectedDatabaseSources = useMemo(() => {
-    if (!savedDbConnections.length || !selectedDbSourceIds.length) {
-      return [] as SavedDatabaseConnection[];
-    }
-    const selectedIdSet = new Set(selectedDbSourceIds);
-    return savedDbConnections.filter((item) => selectedIdSet.has(item.id));
-  }, [savedDbConnections, selectedDbSourceIds]);
+  const workspaceDataSourceFiles = useMemo(() => {
+    return workspaceFiles.filter((file) => {
+      const name = String(file.name || "").trim();
+      if (!name) {
+        return false;
+      }
+      // 隐藏文件属于系统元数据（如 .encoding_map.json），不计入数据源数量。
+      if (name.startsWith(".")) {
+        return false;
+      }
+      const ext = String(file.extension || "").replace(/^\./, "").toLowerCase();
+      return Boolean(ext) && DATA_SOURCE_FILE_EXTENSIONS.has(ext);
+    });
+  }, [workspaceFiles]);
 
-  const hasWorkspaceDataSource = workspaceFiles.length > 0;
+  const hasWorkspaceDataSource = workspaceDataSourceFiles.length > 0;
 
   const effectiveSelectedDbSourceIds = useMemo(() => {
     if (!savedDbConnections.length) {
       return [] as string[];
     }
-    if (savedDbConnections.length === 1) {
-      return [savedDbConnections[0].id];
-    }
-    return selectedDbSourceIds;
+    const validIds = new Set(savedDbConnections.map((item) => item.id));
+    return selectedDbSourceIds.filter((id) => validIds.has(id));
   }, [savedDbConnections, selectedDbSourceIds]);
+
+  const selectedDatabaseSources = useMemo(() => {
+    if (!savedDbConnections.length || !effectiveSelectedDbSourceIds.length) {
+      return [] as SavedDatabaseConnection[];
+    }
+    const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+    return savedDbConnections.filter((item) => selectedIdSet.has(item.id));
+  }, [effectiveSelectedDbSourceIds, savedDbConnections]);
+
+  const hasSelectedDataSource = selectedDatabaseSources.length > 0 || hasWorkspaceDataSource;
+
+  const isModelProviderConfigured = useMemo(() => {
+    const normalized = normalizeModelProviderEntry(modelProviderConfig);
+    const baseUrl = String(normalized.baseUrl || "").trim();
+    const modelName = String(normalized.model || "").trim();
+    if (!baseUrl || !modelName || modelName === "your-model-name") {
+      return false;
+    }
+
+    const providerType = String(normalized.providerType || "").toLowerCase();
+    const requiresApiKey =
+      !normalized.isLocal && !["deepanalyze", "ollama"].includes(providerType);
+    if (requiresApiKey && !String(normalized.apiKey || "").trim()) {
+      return false;
+    }
+    return true;
+  }, [modelProviderConfig]);
 
   useEffect(() => {
     workspaceFilesRef.current = workspaceFiles;
@@ -912,6 +1003,9 @@ export function ThreePanelInterface() {
   const [showTaskTreeDialog, setShowTaskTreeDialog] = useState(false);
   const [taskTreeData, setTaskTreeData] = useState<TaskTreeNode[] | null>(null);
   const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
+  const [showDataDictionaryDialog, setShowDataDictionaryDialog] = useState(false);
+  const [dataDictionaryItems, setDataDictionaryItems] = useState<DataDictionaryItem[] | null>(null);
+  const [selectedDictionaryItems, setSelectedDictionaryItems] = useState<Set<string>>(new Set());
   // 报告类型选择状态
   const [reportTypes, setReportTypes] = useState<string[]>(["pdf"]);
   const [showReportTypePicker, setShowReportTypePicker] = useState(false);
@@ -1288,7 +1382,7 @@ export function ThreePanelInterface() {
       fallbackPayload = buildDbRequestPayload();
     }
 
-    if (!databaseSourcesForReport.length && !fallbackPayload && workspaceFiles.length === 0) {
+    if (!databaseSourcesForReport.length && !fallbackPayload && workspaceDataSourceFiles.length === 0) {
       toast({ description: "请先连接数据库或上传数据文件后再生成数据探查报告", variant: "destructive" });
       return;
     }
@@ -1333,7 +1427,7 @@ export function ThreePanelInterface() {
     savedDbConnections,
     sessionId,
     toast,
-    workspaceFiles,
+    workspaceDataSourceFiles.length,
   ]);
 
   const loadAnalysisHistoryDetail = useCallback(async (runId: string, options?: { silent?: boolean }) => {
@@ -1450,6 +1544,65 @@ export function ThreePanelInterface() {
     }
   }, [showSystemSettings, systemSettingsTab, loadAnalysisHistory]);
 
+  const loadDataDictionary = useCallback(async (options?: { silent?: boolean }) => {
+    setIsLoadingDataDictionary(true);
+    try {
+      const username = encodeURIComponent((currentUser || "default").trim() || "default");
+      const response = await fetch(`${API_URLS.CONFIG_DATA_DICTIONARY_GET}?username=${username}&limit=800`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "数据字典加载失败");
+      }
+
+      const entries = Array.isArray(payload.entries) ? payload.entries : [];
+      setDataDictionaryEntries(entries);
+      setDataDictionaryTotal(Number(payload.total || entries.length || 0));
+    } catch (error) {
+      if (!options?.silent) {
+        const message = error instanceof Error ? error.message : "数据字典加载失败";
+        toast({ description: message, variant: "destructive" });
+      }
+    } finally {
+      setIsLoadingDataDictionary(false);
+    }
+  }, [currentUser, toast]);
+
+  const handleDeleteDataDictionaryEntries = useCallback(async (ids: string[]) => {
+    if (!ids.length) {
+      return;
+    }
+
+    setIsDeletingDataDictionary(true);
+    try {
+      const response = await fetch(API_URLS.CONFIG_DATA_DICTIONARY_DELETE, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: currentUser || "default",
+          ids,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "撤销数据字典失败");
+      }
+
+      toast({ description: payload.message || `已撤销 ${ids.length} 条数据字典记录` });
+      await loadDataDictionary({ silent: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "撤销数据字典失败";
+      toast({ description: message, variant: "destructive" });
+    } finally {
+      setIsDeletingDataDictionary(false);
+    }
+  }, [currentUser, loadDataDictionary, toast]);
+
+  useEffect(() => {
+    if (showSystemSettings && systemSettingsTab === "dictionary") {
+      void loadDataDictionary({ silent: true });
+    }
+  }, [showSystemSettings, systemSettingsTab, loadDataDictionary]);
+
   const loadRuntimeAnalysisTrace = useCallback(async (options?: { silent?: boolean }) => {
     if (!currentUser) {
       setRuntimeAnalysisRun(null);
@@ -1524,6 +1677,8 @@ export function ThreePanelInterface() {
     setSelectedAnalysisHistoryRun(null);
     setAnalysisHistoryStats({ total: 0, completed: 0, failed: 0, warning: 0 });
     setAnalysisHistorySettings({ ...DEFAULT_ANALYSIS_HISTORY_SETTINGS });
+    setDataDictionaryEntries([]);
+    setDataDictionaryTotal(0);
     setRuntimeAnalysisRun(null);
     setRuntimeAnalysisEvents([]);
   }, [currentUser]);
@@ -2033,6 +2188,9 @@ ${analysisContent}
     setShowTaskTreeDialog(false);
     setTaskTreeData(null);
     setSelectedTasks(new Set());
+    setShowDataDictionaryDialog(false);
+    setDataDictionaryItems(null);
+    setSelectedDictionaryItems(new Set());
     loadRegisteredUsers();
   };
 
@@ -2455,6 +2613,9 @@ ${analysisContent}
     setShowTaskTreeDialog(false);
     setTaskTreeData(null);
     setSelectedTasks(new Set());
+    setShowDataDictionaryDialog(false);
+    setDataDictionaryItems(null);
+    setSelectedDictionaryItems(new Set());
     try {
       if (typeof window !== "undefined") {
         localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify([welcome]));
@@ -2494,6 +2655,9 @@ ${analysisContent}
     setShowTaskTreeDialog(false);
     setTaskTreeData(null);
     setSelectedTasks(new Set());
+    setShowDataDictionaryDialog(false);
+    setDataDictionaryItems(null);
+    setSelectedDictionaryItems(new Set());
     // 清空聊天区域、输入框、代码编辑器
     setMessages([
       {
@@ -2571,6 +2735,11 @@ ${analysisContent}
       } catch {
         // ignore invalid report types cache
       }
+    }
+
+    const savedDockedState = localStorage.getItem(LEFT_PANEL_DOCKED_STORE_KEY);
+    if (savedDockedState !== null) {
+      setIsLeftPanelDocked(savedDockedState === "true");
     }
 
     let hasLoadedModelProvider = false;
@@ -2690,16 +2859,9 @@ ${analysisContent}
 
         const restoreDataSourceSelection = (connections: SavedDatabaseConnection[]) => {
           if (typeof window === "undefined") {
-            if (connections.length === 1) {
-              const single = [connections[0].id];
-              setSelectedDbSourceIds(single);
-              setDataSourceSelection({ selectedDbSourceIds: single, allowFilesOnly: false });
-              setSourceSelectionExplicit(false);
-            } else {
-              setSelectedDbSourceIds([]);
-              setDataSourceSelection({ selectedDbSourceIds: [], allowFilesOnly: false });
-              setSourceSelectionExplicit(false);
-            }
+            setSelectedDbSourceIds([]);
+            setDataSourceSelection({ selectedDbSourceIds: [], allowFilesOnly: false });
+            setSourceSelectionExplicit(false);
             return;
           }
 
@@ -2726,14 +2888,6 @@ ${analysisContent}
 
           const availableIds = new Set(connections.map((item) => item.id));
           const restoredIds = (storedSelection?.selectedDbSourceIds || []).filter((id) => availableIds.has(id));
-
-          if (connections.length === 1) {
-            const single = [connections[0].id];
-            setSelectedDbSourceIds(single);
-            setDataSourceSelection({ selectedDbSourceIds: single, allowFilesOnly: false });
-            setSourceSelectionExplicit(false);
-            return;
-          }
 
           setSelectedDbSourceIds(restoredIds);
           setDataSourceSelection({
@@ -2850,24 +3004,6 @@ ${analysisContent}
       return;
     }
 
-    if (savedDbConnections.length === 1) {
-      const singleId = [savedDbConnections[0].id];
-      if (!areSameStringArrays(selectedDbSourceIds, singleId)) {
-        setSelectedDbSourceIds(singleId);
-      }
-      setDataSourceSelection((prev) => {
-        if (areSameStringArrays(prev.selectedDbSourceIds, singleId) && !prev.allowFilesOnly) {
-          return prev;
-        }
-        return {
-          selectedDbSourceIds: singleId,
-          allowFilesOnly: false,
-        };
-      });
-      setSourceSelectionExplicit(false);
-      return;
-    }
-
     const validIds = new Set(savedDbConnections.map((item) => item.id));
     const sanitizedIds = selectedDbSourceIds.filter((id) => validIds.has(id));
     if (!areSameStringArrays(selectedDbSourceIds, sanitizedIds)) {
@@ -2967,10 +3103,18 @@ ${analysisContent}
   }, [analysisLanguage]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(LEFT_PANEL_DOCKED_STORE_KEY, String(isLeftPanelDocked));
+  }, [isLeftPanelDocked]);
+
+  useEffect(() => {
     if (analysisMode !== "interactive") {
       setShowTaskTreeDialog(false);
       setTaskTreeData(null);
       setSelectedTasks(new Set());
+      setShowDataDictionaryDialog(false);
+      setDataDictionaryItems(null);
+      setSelectedDictionaryItems(new Set());
     }
   }, [analysisMode]);
 
@@ -3905,6 +4049,7 @@ ${analysisContent}
       Answer: { icon: "✅", color: "bg-green-500" },
       File: { icon: "📎", color: "bg-purple-500" },
       TaskTree: { icon: "🌲", color: "bg-amber-500" },
+      DataDictionary: { icon: "📚", color: "bg-amber-500" },
     };
 
     const allMatches: Array<{
@@ -4081,6 +4226,7 @@ ${analysisContent}
         "Answer",
         "File",
         "TaskTree",
+        "DataDictionary",
       ] as const;
       const sectionConfigs: Record<
         (typeof sectionTypes)[number],
@@ -4121,6 +4267,11 @@ ${analysisContent}
           color:
             "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
         },
+        DataDictionary: {
+          icon: "📚",
+          color:
+            "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
+        },
       };
 
       // 没有结构化标签时，保持最轻量文本渲染（避免每个 chunk 都触发 Markdown/高亮重解析）
@@ -4141,8 +4292,9 @@ ${analysisContent}
         answer: "Answer",
         file: "File",
         tasktree: "TaskTree",
+        datadictionary: "DataDictionary",
       };
-      const openRe = /<(Analyze|Understand|Code|Execute|Answer|File|TaskTree)>/gi;
+      const openRe = /<(Analyze|Understand|Code|Execute|Answer|File|TaskTree|DataDictionary)>/gi;
       let cursor = 0;
       let sectionIndex = 0;
       let m: RegExpExecArray | null;
@@ -4310,6 +4462,11 @@ ${analysisContent}
       },
       TaskTree: {
         icon: "🌲",
+        color:
+          "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
+      },
+      DataDictionary: {
+        icon: "📚",
         color:
           "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
       },
@@ -4584,6 +4741,27 @@ ${analysisContent}
                   选择任务
                 </Button>
               )}
+              {match.type === "DataDictionary" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    const parsed = parseDataDictionaryContent(match.content);
+                    if (parsed) {
+                      setDataDictionaryItems(parsed.items);
+                      setSelectedDictionaryItems(new Set(parsed.items.map((item) => item.id)));
+                      setShowDataDictionaryDialog(true);
+                    } else {
+                      toast({ description: "数据字典数据解析失败", variant: "destructive" });
+                    }
+                  }}
+                  className="h-5 px-2 text-xs text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+                  title="确认数据字典"
+                >
+                  <BookOpen className="h-3 w-3 mr-1" />
+                  确认语义
+                </Button>
+              )}
             </div>
           </div>
           {!isCollapsed && (
@@ -4614,6 +4792,29 @@ ${analysisContent}
                 } else {
                   return <div className="text-sm text-gray-500">任务树数据格式异常，请重新生成</div>;
                 }
+              })() : match.type === "DataDictionary" ? (() => {
+                const parsed = parseDataDictionaryContent(match.content);
+                if (!parsed) {
+                  return <div className="text-sm text-gray-500">数据字典数据格式异常，请重新生成</div>;
+                }
+                return (
+                  <div className="text-sm text-amber-700 dark:text-amber-300">
+                    <div className="mb-2 font-medium">已生成 {parsed.items.length} 条待确认数据语义</div>
+                    <div className="space-y-1">
+                      {parsed.items.slice(0, 8).map((item) => {
+                        const subject = [item.table, item.field].filter(Boolean).join(".") || "(未命名字段)";
+                        return (
+                          <div key={item.id} className="flex items-start gap-2">
+                            <span className="text-amber-500 font-mono shrink-0">[{item.id}]</span>
+                            <span>{subject}</span>
+                            {item.proposed_meaning ? <span className="text-gray-400 text-xs ml-1">→ {item.proposed_meaning}</span> : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="mt-3 text-xs text-gray-500">点击上方「确认语义」按钮确认后继续分析</div>
+                  </div>
+                );
               })() : renderSectionContent(sectionBody)}
               {fileGallery}
             </div>
@@ -4651,6 +4852,7 @@ ${analysisContent}
         "File",
         "Answer",
         "TaskTree",
+        "DataDictionary",
       ] as const;
       const matches: Array<{ type: string; index: number; pos: number }> = [];
       sectionTypes.forEach((t) => {
@@ -4724,6 +4926,15 @@ ${analysisContent}
       return;
     }
     toast({ description: "分析语言已切换为中文（简体）" });
+  };
+
+  const openDataSourcePicker = (overrideMessage?: string | null) => {
+    setPendingDataSourceSelection({
+      selectedDbSourceIds: effectiveSelectedDbSourceIds,
+      allowFilesOnly: dataSourceSelection.allowFilesOnly || hasWorkspaceDataSource,
+    });
+    setPendingSendOverrideMessage(overrideMessage ?? null);
+    setShowDataSourceDialog(true);
   };
 
   const cancelDataSourcePicker = () => {
@@ -4840,6 +5051,11 @@ ${analysisContent}
     const outgoingAttachments = overrideMessage ? [] : attachments;
     if (!messageText.trim() && outgoingAttachments.length === 0) return;
 
+    if (!isModelProviderConfigured) {
+      setShowModelConfigAlert(true);
+      return;
+    }
+
     const selectedSourceIdsForRequest = (() => {
       if (options?.confirmedSelectedDbSourceIds) {
         const availableIds = new Set(savedDbConnections.map((item) => item.id));
@@ -4856,13 +5072,14 @@ ${analysisContent}
       savedDbConnections.length > 1 &&
       !sourceSelectionExplicit;
 
-    if (shouldPromptSourceSelection) {
-      setPendingDataSourceSelection({
-        selectedDbSourceIds: effectiveSelectedDbSourceIds,
-        allowFilesOnly: dataSourceSelection.allowFilesOnly || hasWorkspaceDataSource,
-      });
-      setPendingSendOverrideMessage(overrideMessage ?? null);
-      setShowDataSourceDialog(true);
+    const shouldPromptMissingSourceSelection =
+      !options?.bypassSourceSelectionDialog &&
+      savedDbConnections.length > 0 &&
+      selectedSourcesForRequest.length === 0 &&
+      !hasWorkspaceDataSource;
+
+    if (shouldPromptSourceSelection || shouldPromptMissingSourceSelection) {
+      openDataSourcePicker(overrideMessage ?? null);
       return;
     }
 
@@ -4880,12 +5097,7 @@ ${analysisContent}
       setSourceSelectionExplicit(true);
     }
 
-    const databaseSourcesForRequest =
-      selectedSourcesForRequest.length > 0
-        ? selectedSourcesForRequest
-        : savedDbConnections.length === 1
-          ? [savedDbConnections[0]]
-          : [];
+    const databaseSourcesForRequest = selectedSourcesForRequest;
 
     setIsAnalyzing(true);
   setRuntimeAnalysisRun(null);
@@ -4955,8 +5167,7 @@ ${analysisContent}
           selected_database_sources: databaseSourcesForRequest,
           source_selection_explicit:
             Boolean(options?.sourceSelectionConfirmed) ||
-            sourceSelectionExplicit ||
-            savedDbConnections.length === 1,
+            sourceSelectionExplicit,
           model_provider: modelProviderConfig,
           ...(temperature !== null && { temperature }),
         }),
@@ -5148,6 +5359,21 @@ ${analysisContent}
         }
       }
 
+      // 检测 <DataDictionary> 并自动弹出语义确认对话框
+      if (/<datadictionary>/i.test(accumulatedMessage)) {
+        const dictionaryMatch = accumulatedMessage.match(/<datadictionary>([\s\S]*?)<\/datadictionary>/i);
+        if (dictionaryMatch) {
+          const parsed = parseDataDictionaryContent(dictionaryMatch[1]);
+          if (parsed) {
+            setDataDictionaryItems(parsed.items);
+            setSelectedDictionaryItems(new Set(parsed.items.map((item) => item.id)));
+            setTimeout(() => setShowDataDictionaryDialog(true), 320);
+          } else {
+            console.warn("[DataDictionary] JSON 解析失败, 原始内容:", dictionaryMatch[1].slice(0, 200));
+          }
+        }
+      }
+
       // 结束后刷新一次文件列表确保无遗漏
       await loadWorkspaceFiles();
       await loadWorkspaceTree();
@@ -5180,6 +5406,120 @@ ${analysisContent}
     setTaskTreeData(null);
     handleSendMessage(msg);
   }, [taskTreeData, selectedTasks, analysisLanguage]);
+
+  const toggleDataDictionaryItem = useCallback((id: string) => {
+    setSelectedDictionaryItems((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const updateDataDictionaryItem = useCallback((id: string, patch: Partial<DataDictionaryItem>) => {
+    setDataDictionaryItems((prev) => {
+      if (!prev) return prev;
+      return prev.map((item) => {
+        if (item.id !== id) return item;
+        return {
+          ...item,
+          ...patch,
+        };
+      });
+    });
+  }, []);
+
+  const selectAllDataDictionaryItems = useCallback(() => {
+    if (!dataDictionaryItems) return;
+    setSelectedDictionaryItems(new Set(dataDictionaryItems.map((item) => item.id)));
+  }, [dataDictionaryItems]);
+
+  const clearAllDataDictionaryItems = useCallback(() => {
+    setSelectedDictionaryItems(new Set());
+  }, []);
+
+  const handleConfirmDataDictionary = useCallback(async () => {
+    if (!dataDictionaryItems || selectedDictionaryItems.size === 0) return;
+
+    const normalizedDictionaryItems = dataDictionaryItems.map((item) => ({
+      ...item,
+      proposed_meaning: String(item.proposed_meaning || "").trim(),
+      question: String(item.question || "").trim(),
+      analysis_usage: String(item.analysis_usage || "").trim(),
+      confidence: String(item.confidence || "").trim(),
+    }));
+
+    const selectedIdList = Array.from(selectedDictionaryItems);
+    const confirmedItems = normalizedDictionaryItems.filter((item) => selectedDictionaryItems.has(item.id));
+
+    const selectedSources = (() => {
+      const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+      return savedDbConnections.filter((item) => selectedIdSet.has(item.id));
+    })();
+
+    try {
+      const response = await fetch(API_URLS.CONFIG_DATA_DICTIONARY_SAVE, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: currentUser || "default",
+          session_id: sessionId,
+          source_labels: selectedSources.map((item) => item.label),
+          dictionary: {
+            items: normalizedDictionaryItems,
+          },
+          selected_ids: selectedIdList,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
+      const total = Number(result?.result?.total_count || 0);
+      toast({ description: `已保存 ${selectedIdList.length} 条数据字典（累计 ${total} 条）` });
+    } catch (error) {
+      console.error("保存数据字典失败:", error);
+      toast({ description: "保存数据字典失败，已跳过持久化", variant: "destructive" });
+    }
+
+    const summary = confirmedItems
+      .slice(0, 16)
+      .map((item) => {
+        const subject = [item.table, item.field].filter(Boolean).join(".") || item.id;
+        return `[${item.id}] ${subject} => ${item.proposed_meaning || "已确认"}`;
+      });
+
+    const msg = analysisLanguage === "en"
+      ? `The user confirmed the following data dictionary entries: ${summary.join("; ")}. Continue analysis with these confirmed semantics.`
+      : `用户已确认以下数据字典条目：${summary.join("；")}。请基于这些已确认语义继续分析。`;
+
+    setShowDataDictionaryDialog(false);
+    setDataDictionaryItems(null);
+    setSelectedDictionaryItems(new Set());
+
+    void handleSendMessage(msg, {
+      bypassSourceSelectionDialog: true,
+      sourceSelectionConfirmed: true,
+      confirmedSelectedDbSourceIds: effectiveSelectedDbSourceIds,
+    });
+  }, [
+    analysisLanguage,
+    currentUser,
+    dataDictionaryItems,
+    effectiveSelectedDbSourceIds,
+    savedDbConnections,
+    selectedDictionaryItems,
+    sessionId,
+    handleSendMessage,
+    toast,
+  ]);
 
   const handleFileUpload = async (
     event: React.ChangeEvent<HTMLInputElement>
@@ -5229,15 +5569,151 @@ ${analysisContent}
         className="h-screen bg-white dark:bg-black text-black dark:text-white"
         suppressHydrationWarning
       >
-        <ResizablePanelGroup direction="horizontal" className="h-full min-h-0">
+        <ResizablePanelGroup
+          key={isLeftPanelDocked ? "layout-docked" : "layout-expanded"}
+          direction="horizontal"
+          className="h-full min-h-0"
+        >
           {/* Left Panel - Workspace Tree */}
-          <ResizablePanel defaultSize={25} minSize={10} className="min-h-0 min-w-0">
+          <ResizablePanel
+            defaultSize={isLeftPanelDocked ? LEFT_PANEL_DOCKED_DEFAULT_SIZE : 25}
+            minSize={isLeftPanelDocked ? LEFT_PANEL_DOCKED_MIN_SIZE : 10}
+            className="min-h-0 min-w-0"
+          >
+            {isLeftPanelDocked ? (
+              <div className="flex h-full flex-col items-center justify-between border-r border-gray-200 bg-white py-2 dark:border-gray-800 dark:bg-black">
+                <div className="flex flex-col items-center gap-2">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    onChange={handleFileUpload}
+                    className="hidden"
+                    accept="*"
+                    aria-label="上传文件"
+                    title="上传文件"
+                  />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="展开左侧面板"
+                    onClick={() => setIsLeftPanelDocked(false)}
+                  >
+                    <PanelLeftOpen className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="文件区（点击展开）"
+                    onClick={() => setIsLeftPanelDocked(false)}
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="上传文件"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <Upload className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="风调雨顺"
+                    onClick={() => setSideGuidanceOpen(true)}
+                    disabled={messages.length <= 1}
+                  >
+                    <BookOpen className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="系统设置"
+                    onClick={() => {
+                      setSystemSettingsTab("model");
+                      setShowSystemSettings(true);
+                    }}
+                  >
+                    <Database className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="了解观雨"
+                    onClick={() => setShowAgentIntro(true)}
+                  >
+                    <Sparkles className="h-4 w-4 text-blue-500" />
+                  </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 w-8 p-0 text-gray-500"
+                        title="清空 workspace"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>清空 workspace？</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          将删除 workspace 根目录下的所有文件与文件夹，此操作不可撤销。
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>取消</AlertDialogCancel>
+                        <AlertDialogAction
+                          className="bg-red-600 hover:bg-red-700"
+                          onClick={clearWorkspace}
+                        >
+                          确认清空
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
+
+                <div className="flex flex-col items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 p-2 dark:border-gray-700 dark:bg-gray-900/60">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title={hasSelectedDataSource ? "已选择数据源，点击调整" : "数据源未选择，点击配置"}
+                    onClick={() => openDataSourcePicker(null)}
+                  >
+                    <Database className="h-4 w-4" />
+                  </Button>
+                  <span
+                    className={`h-2 w-2 rounded-full ${hasSelectedDataSource ? "bg-emerald-500" : "bg-amber-500"}`}
+                    title={hasSelectedDataSource ? "数据源已就绪" : "请先选择数据源"}
+                  />
+                </div>
+              </div>
+            ) : (
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12">
                 <div className="flex items-center gap-2">
                   <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
                     Files
                   </h2>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-5 w-5 p-0 text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300"
+                    title="收起为工具栏"
+                    onClick={() => setIsLeftPanelDocked(true)}
+                  >
+                    <PanelLeftClose className="h-3.5 w-3.5" />
+                  </Button>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -5509,13 +5985,67 @@ ${analysisContent}
                   </div>
                 )}
               </div>
+
+              <div className="shrink-0 border-t border-gray-200 bg-slate-50/70 px-3 py-3 dark:border-gray-800 dark:bg-slate-950/30">
+                <div className="flex flex-col gap-3 rounded-2xl border border-slate-200/90 bg-white/90 p-3 shadow-[0_10px_24px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-950/70">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">数据源选择（必选）</span>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0 border-sky-200 px-2 text-[10px] text-sky-700 hover:bg-sky-50 dark:border-sky-900 dark:text-sky-300 dark:hover:bg-sky-950/40"
+                      onClick={() => openDataSourcePicker(null)}
+                    >
+                      选择数据源
+                    </Button>
+                  </div>
+
+                  <div className="flex min-h-[120px] flex-1 flex-col justify-center rounded-xl border border-dashed border-slate-300/90 bg-slate-50/70 p-2.5 dark:border-slate-700 dark:bg-slate-900/30">
+                    {hasSelectedDataSource ? (
+                      <div className="space-y-2">
+                        {selectedDatabaseSources.length > 0 ? (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {selectedDatabaseSources.map((source) => (
+                              <span
+                                key={source.id}
+                                className="rounded-full border border-cyan-200 bg-cyan-50 px-2 py-0.5 text-[10px] text-cyan-700 dark:border-cyan-900 dark:bg-cyan-950/30 dark:text-cyan-300"
+                                title={`${source.dbType.toUpperCase()} · ${source.label}`}
+                              >
+                                {source.label}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {hasWorkspaceDataSource ? (
+                            <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300">
+                              已上传文件 {workspaceDataSourceFiles.length} 个
+                          </span>
+                        ) : null}
+                        {selectedDatabaseSources.length > 0 ? (
+                          <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                            已完成数据源确认，本轮分析将按以上数据范围执行。
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="space-y-1 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
+                        <p>当前尚未选择任何数据源。</p>
+                        <p>发送分析要求时将自动弹出数据源选择窗口。</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
+            )}
           </ResizablePanel>
 
           <ResizableHandle withHandle />
 
           {/* Middle Panel - Chat & Analysis */}
-          <ResizablePanel defaultSize={50} minSize={25} className="min-h-0 min-w-0">
+          <ResizablePanel defaultSize={isLeftPanelDocked ? 67 : 50} minSize={25} className="min-h-0 min-w-0">
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               {/* Header */}
               <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0 overflow-hidden">
@@ -5992,362 +6522,272 @@ ${analysisContent}
                 {/* 加载气泡已移除，改为仅按钮态提示 */}
                 <div ref={messagesEndRef} />
               </div>
+
+              <div className="shrink-0 border-t border-gray-200 bg-white dark:border-gray-800 dark:bg-black">
+                <div className="p-4">
+                  <div className="relative">
+                    <Textarea
+                      value={inputValue}
+                      onChange={(e) => setInputValue(e.target.value)}
+                      placeholder="在此输入分析指令或提问..."
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSendMessage();
+                        }
+                      }}
+                      rows={6}
+                      className="min-h-[120px] resize-none border-gray-200 bg-white rounded-lg focus-visible:ring-1 dark:border-gray-700 dark:bg-black"
+                    />
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap items-end justify-between gap-3">
+                    <div className="flex-1 overflow-x-auto scrollbar-none pr-1">
+                      <div className="flex min-w-max items-center gap-1">
+                        {historyInputs.length > 0 ? (
+                          <>
+                            <span className="mr-1 shrink-0 text-[10px] text-gray-400 dark:text-gray-600">历史:</span>
+                            {historyInputs.map((hist, idx) => (
+                              <Button
+                                key={idx}
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setInputValue(hist)}
+                                className="h-6 shrink-0 rounded-full bg-gray-100 px-2 text-[10px] text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700"
+                              >
+                                {idx + 1}
+                              </Button>
+                            ))}
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            title="清空聊天"
+                            className="h-9 px-3"
+                            disabled={isTyping}
+                          >
+                            <Eraser className="mr-2 h-4 w-4" />
+                            清空
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>清空聊天？</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              将删除当前会话内的所有消息，仅保留欢迎提示。
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>取消</AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={clearChat}
+                              className="bg-red-600 hover:bg-red-700"
+                            >
+                              确认清空
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+
+                      {isTyping ? (
+                        <Button
+                          size="sm"
+                          onClick={stopGeneration}
+                          className="h-9 w-[108px] rounded-md border border-red-200 bg-red-50 px-4 text-red-600 hover:bg-red-100 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-400"
+                        >
+                          <Square className="mr-2 h-4 w-4 fill-current" />
+                          停止
+                        </Button>
+                      ) : (
+                        <Button
+                          onClick={() => handleSendMessage()}
+                          size="sm"
+                          disabled={!inputValue.trim()}
+                          className="h-9 w-[108px] bg-black px-4 text-white hover:bg-gray-800 dark:bg-white dark:text-black dark:hover:bg-gray-200"
+                        >
+                          <Send className="mr-2 h-4 w-4" />
+                          发送
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </ResizablePanel>
 
           <ResizableHandle withHandle />
 
-          {/* Right Panel - Code Editor & Input */}
+          {/* Right Panel - Analysis Process */}
           <ResizablePanel defaultSize={25} minSize={20} className="min-h-0 min-w-0">
-            <ResizablePanelGroup direction="vertical" className="h-full min-h-0">
-              {/* Upper: Code/Preview */}
-              <ResizablePanel defaultSize={40} minSize={30} className="min-h-0">
-                <div className="flex flex-col bg-gray-50 dark:bg-gray-900 min-h-0 h-full">
-                  <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-gray-800 shrink-0">
-                    <div className="flex items-center gap-3">
-                      <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
-                        {showCodeEditor ? "Code" : "分析过程侧栏"}
-                      </h2>
-                      {/* 热度滑块 - 保留在顶栏 */}
-                      <div className="flex items-center gap-1">
-                        <Slider
-                          value={[temperature ?? (analysisStrategy === "聚焦诉求" ? 0.2 : analysisStrategy === "适度扩展" ? 0.4 : 0.6)]}
-                          min={0.0}
-                          max={1.0}
-                          step={0.05}
-                          onValueChange={(vals) => setTemperature(vals[0])}
-                          className="w-14 h-4"
-                        />
-                        <span className="text-[10px] text-gray-500 dark:text-gray-400 w-7">
-                          {temperature !== null ? temperature.toFixed(2) : "auto"}
-                        </span>
-                        {temperature !== null ? (
-                          <button
-                            onClick={() => setTemperature(null)}
-                            className="text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                            title="恢复自动"
-                          >
-                            ↺
-                          </button>
-                        ) : (
-                          <span className="text-[10px] text-gray-300 dark:text-gray-600">↺</span>
-                        )}
-                      </div>
-                      {/* 分析设置齿轮 - 保留在顶栏 */}
-                      <button
-                        onClick={() => setShowSettingsDialog(true)}
-                        className="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-                        title="分析设置"
-                      >
-                        <Settings className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {/* 雨途斩棘录按钮 */}
+            <div className="flex h-full min-h-0 flex-col bg-gray-50 dark:bg-gray-900">
+              <div className="flex shrink-0 items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-800">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                    {showCodeEditor ? "Code" : "分析过程侧栏"}
+                  </h2>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowSettingsDialog(true)}
+                    className="h-7 px-2 text-[11px]"
+                    title="策略与技能"
+                  >
+                    <Bot className="mr-1 h-3.5 w-3.5" />
+                    策略与技能
+                  </Button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setShowYutuPanel(true);
+                      loadYutuHtml();
+                    }}
+                    className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                    title="雨途斩棘录 - 错误修正记录"
+                  >
+                    <BookOpen className="mr-1 h-3.5 w-3.5" />
+                    <span>雨途斩棘录</span>
+                  </Button>
+                  {showCodeEditor ? (
+                    <div className="flex gap-2">
                       <Button
                         variant="ghost"
                         size="sm"
                         onClick={() => {
-                          setShowYutuPanel(true);
-                          loadYutuHtml();
+                          setShowCodeEditor(false);
+                          setCodeEditorContent("");
+                          setSelectedCodeSection("");
                         }}
                         className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                        title="雨途斩棘录 - 错误修正记录"
                       >
-                        <BookOpen className="h-3.5 w-3.5 mr-1" />
-                        <span>雨途斩棘录</span>
+                        Close
                       </Button>
-                      {showCodeEditor && (
-                        <div className="flex gap-2">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => {
-                              setShowCodeEditor(false);
-                              setCodeEditorContent("");
-                              setSelectedCodeSection("");
-                            }}
-                            className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                          >
-                            Close
-                          </Button>
-                          <Button
-                            size="sm"
-                            onClick={executeCode}
-                            disabled={!codeEditorContent || isExecutingCode}
-                            className="h-6 px-3 text-xs bg-black text-white dark:bg-white dark:text-black"
-                          >
-                            {isExecutingCode ? "Running..." : "Run"}
-                          </Button>
+                      <Button
+                        size="sm"
+                        onClick={executeCode}
+                        disabled={!codeEditorContent || isExecutingCode}
+                        className="h-6 bg-black px-3 text-xs text-white dark:bg-white dark:text-black"
+                      >
+                        {isExecutingCode ? "Running..." : "Run"}
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              {!showCodeEditor ? (
+                <AnalysisRuntimeSidebar
+                  run={runtimeAnalysisRun}
+                  events={runtimeAnalysisEvents}
+                  loading={isLoadingRuntimeAnalysisTrace}
+                  isAnalyzing={isAnalyzing}
+                  onOpenFullHistory={() => {
+                    setSystemSettingsTab("history");
+                    setShowSystemSettings(true);
+                  }}
+                />
+              ) : (
+                <div
+                  className="editor-container flex flex-1 min-h-0 flex-col overflow-hidden p-4"
+                  style={{ ["--editor-height" as string]: `${editorHeight}%` }}
+                >
+                  <div className="flex h-[var(--editor-height)] min-h-0 flex-col overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-700 dark:bg-black">
+                    <div className="shrink-0 border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
+                      <span className="font-mono text-xs text-gray-500">python</span>
+                    </div>
+                    <div className="flex-1 min-h-0">
+                      <Editor
+                        height="100%"
+                        defaultLanguage="python"
+                        value={codeEditorContent}
+                        onChange={(value) => setCodeEditorContent(value || "")}
+                        theme={isDarkMode ? "vs-dark" : "light"}
+                        options={{
+                          fontSize: 14,
+                          fontFamily:
+                            "var(--font-mono), 'Courier New', monospace",
+                          lineNumbers: "on",
+                          minimap: { enabled: false },
+                          scrollBeyondLastLine: false,
+                          automaticLayout: true,
+                          tabSize: 4,
+                          insertSpaces: true,
+                          wordWrap: "on",
+                          folding: true,
+                          lineDecorationsWidth: 10,
+                          lineNumbersMinChars: 3,
+                          glyphMargin: false,
+                          selectOnLineNumbers: true,
+                          roundedSelection: false,
+                          readOnly: false,
+                          cursorStyle: "line",
+                          smoothScrolling: true,
+                          formatOnPaste: true,
+                          formatOnType: true,
+                          suggestOnTriggerCharacters: true,
+                          acceptSuggestionOnEnter: "on",
+                          tabCompletion: "on",
+                          scrollbar: {
+                            vertical: "visible",
+                            verticalScrollbarSize: 10,
+                          },
+                        }}
+                        loading={
+                          <div className="flex h-full items-center justify-center">
+                            <div className="text-muted-foreground flex items-center gap-2">
+                              <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-500 border-t-transparent"></div>
+                              <span className="text-sm">加载编辑器...</span>
+                            </div>
+                          </div>
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div
+                    className="group flex h-2 cursor-row-resize items-center justify-center bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700"
+                    onMouseDown={handleMouseDown}
+                  >
+                    <div className="h-1 w-8 rounded bg-gray-300 group-hover:bg-gray-400 dark:bg-gray-600 dark:group-hover:bg-gray-500"></div>
+                  </div>
+
+                  <div className="flex h-[calc(100%-var(--editor-height))] min-h-0 flex-col overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900">
+                    <div className="shrink-0 border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
+                      <span className="font-mono text-xs text-gray-500 dark:text-gray-400">Output</span>
+                    </div>
+                    <div className="flex-1 min-h-0 overflow-auto bg-white p-3 font-mono text-sm text-gray-800 dark:bg-black dark:text-gray-200">
+                      {codeExecutionResult ? (
+                        <div>
+                          <div className="mb-1 text-gray-500 dark:text-gray-400">$ python main.py</div>
+                          <pre className="whitespace-pre-wrap text-gray-800 dark:text-gray-200">
+                            {codeExecutionResult}
+                          </pre>
+                          <div className="mt-2 flex items-center">
+                            <span className="text-gray-500 dark:text-gray-400">$</span>
+                            <span className="ml-1 h-4 w-2 animate-pulse bg-gray-400 dark:bg-gray-500"></span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="italic text-gray-400 dark:text-gray-500">
+                          Run code to see output...
                         </div>
                       )}
                     </div>
                   </div>
-
-                  {!showCodeEditor ? (
-                    <AnalysisRuntimeSidebar
-                      run={runtimeAnalysisRun}
-                      events={runtimeAnalysisEvents}
-                      loading={isLoadingRuntimeAnalysisTrace}
-                      isAnalyzing={isAnalyzing}
-                      onOpenFullHistory={() => {
-                        setSystemSettingsTab("history");
-                        setShowSystemSettings(true);
-                      }}
-                    />
-                  ) : (
-                      <div
-                        className="flex-1 min-h-0 flex flex-col p-4 editor-container overflow-hidden"
-                        style={{ ["--editor-height" as string]: `${editorHeight}%` }}
-                      >
-                      {/* Code Editor */}
-                      <div
-                          className="min-h-0 h-[var(--editor-height)] border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-black flex flex-col"
-                      >
-                        <div className="bg-gray-50 dark:bg-gray-800 px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
-                          <span className="text-xs text-gray-500 font-mono">
-                            python
-                          </span>
-                        </div>
-                        <div className="flex-1 min-h-0">
-                          <Editor
-                            height="100%"
-                            defaultLanguage="python"
-                            value={codeEditorContent}
-                            onChange={(value) => setCodeEditorContent(value || "")}
-                            theme={isDarkMode ? "vs-dark" : "light"}
-                            options={{
-                              fontSize: 14,
-                              fontFamily:
-                                "var(--font-mono), 'Courier New', monospace",
-                              lineNumbers: "on",
-                              minimap: { enabled: false },
-                              scrollBeyondLastLine: false,
-                              automaticLayout: true,
-                              tabSize: 4,
-                              insertSpaces: true,
-                              wordWrap: "on",
-                              folding: true,
-                              lineDecorationsWidth: 10,
-                              lineNumbersMinChars: 3,
-                              glyphMargin: false,
-                              selectOnLineNumbers: true,
-                              roundedSelection: false,
-                              readOnly: false,
-                              cursorStyle: "line",
-                              smoothScrolling: true,
-                              formatOnPaste: true,
-                              formatOnType: true,
-                              suggestOnTriggerCharacters: true,
-                              acceptSuggestionOnEnter: "on",
-                              tabCompletion: "on",
-                              scrollbar: {
-                                vertical: "visible",
-                                verticalScrollbarSize: 10,
-                              },
-                            }}
-                            loading={
-                              <div className="flex items-center justify-center h-full">
-                                <div className="flex items-center gap-2 text-muted-foreground">
-                                  <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                                  <span className="text-sm">加载编辑器...</span>
-                                </div>
-                              </div>
-                            }
-                          />
-                        </div>
-                      </div>
-
-                      {/* Resizer */}
-                      <div
-                        className="h-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 cursor-row-resize flex items-center justify-center group"
-                        onMouseDown={handleMouseDown}
-                      >
-                        <div className="w-8 h-1 bg-gray-300 dark:bg-gray-600 rounded group-hover:bg-gray-400 dark:group-hover:bg-gray-500"></div>
-                      </div>
-
-                      {/* Terminal Output */}
-                      <div
-                          className="min-h-0 h-[calc(100%-var(--editor-height))] border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-900 flex flex-col"
-                      >
-                        <div className="bg-gray-50 dark:bg-gray-800 px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
-                          <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
-                            Output
-                          </span>
-                        </div>
-                        <div className="flex-1 min-h-0 p-3 overflow-auto font-mono text-sm bg-white dark:bg-black text-gray-800 dark:text-gray-200">
-                          {codeExecutionResult ? (
-                            <div>
-                              <div className="text-gray-500 dark:text-gray-400 mb-1">
-                                $ python main.py
-                              </div>
-                              <pre className="whitespace-pre-wrap text-gray-800 dark:text-gray-200">
-                                {codeExecutionResult}
-                              </pre>
-                              <div className="flex items-center mt-2">
-                                <span className="text-gray-500 dark:text-gray-400">
-                                  $
-                                </span>
-                                <span className="w-2 h-4 bg-gray-400 dark:bg-gray-500 ml-1 animate-pulse"></span>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="text-gray-400 dark:text-gray-500 italic">
-                              Run code to see output...
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
-              </ResizablePanel>
-
-              <ResizableHandle withHandle />
-
-              {/* Lower: Chat Input */}
-              <ResizablePanel defaultSize={60} minSize={20} className="min-h-0">
-                <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
-                  <div className="p-4 flex-1 flex flex-col min-h-0">
-                    <div className="flex gap-3 items-start flex-1">
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        multiple
-                        onChange={handleFileUpload}
-                        className="hidden"
-                        accept="*"
-                        aria-label="上传文件"
-                        title="上传文件"
-                      />
-                      <div className="flex-1 relative flex flex-col h-full min-h-0">
-                        <Textarea
-                          value={inputValue}
-                          onChange={(e) => setInputValue(e.target.value)}
-                          placeholder="在此输入分析指令或提问..."
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" && !e.shiftKey) {
-                              e.preventDefault();
-                              handleSendMessage();
-                            }
-                          }}
-                          rows={8}
-                          className="flex-1 resize-none border-gray-200 dark:border-gray-700 bg-white dark:bg-black rounded-lg focus-visible:ring-1"
-                        />
-                      </div>
-                    </div>
-                    <div className="mt-3 flex flex-wrap items-end justify-between gap-3">
-                      <div className="flex-1 overflow-x-auto scrollbar-none mr-2">
-                        <div className="flex gap-1 items-center min-w-max">
-                          {historyInputs.length > 0 && (
-                            <>
-                              <span className="text-[10px] text-gray-400 dark:text-gray-600 mr-1 shrink-0">历史:</span>
-                              {historyInputs.map((hist, idx) => (
-                                <Button
-                                  key={idx}
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => setInputValue(hist)}
-                                  className="h-6 px-2 text-[10px] bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-full shrink-0"
-                                >
-                                  {idx + 1}
-                                </Button>
-                              ))}
-                            </>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
-                        <span className="text-[11px] font-semibold text-blue-600 dark:text-blue-400">分析要求</span>
-                        <div className="flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2 py-1 dark:border-gray-800 dark:bg-gray-900/40">
-                          <span className="text-[10px] text-gray-500 dark:text-gray-400">交互模式</span>
-                          <Select value={analysisMode} onValueChange={(val) => {
-                            setAnalysisMode(val);
-                            if (typeof window !== "undefined") {
-                              localStorage.setItem("analysisMode", val);
-                            }
-                          }}>
-                            <SelectTrigger className="h-7 w-[94px] border-0 bg-transparent px-1 text-[10px] shadow-none focus:ring-0 dark:bg-transparent">
-                              <SelectValue placeholder="模式" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="full_agent" className="text-xs">全程代理</SelectItem>
-                              <SelectItem value="interactive" className="text-xs">交互模式</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <div className="flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2 py-1 dark:border-gray-800 dark:bg-gray-900/40">
-                          <span className="text-[10px] text-gray-500 dark:text-gray-400">聚焦范围</span>
-                          <Select value={analysisStrategy} onValueChange={(val) => {
-                            setAnalysisStrategy(val);
-                          }}>
-                            <SelectTrigger className="h-7 w-[94px] border-0 bg-transparent px-1 text-[10px] shadow-none focus:ring-0 dark:bg-transparent">
-                              <SelectValue placeholder="策略" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
-                              <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
-                              <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              title="清空聊天"
-                              className="h-9 px-3"
-                              disabled={isTyping}
-                            >
-                              <Eraser className="h-4 w-4 mr-2" />
-                              清空
-                            </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>清空聊天？</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                将删除当前会话内的所有消息，仅保留欢迎提示。
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>取消</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={clearChat}
-                                className="bg-red-600 hover:bg-red-700"
-                              >
-                                确认清空
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                        {isTyping ? (
-                          <Button
-                            size="sm"
-                            onClick={stopGeneration}
-                            className="h-9 w-[108px] px-4 rounded-md bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50"
-                          >
-                            <Square className="h-4 w-4 mr-2 fill-current" />
-                            停止
-                          </Button>
-                        ) : (
-                          <Button
-                            onClick={() => handleSendMessage()}
-                            size="sm"
-                            disabled={!inputValue.trim()}
-                            className="h-9 w-[108px] px-4 bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
-                          >
-                            <Send className="h-4 w-4 mr-2" />
-                            发送
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </ResizablePanel>
-            </ResizablePanelGroup>
+              )}
+            </div>
           </ResizablePanel>
         </ResizablePanelGroup>
       </div>
@@ -6648,6 +7088,29 @@ ${analysisContent}
         </DialogContent>
       </Dialog>
 
+      <AlertDialog open={showModelConfigAlert} onOpenChange={setShowModelConfigAlert}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>请先配置 AI 模型</AlertDialogTitle>
+            <AlertDialogDescription>
+              当前模型配置不完整，暂时无法开始分析任务。请先在系统设置中补全模型地址、模型名称，以及需要时的 API Key。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>稍后再说</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setShowModelConfigAlert(false);
+                setSystemSettingsTab("model");
+                setShowSystemSettings(true);
+              }}
+            >
+              去配置模型
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
 
       {/* 交互式任务选择对话框 */}
       <TaskTreeDialog
@@ -6660,6 +7123,21 @@ ${analysisContent}
         selectAllTasks={selectAllTasks}
         deselectAllTasks={deselectAllTasks}
         onConfirm={handleConfirmTaskSelection}
+      />
+
+      <DataDictionaryDialog
+        open={showDataDictionaryDialog}
+        onOpenChange={setShowDataDictionaryDialog}
+        language={analysisLanguage}
+        items={dataDictionaryItems || []}
+        selectedIds={selectedDictionaryItems}
+        toggleItem={toggleDataDictionaryItem}
+        updateItem={updateDataDictionaryItem}
+        selectAll={selectAllDataDictionaryItems}
+        clearAll={clearAllDataDictionaryItems}
+        onConfirm={() => {
+          void handleConfirmDataDictionary();
+        }}
       />
 
       {/* 保存项目弹窗 */}
@@ -6818,8 +7296,6 @@ ${analysisContent}
         handleSaveModelConfig={handleSaveModelConfig}
         modelTestStatus={modelTestStatus}
         availableModels={availableModels}
-        analysisStrategy={analysisStrategy}
-        temperature={temperature}
         dbType={dbType}
         handleDbTypeChange={handleDbTypeChange}
         dbConfig={dbConfig}
@@ -6868,6 +7344,12 @@ ${analysisContent}
         handleRefreshAnalysisHistory={() => void loadAnalysisHistory()}
         handleSelectAnalysisHistoryRun={handleSelectAnalysisHistoryRun}
         handleSaveAnalysisHistorySettings={handleSaveAnalysisHistorySettings}
+        dataDictionaryEntries={dataDictionaryEntries}
+        dataDictionaryTotal={dataDictionaryTotal}
+        isLoadingDataDictionary={isLoadingDataDictionary}
+        isDeletingDataDictionary={isDeletingDataDictionary}
+        handleRefreshDataDictionary={() => void loadDataDictionary()}
+        handleDeleteDataDictionaryEntries={handleDeleteDataDictionaryEntries}
         isLoadingKnowledgeConfig={isLoadingKnowledgeConfig}
         loadKnowledgeConfig={loadKnowledgeConfig}
         knowledgeBaseEnabled={knowledgeBaseEnabled}
