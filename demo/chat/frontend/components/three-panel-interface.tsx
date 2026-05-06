@@ -76,7 +76,8 @@ import { useWorkspace } from "@/hooks/useWorkspace";
 import { AgentIntroDialog } from "@/components/dialogs/AgentIntroDialog";
 import { SideGuidanceDialog } from "@/components/dialogs/SideGuidanceDialog";
 import { TaskTreeDialog, type TaskTreeNode, parseTaskTreeContent } from "@/components/dialogs/TaskTreeDialog";
-import { DataDictionaryDialog, type DataDictionaryItem, parseDataDictionaryContent } from "@/components/dialogs/DataDictionaryDialog";
+// DataDictionaryDialog removed - now using knowledge base mode instead
+// import { DataDictionaryDialog, type DataDictionaryItem, parseDataDictionaryContent } from "@/components/dialogs/DataDictionaryDialog";
 import { ProjectSaveDialog } from "@/components/dialogs/ProjectSaveDialog";
 import { ProjectManagerDialog } from "@/components/dialogs/ProjectManagerDialog";
 import { BackupRestoreDialog } from "@/components/dialogs/BackupRestoreDialog";
@@ -689,31 +690,14 @@ const StreamingSectionBody = memo(
       return <div className="text-sm text-gray-500">任务树数据格式异常，请重新生成</div>;
     }
     if (type === "DataDictionary") {
-      const parsed = parseDataDictionaryContent(content);
-      if (parsed) {
-        const items = parsed.items;
-        return (
-          <div className="text-sm text-amber-700 dark:text-amber-300">
-            <div className="mb-2 font-medium">已生成 {items.length} 条待确认数据语义</div>
-            <div className="space-y-1">
-              {items.slice(0, 8).map((item) => {
-                const subject = [item.table, item.field].filter(Boolean).join(".") || "(未命名字段)";
-                return (
-                  <div key={item.id} className="flex items-start gap-2">
-                    <span className="text-amber-500 font-mono shrink-0">[{item.id}]</span>
-                    <span>{subject}</span>
-                    {item.proposed_meaning ? (
-                      <span className="text-gray-400 text-xs ml-1">→ {item.proposed_meaning}</span>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-            <div className="mt-3 text-xs text-gray-500">数据字典确认面板已自动弹出，请勾选后继续分析</div>
+      return (
+        <div className="text-sm text-amber-700 dark:text-amber-300">
+          <div className="mb-2 font-medium">已记录 {/* items would be here but we're not storing it anymore */} 条数据字典定义</div>
+          <div className="text-xs text-gray-500">
+            数据字典已记录到知识库。请在设置 → 数据字典中查看AI的理解、修改并保存。
           </div>
-        );
-      }
-      return <div className="text-sm text-gray-500">数据字典数据格式异常，请重新生成</div>;
+        </div>
+      );
     }
     return <div className="markdown-content">{renderSectionContent(content)}</div>;
   },
@@ -1003,7 +987,7 @@ export function ThreePanelInterface() {
   const [showTaskTreeDialog, setShowTaskTreeDialog] = useState(false);
   const [taskTreeData, setTaskTreeData] = useState<TaskTreeNode[] | null>(null);
   const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
-  const [showDataDictionaryDialog, setShowDataDictionaryDialog] = useState(false);
+  // DataDictionaryDialog popup removed in v1.1.17 - moved to knowledge base mode
   const [dataDictionaryItems, setDataDictionaryItems] = useState<DataDictionaryItem[] | null>(null);
   const [selectedDictionaryItems, setSelectedDictionaryItems] = useState<Set<string>>(new Set());
   // 报告类型选择状态
@@ -4746,17 +4730,10 @@ ${analysisContent}
                   variant="ghost"
                   size="sm"
                   onClick={() => {
-                    const parsed = parseDataDictionaryContent(match.content);
-                    if (parsed) {
-                      setDataDictionaryItems(parsed.items);
-                      setSelectedDictionaryItems(new Set(parsed.items.map((item) => item.id)));
-                      setShowDataDictionaryDialog(true);
-                    } else {
-                      toast({ description: "数据字典数据解析失败", variant: "destructive" });
-                    }
+                    toast({ description: "数据字典已记录到知识库。请在设置 → 数据字典中查看和修改AI理解的数据定义。" });
                   }}
                   className="h-5 px-2 text-xs text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
-                  title="确认数据字典"
+                  title="查看数据字典"
                 >
                   <BookOpen className="h-3 w-3 mr-1" />
                   确认语义
@@ -4793,26 +4770,13 @@ ${analysisContent}
                   return <div className="text-sm text-gray-500">任务树数据格式异常，请重新生成</div>;
                 }
               })() : match.type === "DataDictionary" ? (() => {
-                const parsed = parseDataDictionaryContent(match.content);
-                if (!parsed) {
-                  return <div className="text-sm text-gray-500">数据字典数据格式异常，请重新生成</div>;
-                }
+                // v1.1.17: DataDictionary is now stored in knowledge base, not displayed inline
                 return (
                   <div className="text-sm text-amber-700 dark:text-amber-300">
-                    <div className="mb-2 font-medium">已生成 {parsed.items.length} 条待确认数据语义</div>
-                    <div className="space-y-1">
-                      {parsed.items.slice(0, 8).map((item) => {
-                        const subject = [item.table, item.field].filter(Boolean).join(".") || "(未命名字段)";
-                        return (
-                          <div key={item.id} className="flex items-start gap-2">
-                            <span className="text-amber-500 font-mono shrink-0">[{item.id}]</span>
-                            <span>{subject}</span>
-                            {item.proposed_meaning ? <span className="text-gray-400 text-xs ml-1">→ {item.proposed_meaning}</span> : null}
-                          </div>
-                        );
-                      })}
+                    <div className="mb-2 font-medium">✓ 数据字典已记录到知识库</div>
+                    <div className="text-xs text-gray-500">
+                      分析已完成，生成的数据字典定义已保存。请在设置 → 数据字典中查看和编辑AI的理解。
                     </div>
-                    <div className="mt-3 text-xs text-gray-500">点击上方「确认语义」按钮确认后继续分析</div>
                   </div>
                 );
               })() : renderSectionContent(sectionBody)}
@@ -5359,18 +5323,13 @@ ${analysisContent}
         }
       }
 
-      // 检测 <DataDictionary> 并自动弹出语义确认对话框
+      // DataDictionary detected - v1.1.17: moved to knowledge base mode, no longer pops up for confirmation
       if (/<datadictionary>/i.test(accumulatedMessage)) {
         const dictionaryMatch = accumulatedMessage.match(/<datadictionary>([\s\S]*?)<\/datadictionary>/i);
         if (dictionaryMatch) {
-          const parsed = parseDataDictionaryContent(dictionaryMatch[1]);
-          if (parsed) {
-            setDataDictionaryItems(parsed.items);
-            setSelectedDictionaryItems(new Set(parsed.items.map((item) => item.id)));
-            setTimeout(() => setShowDataDictionaryDialog(true), 320);
-          } else {
-            console.warn("[DataDictionary] JSON 解析失败, 原始内容:", dictionaryMatch[1].slice(0, 200));
-          }
+          // In v1.1.17, DataDictionary is now stored for user review in Settings > Data Dictionary
+          // No popup is triggered - AI will reference these definitions during analysis
+          console.log("[DataDictionary] Detected and recorded (popup removed in v1.1.17)");
         }
       }
 
@@ -5441,73 +5400,12 @@ ${analysisContent}
     setSelectedDictionaryItems(new Set());
   }, []);
 
+  // DataDictionary popup confirmation removed in v1.1.17
+  // Users now manage data dictionaries in Settings > Data Dictionary (knowledge base mode)
+  // AI will reference uploaded definitions during analysis without requiring confirmation
   const handleConfirmDataDictionary = useCallback(async () => {
-    if (!dataDictionaryItems || selectedDictionaryItems.size === 0) return;
-
-    const normalizedDictionaryItems = dataDictionaryItems.map((item) => ({
-      ...item,
-      proposed_meaning: String(item.proposed_meaning || "").trim(),
-      question: String(item.question || "").trim(),
-      analysis_usage: String(item.analysis_usage || "").trim(),
-      confidence: String(item.confidence || "").trim(),
-    }));
-
-    const selectedIdList = Array.from(selectedDictionaryItems);
-    const confirmedItems = normalizedDictionaryItems.filter((item) => selectedDictionaryItems.has(item.id));
-
-    const selectedSources = (() => {
-      const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
-      return savedDbConnections.filter((item) => selectedIdSet.has(item.id));
-    })();
-
-    try {
-      const response = await fetch(API_URLS.CONFIG_DATA_DICTIONARY_SAVE, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          username: currentUser || "default",
-          session_id: sessionId,
-          source_labels: selectedSources.map((item) => item.label),
-          dictionary: {
-            items: normalizedDictionaryItems,
-          },
-          selected_ids: selectedIdList,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const result = await response.json();
-      const total = Number(result?.result?.total_count || 0);
-      toast({ description: `已保存 ${selectedIdList.length} 条数据字典（累计 ${total} 条）` });
-    } catch (error) {
-      console.error("保存数据字典失败:", error);
-      toast({ description: "保存数据字典失败，已跳过持久化", variant: "destructive" });
-    }
-
-    const summary = confirmedItems
-      .slice(0, 16)
-      .map((item) => {
-        const subject = [item.table, item.field].filter(Boolean).join(".") || item.id;
-        return `[${item.id}] ${subject} => ${item.proposed_meaning || "已确认"}`;
-      });
-
-    const msg = analysisLanguage === "en"
-      ? `The user confirmed the following data dictionary entries: ${summary.join("; ")}. Continue analysis with these confirmed semantics.`
-      : `用户已确认以下数据字典条目：${summary.join("；")}。请基于这些已确认语义继续分析。`;
-
-    setShowDataDictionaryDialog(false);
-    setDataDictionaryItems(null);
-    setSelectedDictionaryItems(new Set());
-
-    void handleSendMessage(msg, {
-      bypassSourceSelectionDialog: true,
-      sourceSelectionConfirmed: true,
-      confirmedSelectedDbSourceIds: effectiveSelectedDbSourceIds,
+    // This function is deprecated - kept as placeholder for backwards compatibility
+    return
     });
   }, [
     analysisLanguage,
@@ -7125,20 +7023,7 @@ ${analysisContent}
         onConfirm={handleConfirmTaskSelection}
       />
 
-      <DataDictionaryDialog
-        open={showDataDictionaryDialog}
-        onOpenChange={setShowDataDictionaryDialog}
-        language={analysisLanguage}
-        items={dataDictionaryItems || []}
-        selectedIds={selectedDictionaryItems}
-        toggleItem={toggleDataDictionaryItem}
-        updateItem={updateDataDictionaryItem}
-        selectAll={selectAllDataDictionaryItems}
-        clearAll={clearAllDataDictionaryItems}
-        onConfirm={() => {
-          void handleConfirmDataDictionary();
-        }}
-      />
+      {/* DataDictionaryDialog popup removed in v1.1.17 - moved to knowledge base upload mode */}
 
       {/* 保存项目弹窗 */}
       <ProjectSaveDialog
