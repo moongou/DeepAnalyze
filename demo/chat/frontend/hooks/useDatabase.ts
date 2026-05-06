@@ -147,21 +147,22 @@ export function useDatabase({ sessionId, currentUser, modelProviderConfig, onRef
         throw new Error(data.message || data.detail || "无法获取数据库列表");
       }
 
-      const names = Array.isArray(data.databases)
-        ? Array.from(
-            new Set(
-              data.databases
-                .map((item: unknown) => String(item || "").trim())
-                .filter(Boolean)
-            )
-          )
-        : [];
+      const databaseItems: unknown[] = Array.isArray(data.databases) ? data.databases : [];
+      const uniqueNames = new Set<string>();
+      for (const item of databaseItems) {
+        const normalizedName = String(item || "").trim();
+        if (normalizedName) {
+          uniqueNames.add(normalizedName);
+        }
+      }
+      const names = Array.from(uniqueNames);
 
       setAvailableDatabaseNames(names);
       setDatabaseListError("");
 
-      if (!database && names.length > 0) {
-        setDbConfig((prev) => ({ ...prev, database: names[0] }));
+      const firstDatabaseName = names[0] || "";
+      if (!database && firstDatabaseName) {
+        setDbConfig((prev) => ({ ...prev, database: firstDatabaseName }));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "无法获取数据库列表";

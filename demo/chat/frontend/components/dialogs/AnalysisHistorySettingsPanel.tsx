@@ -1,6 +1,8 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -28,6 +30,7 @@ export interface AnalysisHistoryRunSummary {
   last_event?: string;
   last_message?: string;
   last_problem?: string;
+  stale_idle_ms?: number;
   request_summary?: {
     analysis_mode?: string;
     analysis_language?: string;
@@ -72,6 +75,20 @@ interface AnalysisHistorySettingsPanelProps {
   onSelectRun: (runId: string) => void;
 }
 
+interface AnalysisEventGroup {
+  id: string;
+  stage: string;
+  stageLabel: string;
+  roundLabel: string;
+  count: number;
+  status: string;
+  events: AnalysisHistoryEvent[];
+  firstEvent: AnalysisHistoryEvent;
+  lastEvent: AnalysisHistoryEvent;
+  summary: string;
+  eventLabels: string[];
+}
+
 const statusTone: Record<string, string> = {
   completed: "text-emerald-700 bg-emerald-50 border-emerald-200 dark:text-emerald-300 dark:bg-emerald-950/40 dark:border-emerald-900",
   failed: "text-rose-700 bg-rose-50 border-rose-200 dark:text-rose-300 dark:bg-rose-950/40 dark:border-rose-900",
@@ -79,6 +96,30 @@ const statusTone: Record<string, string> = {
   running: "text-cyan-700 bg-cyan-50 border-cyan-200 dark:text-cyan-300 dark:bg-cyan-950/40 dark:border-cyan-900",
   info: "text-slate-700 bg-slate-50 border-slate-200 dark:text-slate-300 dark:bg-slate-900 dark:border-slate-800",
 };
+
+const stageLabelMap: Record<string, string> = {
+  session: "会话流程",
+  round: "执行轮次",
+  prompt: "提示词装配",
+  planner: "任务规划",
+  llm: "模型推理",
+  code: "代码执行",
+  sql: "SQL取数",
+  r: "R分析",
+  report: "报告整理",
+  database: "数据库处理",
+  guidance: "过程指导",
+  knowledge: "知识注入",
+  artifact: "产物整理",
+  recovery: "兜底恢复",
+  export: "结果导出",
+  answer: "结论输出",
+};
+
+function getStageLabel(stage?: string) {
+  if (!stage) return "未知阶段";
+  return stageLabelMap[stage] || stage;
+}
 
 function formatDuration(durationMs?: number) {
   const value = Number(durationMs || 0);
@@ -105,6 +146,82 @@ function formatDetailJson(details?: Record<string, unknown>) {
   }
 }
 
+function truncateText(value: string | undefined, maxLength: number) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}...`;
+}
+
+function getRoundLabel(event: AnalysisHistoryEvent) {
+  const round = event.details?.round;
+  if (typeof round === "number" || typeof round === "string") {
+    return `round ${String(round)}`;
+  }
+  return "系统事件";
+}
+
+function mergeStatus(current: string, next: string) {
+  const priority: Record<string, number> = {
+    failed: 5,
+    warning: 4,
+    running: 3,
+    completed: 2,
+    info: 1,
+  };
+  return (priority[next] || 0) >= (priority[current] || 0) ? next : current;
+}
+
+function buildEventGroups(events: AnalysisHistoryEvent[]): AnalysisEventGroup[] {
+  if (events.length === 0) return [];
+
+  const ordered = [...events].sort((left, right) => left.sequence - right.sequence);
+  const groups: AnalysisEventGroup[] = [];
+
+  ordered.forEach((event) => {
+    const stage = event.stage || "unknown";
+    const roundLabel = getRoundLabel(event);
+    const groupKey = `${stage}::${roundLabel}`;
+    const previous = groups[groups.length - 1];
+
+    if (previous && previous.id === groupKey) {
+      previous.events.push(event);
+      previous.count += 1;
+      previous.status = mergeStatus(previous.status, event.status || "info");
+      previous.eventLabels = Array.from(new Set([...previous.eventLabels, event.event].filter(Boolean)));
+      previous.summary = truncateText(event.message || previous.summary, 120) || previous.summary;
+      previous.lastEvent = event;
+      return;
+    }
+
+    groups.push({
+      id: groupKey,
+      stage,
+      stageLabel: getStageLabel(stage),
+      roundLabel,
+      count: 1,
+      status: event.status || "info",
+      events: [event],
+      firstEvent: event,
+      lastEvent: event,
+      summary: truncateText(event.message, 120) || `${getStageLabel(stage)}事件组`,
+      eventLabels: event.event ? [event.event] : [],
+    });
+  });
+
+  return groups;
+}
+
+function buildRunMeta(run: AnalysisHistoryRunSummary) {
+  const dbSources = run.request_summary?.active_database_sources || [];
+  return [
+    `模式 ${run.request_summary?.analysis_mode || "-"}`,
+    `策略 ${run.request_summary?.strategy || "-"}`,
+    `模型 ${run.request_summary?.model_provider?.model || run.request_summary?.model_provider?.label || "-"}`,
+    `数据源 ${dbSources.length > 0 ? dbSources.map((item) => item.label || item.db_type).filter(Boolean).join(" / ") : "无数据库"}`,
+  ];
+}
+
 export function AnalysisHistorySettingsPanel({
   settings,
   setSettings,
@@ -119,150 +236,199 @@ export function AnalysisHistorySettingsPanel({
   onSave,
   onSelectRun,
 }: AnalysisHistorySettingsPanelProps) {
+  const [selectedGroup, setSelectedGroup] = useState<AnalysisEventGroup | null>(null);
   const selectedRequestSummary = selectedRun?.request_summary;
+  const groupedEvents = useMemo(() => buildEventGroups(events), [events]);
 
   return (
-    <div className="mt-4 flex-1 overflow-y-auto space-y-6">
-      <section className="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden bg-white dark:bg-gray-950">
-        <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 bg-[linear-gradient(120deg,rgba(15,23,42,1),rgba(3,105,161,0.92))] text-white">
-          <div>
-            <div className="text-sm font-semibold flex items-center gap-2">
-              <History className="h-4 w-4" />
-              分析历史与过程追踪
-            </div>
-            <div className="text-xs text-cyan-100/90 mt-1">
-              按步骤记录每次分析的提示词装配、LLM 响应、代码执行、报告生成与异常位置，用于排查卡顿、评估性能和复盘分析质量。
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="secondary" size="sm" onClick={onRefresh} disabled={isLoading}>
-              {isLoading ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-2 h-3.5 w-3.5" />}
-              刷新记录
-            </Button>
-            <Button size="sm" onClick={onSave} disabled={isSaving}>
-              {isSaving ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}
-              保存历史设置
-            </Button>
-          </div>
-        </div>
-
-        <div className="p-4 grid grid-cols-2 gap-4">
-          <div className="rounded-lg border border-slate-200 dark:border-slate-800 p-4 space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-medium">启用详细记录</div>
-                <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">每次分析启动新 run，并在执行过程中持续落盘。</div>
-              </div>
-              <Switch checked={settings.enabled} onCheckedChange={(checked) => setSettings((prev) => ({ ...prev, enabled: Boolean(checked) }))} />
-            </div>
-
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-medium">记录流式进度</div>
-                <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">按 chunk/字符里程碑记录 LLM 输出推进情况，方便定位“停在生成中”的位置。</div>
-              </div>
-              <Switch checked={settings.capture_stream_progress} onCheckedChange={(checked) => setSettings((prev) => ({ ...prev, capture_stream_progress: Boolean(checked) }))} />
-            </div>
-
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-medium">记录提示词预览</div>
-                <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">保留系统提示词截断预览，用于判断分析策略、上下文注入与提示词膨胀是否合理。</div>
-              </div>
-              <Switch checked={settings.capture_prompt_preview} onCheckedChange={(checked) => setSettings((prev) => ({ ...prev, capture_prompt_preview: Boolean(checked) }))} />
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-slate-200 dark:border-slate-800 p-4 grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="analysis-history-max-runs">保留 run 数量</Label>
-              <Input
-                id="analysis-history-max-runs"
-                type="number"
-                min={10}
-                value={settings.max_runs}
-                onChange={(event) => setSettings((prev) => ({ ...prev, max_runs: Math.max(10, Number(event.target.value || prev.max_runs)) }))}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="analysis-history-chunk-interval">流式 chunk 间隔</Label>
-              <Input
-                id="analysis-history-chunk-interval"
-                type="number"
-                min={5}
-                value={settings.stream_progress_chunk_interval}
-                onChange={(event) => setSettings((prev) => ({ ...prev, stream_progress_chunk_interval: Math.max(5, Number(event.target.value || prev.stream_progress_chunk_interval)) }))}
-              />
-            </div>
-            <div className="space-y-1.5 col-span-2">
-              <Label htmlFor="analysis-history-char-interval">流式字符间隔</Label>
-              <Input
-                id="analysis-history-char-interval"
-                type="number"
-                min={200}
-                value={settings.stream_progress_char_interval}
-                onChange={(event) => setSettings((prev) => ({ ...prev, stream_progress_char_interval: Math.max(200, Number(event.target.value || prev.stream_progress_char_interval)) }))}
-              />
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="grid grid-cols-4 gap-3">
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800 p-4 bg-white dark:bg-gray-950">
-          <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2"><Activity className="h-3.5 w-3.5" /> 总 run</div>
-          <div className="text-2xl font-semibold mt-2">{stats.total}</div>
-        </div>
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800 p-4 bg-white dark:bg-gray-950">
-          <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2"><ShieldCheck className="h-3.5 w-3.5" /> 完成</div>
-          <div className="text-2xl font-semibold mt-2">{stats.completed}</div>
-        </div>
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800 p-4 bg-white dark:bg-gray-950">
-          <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2"><AlertTriangle className="h-3.5 w-3.5" /> 警告</div>
-          <div className="text-2xl font-semibold mt-2">{stats.warning}</div>
-        </div>
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800 p-4 bg-white dark:bg-gray-950">
-          <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2"><Clock3 className="h-3.5 w-3.5" /> 失败</div>
-          <div className="text-2xl font-semibold mt-2">{stats.failed}</div>
-        </div>
-      </section>
-
-      <section className="grid grid-cols-[360px_1fr] gap-4 min-h-[560px]">
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-gray-950 flex flex-col min-h-0">
-          <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3">
+    <div className="mt-4 flex h-full min-h-0 flex-col gap-4 overflow-hidden">
+      <section className="grid shrink-0 gap-4 xl:grid-cols-[1.35fr_1fr]">
+        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-gray-950">
+          <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-[linear-gradient(120deg,rgba(15,23,42,1),rgba(8,47,73,0.96))] px-4 py-3 text-white dark:border-slate-800">
             <div>
-              <div className="text-sm font-medium">最近分析 run</div>
-              <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">选中某次运行后，可查看其详细事件流。</div>
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <History className="h-4 w-4" />
+                分析历史与过程追踪
+              </div>
+              <div className="mt-1 text-xs leading-5 text-cyan-100/90">
+                主视图只显示可滚动的分层过程。点击阶段分组，例如“SQL取数 2 个事件”，再展开原始事件和 details。
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" size="sm" onClick={onRefresh} disabled={isLoading}>
+                {isLoading ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-2 h-3.5 w-3.5" />}
+                刷新记录
+              </Button>
+              <Button size="sm" onClick={onSave} disabled={isSaving}>
+                {isSaving ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}
+                保存设置
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid gap-3 px-4 py-4 md:grid-cols-[1.2fr_1fr]">
+            <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 text-[12px] leading-6 text-slate-600 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-300">
+              <div className="font-medium text-slate-900 dark:text-slate-100">当前视图重点</div>
+              <div className="mt-1">下方区域主要用于显示 run 与过程分组，不再把大量空间消耗在统计大卡片和内联 JSON 上。</div>
+              <div className="mt-2">如果某次分析长时间没有新事件，但状态还停在 running，后端会自动归一化为 warning，避免前台一直显示同步中。</div>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-white p-3 text-[11px] text-slate-500 dark:border-slate-800 dark:bg-gray-950 dark:text-slate-400">
+              <div className="flex items-center gap-2 text-sm font-medium text-slate-900 dark:text-slate-100">
+                <Workflow className="h-4 w-4 text-cyan-600" />
+                {selectedRun ? "当前选中 run" : "选中 run 后显示摘要"}
+              </div>
+              {selectedRun ? (
+                <div className="mt-3 space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0 truncate text-[12px] font-medium text-slate-800 dark:text-slate-200">{selectedRun.run_id}</div>
+                    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] ${statusTone[selectedRun.status] || statusTone.info}`}>{selectedRun.status}</span>
+                  </div>
+                  <div>开始: <span className="text-slate-700 dark:text-slate-300">{formatDateTime(selectedRun.started_at)}</span></div>
+                  <div>耗时: <span className="text-slate-700 dark:text-slate-300">{formatDuration(selectedRun.duration_ms)}</span> · 事件: <span className="text-slate-700 dark:text-slate-300">{selectedRun.event_count || 0}</span></div>
+                  <div>最近阶段: <span className="text-slate-700 dark:text-slate-300">{getStageLabel(selectedRun.last_stage)} / {selectedRun.last_event || "-"}</span></div>
+                  <div>最近提示: <span className="text-slate-700 dark:text-slate-300">{selectedRun.last_problem || selectedRun.last_message || "-"}</span></div>
+                </div>
+              ) : (
+                <div className="mt-2 leading-5">选择左侧某次运行后，这里会显示它的摘要，主滚动区则展示它的分层过程。</div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-gray-950">
+          <div className="border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+            <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">记录方式</div>
+            <div className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">追踪开关、保留策略和统计概览全部收拢在这里。</div>
+          </div>
+
+          <div className="space-y-4 px-4 py-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">启用详细记录</div>
+                    <div className="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-400">每次分析写入独立 run 和事件流。</div>
+                  </div>
+                  <Switch checked={settings.enabled} onCheckedChange={(checked) => setSettings((prev) => ({ ...prev, enabled: Boolean(checked) }))} />
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">记录流式进度</div>
+                    <div className="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-400">帮助定位卡在哪一轮 token 推进。</div>
+                  </div>
+                  <Switch checked={settings.capture_stream_progress} onCheckedChange={(checked) => setSettings((prev) => ({ ...prev, capture_stream_progress: Boolean(checked) }))} />
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-200 p-3 dark:border-slate-800 sm:col-span-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium">记录提示词预览</div>
+                    <div className="mt-1 text-[11px] leading-5 text-slate-500 dark:text-slate-400">用于排查提示词膨胀、上下文注入和策略变化。</div>
+                  </div>
+                  <Switch checked={settings.capture_prompt_preview} onCheckedChange={(checked) => setSettings((prev) => ({ ...prev, capture_prompt_preview: Boolean(checked) }))} />
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="analysis-history-max-runs">保留 run 数量</Label>
+                <Input
+                  id="analysis-history-max-runs"
+                  type="number"
+                  min={10}
+                  value={settings.max_runs}
+                  onChange={(event) => setSettings((prev) => ({ ...prev, max_runs: Math.max(10, Number(event.target.value || prev.max_runs)) }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="analysis-history-chunk-interval">流式 chunk 间隔</Label>
+                <Input
+                  id="analysis-history-chunk-interval"
+                  type="number"
+                  min={5}
+                  value={settings.stream_progress_chunk_interval}
+                  onChange={(event) => setSettings((prev) => ({ ...prev, stream_progress_chunk_interval: Math.max(5, Number(event.target.value || prev.stream_progress_chunk_interval)) }))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="analysis-history-char-interval">流式字符间隔</Label>
+                <Input
+                  id="analysis-history-char-interval"
+                  type="number"
+                  min={200}
+                  value={settings.stream_progress_char_interval}
+                  onChange={(event) => setSettings((prev) => ({ ...prev, stream_progress_char_interval: Math.max(200, Number(event.target.value || prev.stream_progress_char_interval)) }))}
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/40">
+                <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400"><Activity className="h-3.5 w-3.5" /> 总 run</div>
+                <div className="mt-2 text-xl font-semibold text-slate-900 dark:text-slate-100">{stats.total}</div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/40">
+                <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400"><ShieldCheck className="h-3.5 w-3.5" /> 完成</div>
+                <div className="mt-2 text-xl font-semibold text-slate-900 dark:text-slate-100">{stats.completed}</div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/40">
+                <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400"><AlertTriangle className="h-3.5 w-3.5" /> 警告</div>
+                <div className="mt-2 text-xl font-semibold text-slate-900 dark:text-slate-100">{stats.warning}</div>
+              </div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-950/40">
+                <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400"><Clock3 className="h-3.5 w-3.5" /> 失败</div>
+                <div className="mt-2 text-xl font-semibold text-slate-900 dark:text-slate-100">{stats.failed}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[320px_1fr]">
+        <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-gray-950">
+          <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+            <div>
+              <div className="text-sm font-medium text-slate-900 dark:text-slate-100">最近分析 run</div>
+              <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">选中某次运行后，右侧直接看分层过程。</div>
             </div>
             {isLoading ? <Loader2 className="h-4 w-4 animate-spin text-slate-400" /> : null}
           </div>
-          <div className="flex-1 overflow-auto p-3 space-y-2">
+
+          <div className="flex-1 space-y-2 overflow-auto p-3">
             {runs.length === 0 ? (
-              <div className="text-xs text-slate-500 dark:text-slate-400 leading-6">暂无分析历史。启用后，从下一次分析开始会持续记录每一步。</div>
+              <div className="text-xs leading-6 text-slate-500 dark:text-slate-400">暂无分析历史。启用后，从下一次分析开始会持续记录每一步。</div>
             ) : (
               runs.map((run) => {
                 const active = selectedRun?.run_id === run.run_id;
-                const dbSources = run.request_summary?.active_database_sources || [];
                 return (
                   <button
                     key={run.run_id}
                     type="button"
                     onClick={() => onSelectRun(run.run_id)}
-                    className={`w-full text-left rounded-lg border p-3 transition-colors ${active ? "border-cyan-400 bg-cyan-50 dark:bg-cyan-950/20 dark:border-cyan-800" : "border-slate-200 dark:border-slate-800 hover:border-cyan-300 dark:hover:border-cyan-900"}`}
+                    className={`w-full rounded-lg border p-3 text-left transition-colors ${active ? "border-cyan-400 bg-cyan-50 dark:border-cyan-800 dark:bg-cyan-950/20" : "border-slate-200 hover:border-cyan-300 dark:border-slate-800 dark:hover:border-cyan-900"}`}
                   >
                     <div className="flex items-center justify-between gap-3">
-                      <div className="text-xs font-medium text-slate-900 dark:text-slate-100 truncate">{run.run_id}</div>
+                      <div className="min-w-0 truncate text-[12px] font-medium text-slate-900 dark:text-slate-100">{run.run_id}</div>
                       <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] ${statusTone[run.status] || statusTone.info}`}>{run.status}</span>
                     </div>
-                    <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400 space-y-1">
+                    <div className="mt-2 space-y-1 text-[11px] text-slate-500 dark:text-slate-400">
                       <div>Session: {run.session_id}</div>
                       <div>开始: {formatDateTime(run.started_at)}</div>
-                      <div>耗时: {formatDuration(run.duration_ms)} | 事件: {run.event_count || 0}</div>
-                      <div>模式: {run.request_summary?.analysis_mode || "-"} | 策略: {run.request_summary?.strategy || "-"}</div>
-                      <div>模型: {run.request_summary?.model_provider?.model || run.request_summary?.model_provider?.label || "-"}</div>
-                      <div>数据源: {dbSources.length > 0 ? dbSources.map((item) => item.label || item.db_type).join(" / ") : "无数据库"}</div>
+                      <div>耗时: {formatDuration(run.duration_ms)} · 事件: {run.event_count || 0}</div>
                     </div>
-                    {run.last_message ? <div className="mt-2 text-[11px] text-slate-700 dark:text-slate-300 line-clamp-2">{run.last_message}</div> : null}
+                    <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-slate-500 dark:text-slate-400">
+                      {buildRunMeta(run).map((item) => (
+                        <span key={item} className="rounded-full border border-slate-200 px-2 py-0.5 dark:border-slate-700">{item}</span>
+                      ))}
+                    </div>
+                    {run.last_message ? <div className="mt-2 text-[11px] leading-5 text-slate-700 dark:text-slate-300">{truncateText(run.last_message, 100)}</div> : null}
+                    {run.last_problem ? <div className="mt-2 text-[11px] leading-5 text-amber-700 dark:text-amber-300">{truncateText(run.last_problem, 100)}</div> : null}
                   </button>
                 );
               })
@@ -270,69 +436,129 @@ export function AnalysisHistorySettingsPanel({
           </div>
         </div>
 
-        <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-gray-950 flex flex-col min-h-0 overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800">
-            <div className="text-sm font-medium flex items-center gap-2">
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-gray-950">
+          <div className="shrink-0 border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+            <div className="flex items-center gap-2 text-sm font-medium text-slate-900 dark:text-slate-100">
               <Workflow className="h-4 w-4 text-cyan-600" />
-              {selectedRun ? "运行明细" : "选择左侧 run 查看明细"}
+              {selectedRun ? "分层过程记录" : "选择左侧 run 查看分层过程"}
             </div>
             {selectedRun ? (
-              <div className="mt-2 grid grid-cols-2 gap-3 text-[11px] text-slate-500 dark:text-slate-400">
+              <div className="mt-3 grid gap-2 text-[11px] text-slate-500 dark:text-slate-400 md:grid-cols-2 xl:grid-cols-3">
                 <div>运行状态: <span className="text-slate-800 dark:text-slate-200">{selectedRun.status}</span></div>
                 <div>耗时: <span className="text-slate-800 dark:text-slate-200">{formatDuration(selectedRun.duration_ms)}</span></div>
-                <div>最近事件: <span className="text-slate-800 dark:text-slate-200">{selectedRun.last_stage || "-"} / {selectedRun.last_event || "-"}</span></div>
+                <div>最近事件: <span className="text-slate-800 dark:text-slate-200">{getStageLabel(selectedRun.last_stage)} / {selectedRun.last_event || "-"}</span></div>
                 <div>报告类型: <span className="text-slate-800 dark:text-slate-200">{(selectedRequestSummary?.report_types || []).join(", ") || "-"}</span></div>
                 <div>语言: <span className="text-slate-800 dark:text-slate-200">{selectedRequestSummary?.analysis_language || "-"}</span></div>
-                <div>模型 Provider: <span className="text-slate-800 dark:text-slate-200">{selectedRequestSummary?.model_provider?.providerType || "-"}</span></div>
-                <div className="col-span-2">问题提示: <span className="text-slate-800 dark:text-slate-200">{selectedRun.last_problem || selectedRun.last_message || "-"}</span></div>
+                <div>Provider: <span className="text-slate-800 dark:text-slate-200">{selectedRequestSummary?.model_provider?.providerType || "-"}</span></div>
+                <div className="md:col-span-2 xl:col-span-3">问题提示: <span className="text-slate-800 dark:text-slate-200">{selectedRun.last_problem || selectedRun.last_message || "-"}</span></div>
               </div>
             ) : (
-              <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">这里会展示单次分析 run 的完整阶段事件，包括提示词装配、LLM 进度、代码执行结果和报告兜底信息。</div>
+              <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">右侧主区域现在优先用于滚动浏览分层事件，原始 details 放到点击后的弹窗里查看。</div>
             )}
           </div>
 
-          <div className="flex-1 overflow-auto p-4 space-y-3 bg-slate-50/80 dark:bg-slate-950/70">
+          <div className="flex-1 overflow-auto bg-slate-50/80 p-4 dark:bg-slate-950/70">
             {isLoadingDetail ? (
-              <div className="h-full flex items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 h-4 w-4 animate-spin" />正在加载运行明细...</div>
+              <div className="flex h-full items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 h-4 w-4 animate-spin" />正在加载运行明细...</div>
             ) : !selectedRun ? (
-              <div className="h-full flex items-center justify-center text-sm text-slate-500">请先选择左侧的一次分析运行。</div>
-            ) : events.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-sm text-slate-500">当前 run 暂无事件明细。</div>
+              <div className="flex h-full items-center justify-center text-sm text-slate-500">请先选择左侧的一次分析运行。</div>
+            ) : groupedEvents.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-slate-500">当前 run 暂无事件明细。</div>
             ) : (
-              events.map((event) => {
+              <div className="space-y-3">
+                {groupedEvents.map((group) => (
+                  <button
+                    key={`${group.id}-${group.firstEvent.sequence}`}
+                    type="button"
+                    onClick={() => setSelectedGroup(group)}
+                    className="w-full rounded-lg border border-slate-200 bg-white p-4 text-left transition-colors hover:border-cyan-300 dark:border-slate-800 dark:bg-gray-950 dark:hover:border-cyan-900"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                            {group.count > 1 ? `${group.stageLabel} ${group.count} 个事件` : `${group.stageLabel} / ${group.firstEvent.event}`}
+                          </span>
+                          <span className="rounded-full border border-slate-200 px-2 py-0.5 text-[10px] text-slate-500 dark:border-slate-700 dark:text-slate-400">{group.roundLabel}</span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500 dark:text-slate-400">
+                          <span>序号 {group.firstEvent.sequence} - {group.lastEvent.sequence}</span>
+                          <span>{formatDateTime(group.firstEvent.timestamp)}</span>
+                          <span>至</span>
+                          <span>{formatDateTime(group.lastEvent.timestamp)}</span>
+                        </div>
+                        <div className="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-300">{group.summary || "点击查看该分组的原始事件与 details"}</div>
+                        {group.eventLabels.length > 0 ? (
+                          <div className="mt-3 flex flex-wrap gap-1.5 text-[10px] text-slate-500 dark:text-slate-400">
+                            {group.eventLabels.slice(0, 6).map((label) => (
+                              <span key={label} className="rounded-full border border-slate-200 px-2 py-0.5 dark:border-slate-700">{label}</span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="flex shrink-0 flex-col items-end gap-2">
+                        <span className={`rounded-full border px-2 py-0.5 text-[10px] ${statusTone[group.status] || statusTone.info}`}>{group.status}</span>
+                        <span className="text-[10px] text-slate-400 dark:text-slate-500">展开详情</span>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="shrink-0 border-t border-slate-200 px-4 py-3 text-[11px] text-slate-500 dark:border-slate-800 dark:text-slate-400">
+            <div className="flex items-center gap-2">
+              <Database className="h-3.5 w-3.5" />
+              历史明细优先展示可复盘的过程分组；原始事件与 details 在点击后弹窗查看，避免主视图被 JSON 挤占。
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <Dialog open={Boolean(selectedGroup)} onOpenChange={(open) => { if (!open) setSelectedGroup(null); }}>
+        <DialogContent className="flex h-[80vh] max-w-4xl flex-col overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>
+              {selectedGroup ? (selectedGroup.count > 1 ? `${selectedGroup.stageLabel} ${selectedGroup.count} 个事件` : `${selectedGroup.stageLabel} / ${selectedGroup.firstEvent.event}`) : "事件详情"}
+            </DialogTitle>
+          </DialogHeader>
+
+          {selectedGroup ? (
+            <div className="flex-1 space-y-3 overflow-auto pr-1">
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 text-[11px] text-slate-500 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-400">
+                <div>{selectedGroup.roundLabel}</div>
+                <div className="mt-1">{formatDateTime(selectedGroup.firstEvent.timestamp)} 至 {formatDateTime(selectedGroup.lastEvent.timestamp)}</div>
+                <div className="mt-1">事件类型: {selectedGroup.eventLabels.join(" / ") || "-"}</div>
+              </div>
+
+              {selectedGroup.events.map((event) => {
                 const detailJson = formatDetailJson(event.details as Record<string, unknown> | undefined);
                 return (
-                  <div key={`${event.run_id}-${event.sequence}`} className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-gray-950 p-4">
+                  <div key={`${event.run_id}-${event.sequence}`} className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-gray-950">
                     <div className="flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-slate-900 text-white text-[10px] px-2">{event.sequence}</span>
-                        <span className="text-xs font-medium text-slate-900 dark:text-slate-100 truncate">{event.stage} / {event.event}</span>
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-full bg-slate-900 px-2 text-[10px] text-white">{event.sequence}</span>
+                        <span className="truncate text-xs font-medium text-slate-900 dark:text-slate-100">{getStageLabel(event.stage)} / {event.event}</span>
                       </div>
-                      <div className="flex items-center gap-2 shrink-0">
+                      <div className="flex shrink-0 items-center gap-2">
                         <span className={`rounded-full border px-2 py-0.5 text-[10px] ${statusTone[event.status] || statusTone.info}`}>{event.status}</span>
                         <span className="text-[10px] text-slate-500 dark:text-slate-400">{formatDuration(event.elapsed_ms)}</span>
                       </div>
                     </div>
-                    <div className="mt-2 text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-4 flex-wrap">
+                    <div className="mt-2 flex flex-wrap gap-3 text-[10px] text-slate-500 dark:text-slate-400">
                       <span>{formatDateTime(event.timestamp)}</span>
-                      {event.details && "round" in event.details ? <span>round: {String(event.details.round)}</span> : null}
+                      <span>{getRoundLabel(event)}</span>
                     </div>
-                    {event.message ? <div className="mt-2 text-sm text-slate-800 dark:text-slate-200 whitespace-pre-wrap">{event.message}</div> : null}
-                    {detailJson ? (
-                      <pre className="mt-3 rounded-md bg-slate-950 text-cyan-100 p-3 overflow-auto text-[11px] leading-5">{detailJson}</pre>
-                    ) : null}
+                    {event.message ? <div className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-800 dark:text-slate-200">{event.message}</div> : null}
+                    {detailJson ? <pre className="mt-3 overflow-auto rounded-md bg-slate-950 p-3 text-[11px] leading-5 text-cyan-100">{detailJson}</pre> : null}
                   </div>
                 );
-              })
-            )}
-          </div>
-
-          <div className="px-4 py-3 border-t border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
-            <Database className="h-3.5 w-3.5" />
-            该历史记录重点服务于稳健性排障、性能优化、提示词治理、思考方式回放和分析质量复盘。
-          </div>
-        </div>
-      </section>
+              })}
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

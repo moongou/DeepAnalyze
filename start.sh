@@ -90,9 +90,9 @@ apply_backend_profile() {
 	local backend="$1"
 	if [[ "$backend" == "mlx" ]]; then
 		local mlx_model_dir
-		mlx_model_dir="${DEEPANALYZE_MLX_MODEL_DIR:-$SCRIPT_DIR/DeepAnalyze-8B-MLX-4bit}"
-		if [[ ! -d "$mlx_model_dir" && -d "$SCRIPT_DIR/DeepAnalyze-8B-MLX-FP16" ]]; then
-			mlx_model_dir="$SCRIPT_DIR/DeepAnalyze-8B-MLX-FP16"
+		mlx_model_dir="${DEEPANALYZE_MLX_MODEL_DIR:-$SCRIPT_DIR/DeepAnalyze-8B-MLX-FP16}"
+		if [[ ! -d "$mlx_model_dir" && -d "$SCRIPT_DIR/DeepAnalyze-8B-MLX-4bit" ]]; then
+			mlx_model_dir="$SCRIPT_DIR/DeepAnalyze-8B-MLX-4bit"
 		fi
 		export DEEPANALYZE_MLX_MODEL_DIR="$mlx_model_dir"
 		export DEEPANALYZE_COMPUTE_BACKEND="mlx"

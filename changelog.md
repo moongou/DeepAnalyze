@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.1.16 - 2026-05-06
+
+### Added (v1.1.16)
+
+- Added layered analysis-history presentation in demo/chat so recent runs can be inspected as grouped stage/round event clusters instead of a flat event wall.
+- Added compatibility support in `demo/chat/agent_utils.py` for structured report-export calls using `report_content`, `output_filename`, and `output_dir`, while preserving the legacy Markdown export signatures.
+
+### Changed (v1.1.16)
+
+- Changed the runtime analysis sidebar to emphasize grouped process flow and live stage progression for the current session.
+- Changed local MLX startup defaults in `start.sh` and `demo/chat/start.sh` to prefer the FP16 model directory when available.
+
+### Fixed (v1.1.16)
+
+- Fixed OpenAI-compatible follow-up rounds that could return repeated empty completions after code or SQL execution by normalizing internal `execute` history into user-facing continuation prompts before the next LLM request.
+- Fixed generated artifact tracking so workspace helper symlinks such as `.lib/libRblas.dylib` no longer resolve into false downloadable outputs like `libR.dylib`.
+- Fixed report-export TypeErrors during autonomous analysis when the model invoked `generate_report_pdf` with structured payload arguments instead of the legacy positional Markdown signature.
+
 ## v1.1.15 - 2026-05-05
 
 ### Added (v1.1.15)

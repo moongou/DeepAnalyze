@@ -551,28 +551,78 @@ def _normalize_execution_language(language: str, code: str = "") -> str:
     return "python"
 
 
-def _extract_executable_block(response_text: str) -> Dict[str, str]:
-    """Extract the first executable Code/fenced block and normalize its language."""
-    text_body = str(response_text or "")
-    code_match = re.search(r"<code>(.*?)</code>", text_body, re.DOTALL | re.IGNORECASE)
-    search_body = (code_match.group(1) if code_match else text_body).strip()
-    fence_match = re.search(
+def _extract_executable_blocks_from_body(search_body: str) -> List[Dict[str, str]]:
+    body = str(search_body or "").strip()
+    if not body:
+        return []
+
+    executable_blocks: List[Dict[str, str]] = []
+    for fence_match in re.finditer(
         r"```\s*([A-Za-z0-9_+.-]*)\s*\n(.*?)```",
-        search_body,
+        body,
         re.DOTALL,
-    )
-    if fence_match:
+    ):
         raw_language = fence_match.group(1) or ""
         code = (fence_match.group(2) or "").strip()
-        return {
-            "language": _normalize_execution_language(raw_language, code),
-            "raw_language": raw_language,
-            "code": code,
+        if not code:
+            continue
+        executable_blocks.append(
+            {
+                "language": _normalize_execution_language(raw_language, code),
+                "raw_language": raw_language,
+                "code": code,
+            }
+        )
+    if executable_blocks:
+        return executable_blocks
+
+    leading_fence_match = re.match(
+        r"^```\s*([A-Za-z0-9_+.-]*)\s*\n?(.*)$",
+        body,
+        re.DOTALL,
+    )
+    if leading_fence_match:
+        raw_language = leading_fence_match.group(1) or ""
+        code = re.sub(r"\n?```\s*$", "", leading_fence_match.group(2) or "", flags=re.DOTALL).strip()
+        if not code:
+            return []
+        return [
+            {
+                "language": _normalize_execution_language(raw_language, code),
+                "raw_language": raw_language,
+                "code": code,
+            }
+        ]
+
+    return [
+        {
+            "language": _normalize_execution_language("", body),
+            "raw_language": "",
+            "code": body,
         }
+    ]
+
+
+def _extract_executable_blocks(response_text: str) -> List[Dict[str, str]]:
+    text_body = str(response_text or "")
+    code_matches = list(re.finditer(r"<code>(.*?)</code>", text_body, re.DOTALL | re.IGNORECASE))
+    if code_matches:
+        executable_blocks: List[Dict[str, str]] = []
+        for code_match in code_matches:
+            executable_blocks.extend(_extract_executable_blocks_from_body(code_match.group(1)))
+        return executable_blocks
+    return _extract_executable_blocks_from_body(text_body)
+
+
+def _extract_executable_block(response_text: str) -> Dict[str, str]:
+    """Extract the first executable Code/fenced block and normalize its language."""
+    executable_blocks = _extract_executable_blocks(response_text)
+    if executable_blocks:
+        return executable_blocks[0]
     return {
-        "language": _normalize_execution_language("", search_body),
+        "language": _normalize_execution_language("", ""),
         "raw_language": "",
-        "code": search_body,
+        "code": "",
     }
 
 
@@ -714,6 +764,8 @@ DEFAULT_PROVIDER_LABEL = (os.getenv("DEEPANALYZE_DEFAULT_PROVIDER_LABEL", "DeepA
 DEFAULT_PROVIDER_DESCRIPTION = (os.getenv("DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION", "项目默认本地 vLLM 服务") or "项目默认本地 vLLM 服务").strip()
 DEFAULT_PROVIDER_API_KEY = (os.getenv("DEEPANALYZE_DEFAULT_MODEL_API_KEY", "") or "").strip()
 MAX_AGENT_ROUNDS = 30
+MAX_EMPTY_LLM_ROUNDS = 3
+ANALYSIS_HISTORY_STALE_RUNNING_MS = 120000
 LLM_RETRY_MAX_ATTEMPTS = 3
 LLM_RETRY_BACKOFF_SECONDS = [0.4, 0.8]
 LLM_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -876,6 +928,66 @@ def _load_analysis_history_index(username: str) -> Dict[str, Any]:
         except Exception:
             pass
     return {"runs": []}
+
+
+def _parse_analysis_history_timestamp(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def _normalize_analysis_history_run_summary(summary: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    if not isinstance(summary, dict):
+        return {}, False
+
+    normalized = dict(summary)
+    if str(normalized.get("status") or "") != "running":
+        return normalized, False
+
+    latest_ts = _parse_analysis_history_timestamp(normalized.get("updated_at") or normalized.get("started_at"))
+    if latest_ts is None:
+        return normalized, False
+
+    idle_ms = max(0, int((datetime.now() - latest_ts).total_seconds() * 1000))
+    if idle_ms < ANALYSIS_HISTORY_STALE_RUNNING_MS:
+        return normalized, False
+
+    stale_message = normalized.get("last_problem") or (
+        f"分析 run 已超过 {ANALYSIS_HISTORY_STALE_RUNNING_MS // 1000} 秒未写入新事件，系统已标记为异常结束。"
+    )
+    normalized["status"] = "warning"
+    normalized["last_problem"] = stale_message
+    normalized["last_message"] = stale_message
+    normalized["stale_idle_ms"] = idle_ms
+    return normalized, True
+
+
+def _normalize_analysis_history_index(username: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = data if isinstance(data, dict) else _load_analysis_history_index(username)
+    runs = payload.get("runs", []) if isinstance(payload.get("runs"), list) else []
+    changed = False
+    normalized_runs: List[Dict[str, Any]] = []
+
+    for item in runs:
+        if not isinstance(item, dict):
+            continue
+        normalized_item, item_changed = _normalize_analysis_history_run_summary(item)
+        normalized_runs.append(normalized_item)
+        changed = changed or item_changed
+
+    if changed:
+        payload = dict(payload)
+        payload["runs"] = normalized_runs
+        _save_analysis_history_index(username, payload)
+        return payload
+
+    payload = dict(payload)
+    payload["runs"] = normalized_runs
+    return payload
 
 
 def _save_analysis_history_index(username: str, data: Dict[str, Any]) -> str:
@@ -1155,6 +1267,48 @@ def _is_local_model_endpoint(base_url: str) -> bool:
     return "localhost:" in lowered or "127.0.0.1:" in lowered
 
 
+def _preferred_local_mlx_model_dir() -> str:
+    configured_mlx_dir = (os.getenv("DEEPANALYZE_MLX_MODEL_DIR", "") or "").strip()
+    if configured_mlx_dir and os.path.isdir(configured_mlx_dir):
+        return configured_mlx_dir
+
+    fp16_candidate = os.path.join(REPO_ROOT_DIR, "DeepAnalyze-8B-MLX-FP16")
+    if os.path.isdir(fp16_candidate):
+        return fp16_candidate
+
+    quantized_candidate = os.path.join(REPO_ROOT_DIR, "DeepAnalyze-8B-MLX-4bit")
+    if os.path.isdir(quantized_candidate):
+        return quantized_candidate
+
+    return configured_mlx_dir or ""
+
+
+def _upgrade_legacy_default_local_mlx_model_name(model_name: str, base_url: str) -> str:
+    text = (model_name or "").strip()
+    if not text:
+        return text
+
+    if DEFAULT_COMPUTE_BACKEND not in {"mlx", "apple", "apple_silicon"}:
+        return text
+
+    if not _is_local_model_endpoint(base_url):
+        return text
+
+    preferred_dir = _preferred_local_mlx_model_dir()
+    if not preferred_dir or not os.path.isdir(preferred_dir):
+        return text
+
+    legacy_dir = os.path.join(REPO_ROOT_DIR, "DeepAnalyze-8B-MLX-4bit")
+    legacy_names = {
+        "DeepAnalyze-8B-MLX-4bit",
+        os.path.abspath(legacy_dir),
+    }
+    if text in legacy_names:
+        return preferred_dir
+
+    return text
+
+
 def _resolve_local_mlx_model_name(model_name: str, base_url: str) -> str:
     text = (model_name or "").strip()
     if not text:
@@ -1178,6 +1332,87 @@ def _resolve_local_mlx_model_name(model_name: str, base_url: str) -> str:
         configured_name = os.path.basename(configured_mlx_dir.rstrip(os.sep))
         if configured_name == text:
             return configured_mlx_dir
+
+    return text
+
+
+def _normalize_provider_headers(raw_headers: Any) -> Dict[str, str]:
+    normalized_headers: Dict[str, str] = {}
+    if isinstance(raw_headers, dict):
+        for key, value in raw_headers.items():
+            if key is None or value is None:
+                continue
+            key_text = str(key).strip()
+            value_text = str(value).strip()
+            if key_text and value_text:
+                normalized_headers[key_text] = value_text
+    return normalized_headers
+
+
+def _fetch_served_model_entries(base_url: str, headers: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    if not _is_local_model_endpoint(base_url):
+        return []
+
+    try:
+        response = httpx.get(
+            f"{base_url}/models",
+            headers=headers or None,
+            timeout=5.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return []
+
+    if not isinstance(payload, dict):
+        return []
+
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        return []
+
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _resolve_local_served_model_name(model_name: str, base_url: str, headers: Optional[Dict[str, str]] = None) -> str:
+    text = (model_name or "").strip()
+    if not text or not _is_local_model_endpoint(base_url):
+        return text
+
+    served_models = _fetch_served_model_entries(base_url, headers=headers)
+    if not served_models:
+        return text
+
+    served_ids: List[str] = []
+    requested_abs_path = os.path.abspath(text) if os.path.isabs(text) else ""
+    requested_basename = os.path.basename((requested_abs_path or text).rstrip(os.sep)) if (requested_abs_path or text) else ""
+
+    for item in served_models:
+        served_id = str(item.get("id") or item.get("name") or "").strip()
+        if not served_id:
+            continue
+        served_ids.append(served_id)
+        if text == served_id:
+            return served_id
+
+        served_root = str(item.get("root") or "").strip()
+        if served_root:
+            served_root_abs = os.path.abspath(served_root)
+            served_root_basename = os.path.basename(served_root_abs.rstrip(os.sep))
+            if requested_abs_path and requested_abs_path == served_root_abs:
+                return served_id
+            if requested_basename and requested_basename in {served_root_basename, served_id}:
+                return served_id
+
+    deduped_ids: List[str] = []
+    seen_ids = set()
+    for served_id in served_ids:
+        if served_id not in seen_ids:
+            seen_ids.add(served_id)
+            deduped_ids.append(served_id)
+
+    if len(deduped_ids) == 1 and (os.path.isabs(text) or os.sep in text):
+        return deduped_ids[0]
 
     return text
 
@@ -1208,20 +1443,11 @@ def normalize_model_provider_config(payload: Optional[Dict[str, Any]]) -> Dict[s
     merged = deep_merge_dict(DEFAULT_MODEL_PROVIDER_CONFIG, incoming)
     merged["providerType"] = (merged.get("providerType") or DEFAULT_PROVIDER_TYPE).strip() or DEFAULT_PROVIDER_TYPE
     merged["baseUrl"] = normalize_base_url(merged.get("baseUrl") or API_BASE)
-    raw_model = (merged.get("model") or MODEL_PATH).strip() or MODEL_PATH
-    merged["model"] = _resolve_local_mlx_model_name(raw_model, merged["baseUrl"])
+    merged["headers"] = _normalize_provider_headers(merged.get("headers") or {})
+    raw_model = _upgrade_legacy_default_local_mlx_model_name((merged.get("model") or MODEL_PATH).strip() or MODEL_PATH, merged["baseUrl"])
+    resolved_model = _resolve_local_mlx_model_name(raw_model, merged["baseUrl"])
+    merged["model"] = _resolve_local_served_model_name(resolved_model, merged["baseUrl"], merged["headers"])
     merged["apiKey"] = (merged.get("apiKey") or "").strip()
-    raw_headers = merged.get("headers") or {}
-    normalized_headers: Dict[str, str] = {}
-    if isinstance(raw_headers, dict):
-        for key, value in raw_headers.items():
-            if key is None or value is None:
-                continue
-            key_text = str(key).strip()
-            value_text = str(value).strip()
-            if key_text and value_text:
-                normalized_headers[key_text] = value_text
-    merged["headers"] = normalized_headers
     return merged
 
 
@@ -1269,6 +1495,34 @@ def _build_streaming_answer_error(message: str) -> str:
         "1. 检查模型服务是否正常（例如本地 vLLM 端口 8000）。\n"
         "2. 若使用第三方模型，请检查 baseUrl、模型名与 API Key。\n"
         "3. 修复后重新发送同一问题继续分析。\n"
+        "</Answer>\n"
+    )
+
+
+def _build_missing_conclusion_answer(reason: str, analysis_language: str = "zh-CN") -> str:
+    safe_reason = (str(reason or "分析过程未能产出完整结论").strip() or "分析过程未能产出完整结论")[:1200]
+    if normalize_analysis_language(analysis_language) == "en":
+        return (
+            "<Answer>\n"
+            "The analysis did not complete with a valid final conclusion, so the server generated this fallback conclusion block.\n"
+            f"Why it could not be completed as requested: {safe_reason}\n"
+            "Current conclusion: the task is not deliverable in its requested form under the current evidence, execution state, or runtime constraints.\n"
+            "Recommendation:\n"
+            "1. Narrow the objective or specify the key metric, table, or time range.\n"
+            "2. Check model/provider availability and database query feasibility.\n"
+            "3. Retry after the blocking issue is resolved.\n"
+            "</Answer>\n"
+        )
+
+    return (
+        "<Answer>\n"
+        "本次分析未能自然产出完整结论，当前结论由服务端兜底生成。\n"
+        f"无法按原要求完整完成的原因：{safe_reason}\n"
+        "当前可得结论：在现有证据、执行状态或运行条件下，本次任务暂时无法按原始要求完整交付。\n"
+        "建议：\n"
+        "1. 缩小分析目标，明确关键指标、表或时间范围。\n"
+        "2. 检查模型/provider 可用性与数据库查询可执行性。\n"
+        "3. 排除阻塞原因后重新发起分析。\n"
         "</Answer>\n"
     )
 
@@ -1343,6 +1597,40 @@ def _create_chat_completion_with_retry(llm_client: openai.OpenAI, request_kwargs
             time_module.sleep(delay)
 
     raise RuntimeError("LLM request failed after retries")
+
+
+def _normalize_messages_for_llm_request(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized_messages: List[Dict[str, Any]] = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role", "") or "").strip().lower()
+        content = message.get("content", "")
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
+
+        if role == "execute":
+            normalized_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "以下是上一轮代码或 SQL 的真实执行结果。"
+                        "请基于这些结果继续分析，不要把它当成新的用户需求，也不要重复执行完全相同的代码。"
+                        "如果现有证据已经足够，请直接给出结论。\n\n"
+                        f"<Execute>\n```\n{content}\n```\n</Execute>"
+                    ),
+                }
+            )
+            continue
+
+        normalized_messages.append(
+            {
+                "role": role or "user",
+                "content": content,
+            }
+        )
+
+    return normalized_messages
 
 
 def fetch_model_names(model_provider: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -2875,6 +3163,7 @@ def get_system_prompt_with_fonts() -> str:
 - **避免重复**：禁止在分析过程中反复生成阶段性报告，确保用户在文件列表中只看到最终的、高质量的分析成果。
 - **上下文积累（极重要）**：在整个分析过程中，你必须在内存中持续积累所有已完成的分析成果、关键发现、数据统计结果和图表文件路径。每完成一个分析维度后，必须在 <Answer> 标签中完整记录该维度的**全部详细内容**（包括具体数据数值、百分比、排名、图表引用路径等），而非仅写标题或占位符。
 - **禁止空壳报告（极重要）**：生成最终报告时，报告内容**必须包含完整的分析结论、具体数据、推理过程和图表引用**。严禁生成仅包含报告结构框架而缺少实质内容的报告（如"[详细方法描述...]"、"[详细结果描述...]"这类占位文本）。如果某个章节的分析尚未完成，应明确标注"此部分尚未完成分析"而非使用占位符。
+- **结论强制原则（极重要）**：任何分析任务都必须以明确结论结束。即使用户需求暂时无法实现、条件不足、证据不足、目标不合理或执行失败，也必须在 `<Answer>` 中明确写出无法完整完成的原因、当前能确认的边界结论以及下一步建议。严禁无结论结束。
 - **报告不得包含水印、版权声明或数据安全说明**：生成的报告中不需要添加任何水印、版权声明、免责声明或数据安全说明文字。报告不需要以压缩包方式打包输出。
 
 **============================================
@@ -3553,7 +3842,8 @@ def get_compact_system_prompt_with_fonts() -> str:
         "【输出协议】\n"
         "1) 按需使用 <Analyze>/<Understand>/<Code>/<Execute>/<Answer>/<TaskTree> 标签。\n"
         "2) 每轮应先说明思路，再执行可运行代码，再给结论。\n"
-        "3) 代码必须包含必要 import、异常处理，并打印关键中间结果。\n\n"
+        "3) 无论任务成功、证据不足、需求不合理、条件缺失或执行失败，最终都必须输出一个 <Answer> 结论块，说明可得结论或明确写出无法完成的理由。\n"
+        "4) 代码必须包含必要 import、异常处理，并打印关键中间结果。\n\n"
         "【数据分析硬约束】\n"
         "1) 首次代码必须先做数据探测：数据规模、字段名、字段类型、样例值。\n"
         "2) 仅可使用真实字段；字段缺失时要明确说明并给替代分析方案。\n"
@@ -3562,7 +3852,8 @@ def get_compact_system_prompt_with_fonts() -> str:
         "【报告交付】\n"
         "1) 结果要体现 数据事实→推理→结论。\n"
         "2) 最终报告按用户勾选格式交付（PDF/DOCX/PPTX）。\n"
-        "3) 禁止空壳报告；若某章节证据不足必须显式标注。\n\n"
+        "3) 禁止空壳报告；若某章节证据不足必须显式标注。\n"
+        "4) 即使本轮分析无法完整交付，也必须在最终 <Answer> 中明确写出失败或不可实现的理由。\n\n"
         "【数据库知识使用】\n"
         "1) 优先使用数据库知识库检索上下文，不要重复粘贴整库结构。\n"
         "2) 若用户要求全库视角，先给摘要，再分层展开关键表字段。\n\n"
@@ -4068,6 +4359,25 @@ def bot_stream(
     # 创建 converted 子文件夹用于存放 UTF-8 转换后的文件
     CONVERTED_DIR = os.path.join(WORKSPACE_DIR, "converted")
     os.makedirs(CONVERTED_DIR, exist_ok=True)
+
+    workspace_root = Path(WORKSPACE_DIR)
+
+    def collect_workspace_file_state():
+        state = {}
+        excluded_parts = {".lib", "__pycache__"}
+        for candidate in workspace_root.rglob("*"):
+            try:
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                relative_path = candidate.relative_to(workspace_root)
+                if any(part in excluded_parts for part in relative_path.parts):
+                    continue
+                candidate_stat = candidate.stat()
+            except OSError:
+                continue
+            state[relative_path] = (candidate_stat.st_size, candidate_stat.st_mtime_ns)
+        return state
+
     history_recorder.log(
         stage="prompt",
         event="prompt_prepared",
@@ -4128,6 +4438,7 @@ def bot_stream(
     exe_output = None
     llm_client, llm_model, runtime_provider = get_runtime_llm(model_provider)
     round_count = 0
+    consecutive_empty_llm_rounds = 0
     history_final_status = "completed"
     history_final_message = "analysis session finished"
     while not finished and round_count < MAX_AGENT_ROUNDS:
@@ -4163,9 +4474,10 @@ def bot_stream(
                 },
             )
 
+        request_messages = _normalize_messages_for_llm_request(messages)
         request_kwargs: Dict[str, Any] = {
             "model": llm_model,
-            "messages": messages,
+            "messages": request_messages,
             "temperature": effective_temperature,
             "stream": True,
             "stop": [
@@ -4193,7 +4505,7 @@ def bot_stream(
                 "round": round_count,
                 "provider": runtime_provider,
                 "model": llm_model,
-                "message_count": len(messages),
+                "message_count": len(request_messages),
                 "temperature": effective_temperature,
                 "has_extra_body": "extra_body" in request_kwargs,
             },
@@ -4229,6 +4541,8 @@ def bot_stream(
                 last_finish_reason = choice.finish_reason
                 if choice.delta.content is not None:
                     delta = choice.delta.content
+                    if delta == "":
+                        continue
                     cur_res += delta
                     assistant_reply += delta
                     stream_chunk_count += 1
@@ -4259,6 +4573,9 @@ def bot_stream(
                 messages.append({"role": "assistant", "content": cur_res})
                 finished = True
                 break
+        llm_has_tasktree = bool(re.search(r"<tasktree>", cur_res, re.IGNORECASE))
+        llm_has_code = bool(re.search(r"<code>|```", cur_res, re.IGNORECASE))
+        llm_has_visible_output = bool(cur_res.strip())
         history_recorder.log(
             stage="llm",
             event="llm_response_completed",
@@ -4270,10 +4587,54 @@ def bot_stream(
                 "chunk_count": stream_chunk_count,
                 "char_count": stream_char_count,
                 "saw_final_answer": saw_final_answer_this_round,
-                "has_tasktree": bool(re.search(r"<tasktree>", cur_res, re.IGNORECASE)),
-                "has_code": bool(re.search(r"<code>|```", cur_res, re.IGNORECASE)),
+                "has_tasktree": llm_has_tasktree,
+                "has_code": llm_has_code,
+                "has_visible_output": llm_has_visible_output,
             },
         )
+
+        empty_llm_round = (
+            last_finish_reason == "stop"
+            and not saw_final_answer_this_round
+            and not llm_has_tasktree
+            and not llm_has_code
+            and not llm_has_visible_output
+        )
+        if empty_llm_round:
+            consecutive_empty_llm_rounds += 1
+            abort_due_to_empty_rounds = consecutive_empty_llm_rounds >= MAX_EMPTY_LLM_ROUNDS
+            history_recorder.log(
+                stage="llm",
+                event="llm_empty_round_detected",
+                status="warning" if abort_due_to_empty_rounds else "running",
+                message=(
+                    f"analysis stopped after {consecutive_empty_llm_rounds} consecutive empty llm rounds"
+                    if abort_due_to_empty_rounds
+                    else f"round {round_count} produced no visible llm output"
+                ),
+                details={
+                    "round": round_count,
+                    "consecutive_empty_rounds": consecutive_empty_llm_rounds,
+                    "finish_reason": last_finish_reason,
+                    "chunk_count": stream_chunk_count,
+                },
+            )
+            if abort_due_to_empty_rounds:
+                history_final_status = "warning"
+                history_final_message = f"analysis stopped after {consecutive_empty_llm_rounds} consecutive empty llm rounds"
+                empty_round_block = (
+                    "<Answer>\n"
+                    "模型连续返回空响应，当前分析已自动停止，避免继续空转。\n"
+                    "建议切换模型或 provider、缩小分析范围，或先执行更小粒度的 SQL/数据探查后再继续。\n"
+                    "</Answer>\n"
+                )
+                assistant_reply += empty_round_block
+                yield empty_round_block
+                finished = True
+                continue
+        else:
+            consecutive_empty_llm_rounds = 0
+
         if finished:
             # 已因 </Answer> 或 </TaskTree> 结束，跳过后续代码执行逻辑
             continue
@@ -4313,182 +4674,185 @@ def bot_stream(
         should_execute_code = (has_code_open and has_code_close) or ((not has_code_open) and has_fenced_code)
 
         if should_execute_code:
-            messages.append({"role": "assistant", "content": cur_res})
-            executable_block = _extract_executable_block(cur_res)
-            code_str = executable_block.get("code") or None
-            code_language = executable_block.get("language") or "python"
-            execution_stage = "sql" if code_language == "sql" else "r" if code_language == "r" else "code"
-            execution_label = "SQL" if code_language == "sql" else "R" if code_language == "r" else "code"
+            executable_blocks = _extract_executable_blocks(cur_res)
+            if executable_blocks:
+                messages.append({"role": "assistant", "content": cur_res})
+                total_executable_blocks = len(executable_blocks)
+                for block_index, executable_block in enumerate(executable_blocks, start=1):
+                    code_str = executable_block.get("code") or None
+                    code_language = executable_block.get("language") or "python"
+                    execution_stage = "sql" if code_language == "sql" else "r" if code_language == "r" else "code"
+                    execution_label = "SQL" if code_language == "sql" else "R" if code_language == "r" else "code"
 
-            if code_str:
-                execution_started_ts = time_module.time()
-                if code_language == "python":
-                    code_str = Chinese_matplot_str + "\n" + code_str
-                    # 自动将用户提及的原始文件名映射为 converted/ 目录下的实际文件
-                    code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
-                elif code_language == "r":
-                    code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
-                history_recorder.log(
-                    stage=execution_stage,
-                    event=f"{execution_stage}_execution_started",
-                    status="running",
-                    message=f"{execution_label} execution started for round {round_count}",
-                    details={
-                        "round": round_count,
-                        "language": code_language,
-                        "raw_language": executable_block.get("raw_language") or "",
-                        "code_chars": len(code_str),
-                        "code_preview": _truncate_history_text(code_str, 700),
-                    },
-                )
-                # 执行前快照（路径 -> (size, mtime)）
-                try:
-                    before_state = {
-                        p.resolve(): (p.stat().st_size, p.stat().st_mtime_ns)
-                        for p in Path(WORKSPACE_DIR).rglob("*")
-                        if p.is_file()
-                    }
-                except Exception:
-                    before_state = {}
-                # 在固定工作区按语言执行
-                if code_language == "sql":
-                    sql_source = active_sources[0] if active_sources else None
-                    exe_output = execute_sql_safe(code_str, WORKSPACE_DIR, sql_source)
-                elif code_language == "r":
-                    exe_output = execute_r_code_safe(code_str, WORKSPACE_DIR)
-                else:
-                    exe_output = execute_code_safe(code_str, WORKSPACE_DIR)
-                error_info: Dict[str, Any] = {}
+                    if not code_str:
+                        continue
 
-                # ========== 自动检测并记录错误到雨途斩棘录 ==========
-                try:
-                    error_info = detect_and_record_error(exe_output, code_str, WORKSPACE_DIR)
-                    if error_info.get("has_error"):
-                        print(f"[雨途斩棘录] 检测到错误: {error_info.get('error_type')}")
-                        if error_info.get("recorded"):
-                            print(f"[雨途斩棘录] 已自动记录到知识库")
-                        elif error_info.get("similar_found"):
-                            print(f"[雨途斩棘录] 发现相似错误记录，跳过重复记录")
-                except Exception as e:
-                    print(f"[雨途斩棘录] 错误检测失败: {e}")
-                # ========== 错误检测结束 ==========
-
-                # 执行后快照
-                try:
-                    after_state = {
-                        p.resolve(): (p.stat().st_size, p.stat().st_mtime_ns)
-                        for p in Path(WORKSPACE_DIR).rglob("*")
-                        if p.is_file()
-                    }
-                except Exception:
-                    after_state = {}
-                # 计算新增与修改
-                added_paths = [p for p in after_state.keys() if p not in before_state]
-                modified_paths = [
-                    p
-                    for p in after_state.keys()
-                    if p in before_state and after_state[p] != before_state[p]
-                ]
-
-                # 将新增和修改的文件移动到 generated 文件夹
-                artifact_paths = []
-                for p in added_paths:
+                    execution_started_ts = time_module.time()
+                    if code_language == "python":
+                        code_str = Chinese_matplot_str + "\n" + code_str
+                        # 自动将用户提及的原始文件名映射为 converted/ 目录下的实际文件
+                        code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
+                    elif code_language == "r":
+                        code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
+                    history_recorder.log(
+                        stage=execution_stage,
+                        event=f"{execution_stage}_execution_started",
+                        status="running",
+                        message=f"{execution_label} execution started for round {round_count} block {block_index}/{total_executable_blocks}",
+                        details={
+                            "round": round_count,
+                            "language": code_language,
+                            "raw_language": executable_block.get("raw_language") or "",
+                            "code_chars": len(code_str),
+                            "code_preview": _truncate_history_text(code_str, 700),
+                            "block_index": block_index,
+                            "block_count": total_executable_blocks,
+                        },
+                    )
+                    # 执行前快照（路径 -> (size, mtime)）
                     try:
-                        # 如果文件不在 generated 文件夹中，移动它
-                        if not str(p).startswith(GENERATED_DIR):
-                            dest_path = Path(GENERATED_DIR) / p.name
-                            dest_path = uniquify_path(dest_path)
-                            shutil.copy2(str(p), str(dest_path))
-                            artifact_paths.append(dest_path.resolve())
-                        else:
-                            artifact_paths.append(p)
-                    except Exception as e:
-                        print(f"Error moving file {p}: {e}")
-                        artifact_paths.append(p)
+                        before_state = collect_workspace_file_state()
+                    except Exception:
+                        before_state = {}
+                    # 在固定工作区按语言执行
+                    if code_language == "sql":
+                        sql_source = active_sources[0] if active_sources else None
+                        exe_output = execute_sql_safe(code_str, WORKSPACE_DIR, sql_source)
+                    elif code_language == "r":
+                        exe_output = execute_r_code_safe(code_str, WORKSPACE_DIR)
+                    else:
+                        exe_output = execute_code_safe(code_str, WORKSPACE_DIR)
+                    error_info: Dict[str, Any] = {}
 
-                # 为修改的文件生成副本并移动到 generated 文件夹
-                for p in modified_paths:
+                    # ========== 自动检测并记录错误到雨途斩棘录 ==========
                     try:
-                        dest_name = f"{Path(p).stem}_modified{Path(p).suffix}"
-                        dest_path = Path(GENERATED_DIR) / dest_name
-                        dest_path = uniquify_path(dest_path)
-                        shutil.copy2(p, dest_path)
-                        artifact_paths.append(dest_path.resolve())
+                        error_info = detect_and_record_error(exe_output, code_str, WORKSPACE_DIR)
+                        if error_info.get("has_error"):
+                            print(f"[雨途斩棘录] 检测到错误: {error_info.get('error_type')}")
+                            if error_info.get("recorded"):
+                                print(f"[雨途斩棘录] 已自动记录到知识库")
+                            elif error_info.get("similar_found"):
+                                print(f"[雨途斩棘录] 发现相似错误记录，跳过重复记录")
                     except Exception as e:
-                        print(f"Error copying modified file {p}: {e}")
+                        print(f"[雨途斩棘录] 错误检测失败: {e}")
+                    # ========== 错误检测结束 ==========
 
-                # 旧：Execute 内部放控制台输出；新：追加 <File> 段落给前端渲染卡片
-                exe_str = f"\n<Execute>\n```\n{exe_output}\n```\n</Execute>\n"
-                file_block = ""
-                if artifact_paths:
-                    lines = ["<File>"]
-                    for p in artifact_paths:
-                        try:
-                            rel = (
-                                Path(p)
-                                .relative_to(Path(WORKSPACE_DIR).resolve())
-                                .as_posix()
-                            )
-                        except Exception:
-                            rel = Path(p).name
-                        # 在相对路径前加上 username/session_id 前缀
-                        url = build_download_url(f"{username}/{session_id}/{rel}")
-                        name = Path(p).name
-                        lines.append(f"- [{name}]({url})")
-                        if Path(p).suffix.lower() in [
-                            ".png",
-                            ".jpg",
-                            ".jpeg",
-                            ".gif",
-                            ".webp",
-                            ".svg",
-                        ]:
-                            lines.append(f"![{name}]({url})")
-                    lines.append("</File>")
-                    file_block = "\n" + "\n".join(lines) + "\n"
-                full_execution_block = exe_str + file_block
-                history_recorder.log(
-                    stage=execution_stage,
-                    event=f"{execution_stage}_execution_completed",
-                    status="warning" if error_info.get("has_error") else "running",
-                    message=(
-                        f"{execution_label} execution finished with detected error: {error_info.get('error_type', 'unknown')}"
-                        if error_info.get("has_error")
-                        else f"{execution_label} execution finished for round {round_count}"
-                    ),
-                    details={
-                        "round": round_count,
-                        "language": code_language,
-                        "duration_ms": int((time_module.time() - execution_started_ts) * 1000),
-                        "output_chars": len(exe_output or ""),
-                        "has_error": bool(error_info.get("has_error")),
-                        "error_type": str(error_info.get("error_type", "") or ""),
-                        "artifact_count": len(artifact_paths),
-                        "artifacts": [Path(path).name for path in artifact_paths[:20]],
-                        "added_file_count": len(added_paths),
-                        "modified_file_count": len(modified_paths),
-                    },
-                )
-                assistant_reply += full_execution_block
-                yield full_execution_block
-                messages.append({"role": "execute", "content": f"{exe_output}"})
-                # 刷新工作区快照（路径集合）
-                current_files = set(
-                    [
-                        os.path.join(WORKSPACE_DIR, f)
-                        for f in os.listdir(WORKSPACE_DIR)
-                        if os.path.isfile(os.path.join(WORKSPACE_DIR, f))
+                    # 执行后快照
+                    try:
+                        after_state = collect_workspace_file_state()
+                    except Exception:
+                        after_state = {}
+                    # 计算新增与修改
+                    added_paths = [p for p in after_state.keys() if p not in before_state]
+                    modified_paths = [
+                        p
+                        for p in after_state.keys()
+                        if p in before_state and after_state[p] != before_state[p]
                     ]
-                )
-                new_files = list(current_files - initial_workspace)
-                if new_files:
-                    workspace.extend(new_files)
-                    initial_workspace.update(new_files)
+
+                    # 将新增和修改的文件移动到 generated 文件夹
+                    artifact_paths = []
+                    for relative_path in added_paths:
+                        source_path = workspace_root / relative_path
+                        try:
+                            # 如果文件不在 generated 文件夹中，移动它
+                            if not relative_path.parts or relative_path.parts[0] != "generated":
+                                dest_path = Path(GENERATED_DIR) / source_path.name
+                                dest_path = uniquify_path(dest_path)
+                                shutil.copy2(str(source_path), str(dest_path))
+                                artifact_paths.append(dest_path.resolve())
+                            else:
+                                artifact_paths.append(source_path.resolve())
+                        except Exception as e:
+                            print(f"Error moving file {source_path}: {e}")
+                            artifact_paths.append(source_path.resolve())
+
+                    # 为修改的文件生成副本并移动到 generated 文件夹
+                    for relative_path in modified_paths:
+                        source_path = workspace_root / relative_path
+                        try:
+                            dest_name = f"{source_path.stem}_modified{source_path.suffix}"
+                            dest_path = Path(GENERATED_DIR) / dest_name
+                            dest_path = uniquify_path(dest_path)
+                            shutil.copy2(source_path, dest_path)
+                            artifact_paths.append(dest_path.resolve())
+                        except Exception as e:
+                            print(f"Error copying modified file {source_path}: {e}")
+
+                    # 旧：Execute 内部放控制台输出；新：追加 <File> 段落给前端渲染卡片
+                    exe_str = f"\n<Execute>\n```\n{exe_output}\n```\n</Execute>\n"
+                    file_block = ""
+                    if artifact_paths:
+                        lines = ["<File>"]
+                        for p in artifact_paths:
+                            try:
+                                rel = (
+                                    Path(p)
+                                    .relative_to(Path(WORKSPACE_DIR).resolve())
+                                    .as_posix()
+                                )
+                            except Exception:
+                                rel = Path(p).name
+                            # 在相对路径前加上 username/session_id 前缀
+                            url = build_download_url(f"{username}/{session_id}/{rel}")
+                            name = Path(p).name
+                            lines.append(f"- [{name}]({url})")
+                            if Path(p).suffix.lower() in [
+                                ".png",
+                                ".jpg",
+                                ".jpeg",
+                                ".gif",
+                                ".webp",
+                                ".svg",
+                            ]:
+                                lines.append(f"![{name}]({url})")
+                        lines.append("</File>")
+                        file_block = "\n" + "\n".join(lines) + "\n"
+                    full_execution_block = exe_str + file_block
+                    history_recorder.log(
+                        stage=execution_stage,
+                        event=f"{execution_stage}_execution_completed",
+                        status="warning" if error_info.get("has_error") else "running",
+                        message=(
+                            f"{execution_label} execution finished with detected error: {error_info.get('error_type', 'unknown')}"
+                            if error_info.get("has_error")
+                            else f"{execution_label} execution finished for round {round_count} block {block_index}/{total_executable_blocks}"
+                        ),
+                        details={
+                            "round": round_count,
+                            "language": code_language,
+                            "duration_ms": int((time_module.time() - execution_started_ts) * 1000),
+                            "output_chars": len(exe_output or ""),
+                            "has_error": bool(error_info.get("has_error")),
+                            "error_type": str(error_info.get("error_type", "") or ""),
+                            "artifact_count": len(artifact_paths),
+                            "artifacts": [Path(path).name for path in artifact_paths[:20]],
+                            "added_file_count": len(added_paths),
+                            "modified_file_count": len(modified_paths),
+                            "block_index": block_index,
+                            "block_count": total_executable_blocks,
+                        },
+                    )
+                    assistant_reply += full_execution_block
+                    yield full_execution_block
+                    messages.append({"role": "execute", "content": f"{exe_output}"})
+                    # 刷新工作区快照（路径集合）
+                    current_files = set(
+                        [
+                            os.path.join(WORKSPACE_DIR, f)
+                            for f in os.listdir(WORKSPACE_DIR)
+                            if os.path.isfile(os.path.join(WORKSPACE_DIR, f))
+                        ]
+                    )
+                    new_files = list(current_files - initial_workspace)
+                    if new_files:
+                        workspace.extend(new_files)
+                        initial_workspace.update(new_files)
 
                 if saw_final_answer_this_round:
                     finished = True
 
-            continue
+                continue
 
         if saw_final_answer_this_round:
             if cur_res.strip():
@@ -4660,9 +5024,15 @@ def bot_stream(
         print(f"Auto report fallback failed: {auto_report_error}")
 
     final_has_answer = re.search(r"</answer>", assistant_reply, re.IGNORECASE) is not None
-    if history_final_status == "completed" and not final_has_answer:
-        history_final_status = "warning"
-        history_final_message = "analysis finished without a complete </Answer> block"
+    if not final_has_answer:
+        fallback_reason = history_final_message or "analysis finished without a complete </Answer> block"
+        fallback_answer_block = _build_missing_conclusion_answer(fallback_reason, analysis_language)
+        assistant_reply += fallback_answer_block
+        yield fallback_answer_block
+        final_has_answer = True
+        if history_final_status == "completed":
+            history_final_status = "warning"
+            history_final_message = "analysis finished without a complete </Answer> block; fallback conclusion emitted"
     history_recorder.finalize(
         status=history_final_status,
         message=history_final_message,
@@ -7797,7 +8167,7 @@ async def save_analysis_history_settings(body: dict = Body(...)):
 @app.get("/api/analysis/history")
 async def list_analysis_history_runs(username: str = Query("default"), limit: int = Query(30, ge=1, le=200)):
     settings = _load_analysis_history_settings(username)
-    data = _load_analysis_history_index(username)
+    data = _normalize_analysis_history_index(username)
     runs = [item for item in data.get("runs", []) if isinstance(item, dict)][:limit]
     stats = {
         "total": len(data.get("runs", [])),
@@ -7810,7 +8180,7 @@ async def list_analysis_history_runs(username: str = Query("default"), limit: in
 
 @app.get("/api/analysis/history/{run_id}")
 async def get_analysis_history_run(run_id: str, username: str = Query("default")):
-    data = _load_analysis_history_index(username)
+    data = _normalize_analysis_history_index(username)
     run_summary = next(
         (item for item in data.get("runs", []) if isinstance(item, dict) and item.get("run_id") == run_id),
         None,

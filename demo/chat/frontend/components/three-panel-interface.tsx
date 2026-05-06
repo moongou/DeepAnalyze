@@ -6208,44 +6208,7 @@ ${analysisContent}
               {/* Lower: Chat Input */}
               <ResizablePanel defaultSize={60} minSize={20} className="min-h-0">
                 <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
-                  <div className="py-2 px-4 flex flex-col gap-1 border-b border-gray-100 dark:border-gray-900 bg-gray-50/50 dark:bg-gray-900/30">
-                    <div className="flex justify-center items-center gap-3">
-                      {/* 分析模式 - 左侧 */}
-                      <div className="flex items-center gap-1">
-                        <Select value={analysisMode} onValueChange={(val) => {
-                          setAnalysisMode(val);
-                          if (typeof window !== "undefined") {
-                            localStorage.setItem("analysisMode", val);
-                          }
-                        }}>
-                          <SelectTrigger className="h-7 w-[90px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
-                            <SelectValue placeholder="模式" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="full_agent" className="text-xs">全程代理</SelectItem>
-                            <SelectItem value="interactive" className="text-xs">交互模式</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <span className="text-blue-600 dark:text-blue-400 font-bold text-base">分析要求</span>
-                      {/* 分析策略 - 右侧 */}
-                      <div className="flex items-center gap-1">
-                        <Select value={analysisStrategy} onValueChange={(val) => {
-                          setAnalysisStrategy(val);
-                        }}>
-                          <SelectTrigger className="h-7 w-[90px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
-                            <SelectValue placeholder="策略" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
-                            <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
-                            <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="p-4 flex-1 flex flex-col min-h-0 pt-2">
+                  <div className="p-4 flex-1 flex flex-col min-h-0">
                     <div className="flex gap-3 items-start flex-1">
                       <input
                         ref={fileInputRef}
@@ -6273,7 +6236,7 @@ ${analysisContent}
                         />
                       </div>
                     </div>
-                    <div className="flex justify-between items-center mt-3">
+                    <div className="mt-3 flex flex-wrap items-end justify-between gap-3">
                       <div className="flex-1 overflow-x-auto scrollbar-none mr-2">
                         <div className="flex gap-1 items-center min-w-max">
                           {historyInputs.length > 0 && (
@@ -6294,7 +6257,40 @@ ${analysisContent}
                           )}
                         </div>
                       </div>
-                      <div className="flex justify-end gap-2 shrink-0">
+                      <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+                        <span className="text-[11px] font-semibold text-blue-600 dark:text-blue-400">分析要求</span>
+                        <div className="flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2 py-1 dark:border-gray-800 dark:bg-gray-900/40">
+                          <span className="text-[10px] text-gray-500 dark:text-gray-400">交互模式</span>
+                          <Select value={analysisMode} onValueChange={(val) => {
+                            setAnalysisMode(val);
+                            if (typeof window !== "undefined") {
+                              localStorage.setItem("analysisMode", val);
+                            }
+                          }}>
+                            <SelectTrigger className="h-7 w-[94px] border-0 bg-transparent px-1 text-[10px] shadow-none focus:ring-0 dark:bg-transparent">
+                              <SelectValue placeholder="模式" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="full_agent" className="text-xs">全程代理</SelectItem>
+                              <SelectItem value="interactive" className="text-xs">交互模式</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="flex items-center gap-1 rounded-full border border-gray-200 bg-gray-50 px-2 py-1 dark:border-gray-800 dark:bg-gray-900/40">
+                          <span className="text-[10px] text-gray-500 dark:text-gray-400">聚焦范围</span>
+                          <Select value={analysisStrategy} onValueChange={(val) => {
+                            setAnalysisStrategy(val);
+                          }}>
+                            <SelectTrigger className="h-7 w-[94px] border-0 bg-transparent px-1 text-[10px] shadow-none focus:ring-0 dark:bg-transparent">
+                              <SelectValue placeholder="策略" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
+                              <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
+                              <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
                         <AlertDialog>
                           <AlertDialogTrigger asChild>
                             <Button
