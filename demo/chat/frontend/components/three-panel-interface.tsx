@@ -66,7 +66,6 @@ import {
   PanelLeftOpen,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
-import { Tree, NodeApi } from "react-arborist";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { useDatabase, normalizeDbType as normalizeDbTypeForRequest, getDefaultPort as getDefaultPortForDbType } from "@/hooks/useDatabase";
@@ -76,8 +75,7 @@ import { useWorkspace } from "@/hooks/useWorkspace";
 import { AgentIntroDialog } from "@/components/dialogs/AgentIntroDialog";
 import { SideGuidanceDialog } from "@/components/dialogs/SideGuidanceDialog";
 import { TaskTreeDialog, type TaskTreeNode, parseTaskTreeContent } from "@/components/dialogs/TaskTreeDialog";
-// DataDictionaryDialog removed - now using knowledge base mode instead
-// import { DataDictionaryDialog, type DataDictionaryItem, parseDataDictionaryContent } from "@/components/dialogs/DataDictionaryDialog";
+import { parseDataDictionaryContent } from "@/components/dialogs/DataDictionaryDialog";
 import { ProjectSaveDialog } from "@/components/dialogs/ProjectSaveDialog";
 import { ProjectManagerDialog } from "@/components/dialogs/ProjectManagerDialog";
 import { BackupRestoreDialog } from "@/components/dialogs/BackupRestoreDialog";
@@ -193,6 +191,122 @@ type WorkspaceNode = {
   children?: WorkspaceNode[];
   is_generated?: boolean; // 标识是否为代码生成的文件或文件夹
   is_converted?: boolean; // 标识是否为 UTF-8 编码转换后的文件
+};
+
+type OutputCategoryId = "reports" | "charts" | "data" | "other";
+
+type WorkspaceOutputFile = WorkspaceFile & {
+  path: string;
+  category: OutputCategoryId;
+  isGenerated: boolean;
+};
+
+const OUTPUT_CATEGORY_ORDER: OutputCategoryId[] = [
+  "reports",
+  "charts",
+  "data",
+  "other",
+];
+
+const OUTPUT_REPORT_EXTENSIONS = new Set([
+  "pdf",
+  "doc",
+  "docx",
+  "ppt",
+  "pptx",
+]);
+
+const OUTPUT_CHART_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "svg",
+  "webp",
+]);
+
+const OUTPUT_DATA_EXTENSIONS = new Set([
+  "csv",
+  "tsv",
+  "xls",
+  "xlsx",
+  "json",
+  "jsonl",
+  "parquet",
+  "feather",
+  "orc",
+  "db",
+  "sqlite",
+]);
+
+const OUTPUT_CATEGORY_META = {
+  reports: {
+    label: "分析报告",
+    hint: "PDF / Word / PPT",
+    empty: "当前还没有分析报告文件。",
+    icon: FileText,
+    tone: "border-amber-300/70 bg-amber-50/90 text-amber-700 shadow-[0_12px_24px_rgba(245,158,11,0.14)] dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100",
+    accent: "text-amber-600 dark:text-amber-300",
+  },
+  charts: {
+    label: "图表图像",
+    hint: "PNG / SVG / JPG",
+    empty: "当前还没有图表图像输出。",
+    icon: ImageIcon,
+    tone: "border-cyan-300/70 bg-cyan-50/90 text-cyan-700 shadow-[0_12px_24px_rgba(6,182,212,0.14)] dark:border-cyan-500/30 dark:bg-cyan-500/10 dark:text-cyan-100",
+    accent: "text-cyan-600 dark:text-cyan-300",
+  },
+  data: {
+    label: "数据结果",
+    hint: "CSV / XLSX / JSON",
+    empty: "当前还没有数据结果文件。",
+    icon: Database,
+    tone: "border-emerald-300/70 bg-emerald-50/90 text-emerald-700 shadow-[0_12px_24px_rgba(16,185,129,0.14)] dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-100",
+    accent: "text-emerald-600 dark:text-emerald-300",
+  },
+  other: {
+    label: "其他材料",
+    hint: "MD / TXT / HTML",
+    empty: "当前还没有其他材料文件。",
+    icon: FolderOpen,
+    tone: "border-slate-300/80 bg-slate-50/95 text-slate-700 shadow-[0_12px_24px_rgba(15,23,42,0.1)] dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-100",
+    accent: "text-slate-600 dark:text-slate-300",
+  },
+} as const;
+
+const normalizeWorkspaceExtension = (name?: string, extension?: string) => {
+  const normalizedExtension = String(extension || "")
+    .replace(/^\./, "")
+    .toLowerCase();
+  if (normalizedExtension) {
+    return normalizedExtension;
+  }
+  if (!name) {
+    return "txt";
+  }
+  const lastDot = name.lastIndexOf(".");
+  return lastDot > -1 ? name.slice(lastDot + 1).toLowerCase() : "txt";
+};
+
+const getWorkspaceOutputCategory = (extension: string): OutputCategoryId => {
+  if (OUTPUT_REPORT_EXTENSIONS.has(extension)) {
+    return "reports";
+  }
+  if (OUTPUT_CHART_EXTENSIONS.has(extension)) {
+    return "charts";
+  }
+  if (OUTPUT_DATA_EXTENSIONS.has(extension)) {
+    return "data";
+  }
+  return "other";
+};
+
+const isConvertedWorkspacePath = (path: string) => {
+  const segments = String(path || "")
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => segment.toLowerCase());
+  return segments.includes("converted");
 };
 
 interface AnalysisSection {
@@ -640,7 +754,7 @@ const StreamingSectionBody = memo(
       if (type === "DataDictionary") {
         return (
           <div className="p-3 text-sm text-amber-600 dark:text-amber-400 animate-pulse">
-            正在生成待确认数据字典...
+            正在生成 AI 数据字典理解...
           </div>
         );
       }
@@ -690,11 +804,15 @@ const StreamingSectionBody = memo(
       return <div className="text-sm text-gray-500">任务树数据格式异常，请重新生成</div>;
     }
     if (type === "DataDictionary") {
+      const parsed = parseDataDictionaryContent(content);
+      const itemCount = parsed?.items.length || 0;
       return (
         <div className="text-sm text-amber-700 dark:text-amber-300">
-          <div className="mb-2 font-medium">已记录 {/* items would be here but we're not storing it anymore */} 条数据字典定义</div>
+          <div className="mb-2 font-medium">
+            {itemCount > 0 ? `AI 已记录 ${itemCount} 条数据字典理解` : "AI 已记录数据字典理解"}
+          </div>
           <div className="text-xs text-gray-500">
-            数据字典已记录到知识库。请在设置 → 数据字典中查看AI的理解、修改并保存。
+            分析过程中不再弹出确认对话框。请在设置 → 数据字典中查看、修改并保存 AI 关联理解的数据定义。
           </div>
         </div>
       );
@@ -784,9 +902,8 @@ export function ThreePanelInterface() {
     attachments, setAttachments,
     workspaceFiles, setWorkspaceFiles,
     workspaceTree, setWorkspaceTree,
-    expanded, toggleExpand,
     isUploading, setIsUploading,
-    treeContainerRef, treeSize,
+    treeContainerRef,
     suppressRefreshCount: suppressWorkspaceRefreshCount,
     suppressDuringFileRestore,
     loadFiles: loadWorkspaceFiles,
@@ -902,6 +1019,7 @@ export function ThreePanelInterface() {
   const [dataDictionaryTotal, setDataDictionaryTotal] = useState(0);
   const [isLoadingDataDictionary, setIsLoadingDataDictionary] = useState(false);
   const [isDeletingDataDictionary, setIsDeletingDataDictionary] = useState(false);
+  const [isImportingDataDictionary, setIsImportingDataDictionary] = useState(false);
   const [runtimeAnalysisRun, setRuntimeAnalysisRun] = useState<AnalysisHistoryRunSummary | null>(null);
   const [runtimeAnalysisEvents, setRuntimeAnalysisEvents] = useState<AnalysisHistoryEvent[]>([]);
   const [isLoadingRuntimeAnalysisTrace, setIsLoadingRuntimeAnalysisTrace] = useState(false);
@@ -987,9 +1105,6 @@ export function ThreePanelInterface() {
   const [showTaskTreeDialog, setShowTaskTreeDialog] = useState(false);
   const [taskTreeData, setTaskTreeData] = useState<TaskTreeNode[] | null>(null);
   const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
-  // DataDictionaryDialog popup removed in v1.1.17 - moved to knowledge base mode
-  const [dataDictionaryItems, setDataDictionaryItems] = useState<DataDictionaryItem[] | null>(null);
-  const [selectedDictionaryItems, setSelectedDictionaryItems] = useState<Set<string>>(new Set());
   // 报告类型选择状态
   const [reportTypes, setReportTypes] = useState<string[]>(["pdf"]);
   const [showReportTypePicker, setShowReportTypePicker] = useState(false);
@@ -1581,6 +1696,142 @@ export function ThreePanelInterface() {
     }
   }, [currentUser, loadDataDictionary, toast]);
 
+  const handleImportDataDictionaryFile = useCallback(async (file: File) => {
+    setIsImportingDataDictionary(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("username", currentUser || "default");
+      formData.append("session_id", sessionId);
+
+      const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+      const selectedSources = savedDbConnections.filter((item) => selectedIdSet.has(item.id));
+      if (selectedSources.length === 1) {
+        formData.append("default_source_label", selectedSources[0].label);
+      }
+
+      const response = await fetch(API_URLS.CONFIG_DATA_DICTIONARY_IMPORT, {
+        method: "POST",
+        body: formData,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "数据字典导入失败");
+      }
+
+      await loadDataDictionary({ silent: true });
+      const addedCount = Number(payload?.result?.added_count || 0);
+      const updatedCount = Number(payload?.result?.updated_count || 0);
+      const importedCount = Number(payload?.import_meta?.imported_count || addedCount + updatedCount || 0);
+      toast({ description: payload?.message || `已导入 ${importedCount} 条数据字典理解（新增 ${addedCount}，更新 ${updatedCount}）` });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "数据字典导入失败";
+      toast({ description: message, variant: "destructive" });
+      throw error;
+    } finally {
+      setIsImportingDataDictionary(false);
+    }
+  }, [currentUser, effectiveSelectedDbSourceIds, loadDataDictionary, savedDbConnections, sessionId, toast]);
+
+  const persistAiDataDictionaryEntries = useCallback(async (
+    rawItems: Array<{
+      id: string;
+      source_label?: string;
+      table?: string;
+      field?: string;
+      proposed_meaning?: string;
+      question?: string;
+      confidence?: string;
+      analysis_usage?: string;
+    }>,
+    options?: { silent?: boolean },
+  ) => {
+    const normalizedItems = rawItems
+      .map((item) => ({
+        id: String(item.id || "").trim(),
+        source_label: String(item.source_label || "").trim(),
+        table: String(item.table || "").trim(),
+        field: String(item.field || "").trim(),
+        code_explanation: "",
+        ai_understanding: String(item.proposed_meaning || "").trim(),
+        meaning: String(item.proposed_meaning || "").trim(),
+        question: String(item.question || "").trim(),
+        confidence: String(item.confidence || "").trim(),
+        analysis_usage: String(item.analysis_usage || "").trim(),
+      }))
+      .filter((item) => item.id || item.table || item.field || item.ai_understanding);
+
+    if (!normalizedItems.length) {
+      return false;
+    }
+
+    const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+    const selectedSources = savedDbConnections.filter((item) => selectedIdSet.has(item.id));
+
+    const response = await fetch(API_URLS.CONFIG_DATA_DICTIONARY_SAVE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: currentUser || "default",
+        session_id: sessionId,
+        source_labels: selectedSources.map((item) => item.label),
+        dictionary: {
+          items: normalizedItems,
+        },
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.success) {
+      throw new Error(payload?.detail || payload?.message || "保存 AI 数据字典理解失败");
+    }
+
+    await loadDataDictionary({ silent: true });
+    if (!options?.silent) {
+      toast({ description: `已将 ${normalizedItems.length} 条 AI 数据字典理解写入设置 → 数据字典` });
+    }
+    return true;
+  }, [currentUser, effectiveSelectedDbSourceIds, loadDataDictionary, savedDbConnections, sessionId, toast]);
+
+  const handleSaveDataDictionaryEntry = useCallback(async (entryId: string, aiUnderstanding: string) => {
+    const targetEntry = dataDictionaryEntries.find((item) => item.id === entryId);
+    if (!targetEntry) {
+      throw new Error("未找到要保存的数据字典条目");
+    }
+
+    const response = await fetch(API_URLS.CONFIG_DATA_DICTIONARY_SAVE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: currentUser || "default",
+        session_id: sessionId,
+        source_labels: targetEntry.source_label ? [targetEntry.source_label] : [],
+        dictionary: {
+          items: [
+            {
+              id: targetEntry.id,
+              source_label: targetEntry.source_label,
+              table: targetEntry.table,
+              field: targetEntry.field,
+              code_explanation: targetEntry.code_explanation,
+              ai_understanding: aiUnderstanding,
+              meaning: aiUnderstanding,
+              question: targetEntry.question,
+              confidence: targetEntry.confidence,
+              analysis_usage: targetEntry.analysis_usage,
+            },
+          ],
+        },
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.success) {
+      throw new Error(payload?.detail || payload?.message || "保存 AI 数据字典理解失败");
+    }
+
+    await loadDataDictionary({ silent: true });
+    toast({ description: "AI 关联理解的数据定义已保存到知识库" });
+  }, [currentUser, dataDictionaryEntries, loadDataDictionary, sessionId, toast]);
+
   useEffect(() => {
     if (showSystemSettings && systemSettingsTab === "dictionary") {
       void loadDataDictionary({ silent: true });
@@ -1690,6 +1941,8 @@ export function ThreePanelInterface() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewDownloadUrl, setPreviewDownloadUrl] = useState<string>("");
   const previewScrollRef = useRef<HTMLDivElement>(null);
+  const [activeWorkspaceOutputCategory, setActiveWorkspaceOutputCategory] =
+    useState<OutputCategoryId>("reports");
   const [deleteConfirmPath, setDeleteConfirmPath] = useState<string | null>(
     null
   );
@@ -1699,14 +1952,12 @@ export function ThreePanelInterface() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const singleClickTimerRef = useRef<number | null>(null);
   const [contextPos, setContextPos] = useState<{ x: number; y: number } | null>(
     null
   );
   const [contextTarget, setContextTarget] = useState<WorkspaceNode | null>(
     null
   );
-  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string>("");
 
@@ -1813,13 +2064,11 @@ export function ThreePanelInterface() {
         const stepRect = activeStepElement.getBoundingClientRect();
         const containerRect = container.getBoundingClientRect();
 
-        // 计算需要滚动的距离
         const scrollLeft =
           activeStepElement.offsetLeft -
           containerRect.width / 2 +
           stepRect.width / 2;
 
-        // 平滑滚动到目标位置
         container.scrollTo({
           left: scrollLeft,
           behavior: "smooth",
@@ -1916,7 +2165,6 @@ export function ThreePanelInterface() {
       toast({ description: "只有超级用户可以初始化", variant: "destructive" });
       return false;
     }
-    // 确认初始化操作
     if (!window.confirm("确定要初始化雨途斩棘录吗？此操作将重置所有记录！")) {
       return false;
     }
@@ -1940,7 +2188,6 @@ export function ThreePanelInterface() {
     return false;
   };
 
-  // 确认整理结果 - 使用完整URL
   const confirmOrganize = async () => {
     try {
       const confirmUrl = `${API_URLS.YUTU_ORGANIZE_CONFIRM}?username=${encodeURIComponent(currentUser || "")}`;
@@ -1968,7 +2215,6 @@ export function ThreePanelInterface() {
     setIsRecordingKnowledge(true);
 
     try {
-      // 从消息中提取分析结果
       const aiMessages = messages.filter(m => m.sender === "ai" && m.content);
       if (aiMessages.length === 0) {
         toast({ description: "暂无分析内容", variant: "destructive" });
@@ -1977,8 +2223,6 @@ export function ThreePanelInterface() {
       }
 
       const lastContent = aiMessages[aiMessages.length - 1].content;
-
-      // 使用VLLM生成总结（简化版）
       const prompt = `请从以下分析内容中提取本次分析的亮点和成功要点（最多10条，总300字以内）。只列出要点，用简洁的中文描述。
 分析内容摘要：${lastContent.slice(0, 2000)}
 请直接输出要点列表，每条一行，不要有额外说明。`;
@@ -1997,11 +2241,9 @@ export function ThreePanelInterface() {
         if (response.ok) {
           const data = await response.json();
           const summary = data.choices?.[0]?.message?.content || "";
-          // 限制总长度
           const truncated = summary.length > 300 ? summary.slice(0, 300) + "..." : summary;
           setSuccessSummary(truncated);
         } else {
-          // 如果API失败，使用本地简单提取
           setSuccessSummary(extractLocalSuccessPoints(lastContent));
         }
       } catch {
@@ -2028,7 +2270,6 @@ export function ThreePanelInterface() {
     toast({ description: "正在分析并记录知识..." });
 
     try {
-      // 获取当前的聊天消息
       const analysisContent = messages
         .filter(m => m.sender === "ai")
         .map(m => m.content)
@@ -2040,7 +2281,6 @@ export function ThreePanelInterface() {
         return;
       }
 
-      // 构造提示让AI分析并提取知识
       const prompt = `你是雨途斩棘录的知识提取助手。请分析以下智能体分析过程，提取其中出现的错误和解决方案。
 
 分析过程：
@@ -2071,7 +2311,6 @@ ${analysisContent}
       });
 
       if (response.ok) {
-        // 解析返回的知识记录
         const reader = response.body?.getReader();
         if (reader) {
           let result = "";
@@ -2082,7 +2321,6 @@ ${analysisContent}
             result += decoder.decode(value);
           }
 
-          // 提取JSON数组
           const jsonMatch = result.match(/\[[\s\S]*\]/);
           if (jsonMatch) {
             try {
@@ -2094,11 +2332,9 @@ ${analysisContent}
                 return;
               }
 
-              // 检查重复并记录
               let recordedCount = 0;
               for (const record of knowledgeRecords) {
                 if (record.error_type && record.error_message) {
-                  // 检查是否已存在相似记录
                   const searchResult = await fetch(`${API_URLS.YUTU_SEARCH}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -2172,9 +2408,6 @@ ${analysisContent}
     setShowTaskTreeDialog(false);
     setTaskTreeData(null);
     setSelectedTasks(new Set());
-    setShowDataDictionaryDialog(false);
-    setDataDictionaryItems(null);
-    setSelectedDictionaryItems(new Set());
     loadRegisteredUsers();
   };
 
@@ -2597,9 +2830,6 @@ ${analysisContent}
     setShowTaskTreeDialog(false);
     setTaskTreeData(null);
     setSelectedTasks(new Set());
-    setShowDataDictionaryDialog(false);
-    setDataDictionaryItems(null);
-    setSelectedDictionaryItems(new Set());
     try {
       if (typeof window !== "undefined") {
         localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify([welcome]));
@@ -2639,9 +2869,6 @@ ${analysisContent}
     setShowTaskTreeDialog(false);
     setTaskTreeData(null);
     setSelectedTasks(new Set());
-    setShowDataDictionaryDialog(false);
-    setDataDictionaryItems(null);
-    setSelectedDictionaryItems(new Set());
     // 清空聊天区域、输入框、代码编辑器
     setMessages([
       {
@@ -3096,9 +3323,6 @@ ${analysisContent}
       setShowTaskTreeDialog(false);
       setTaskTreeData(null);
       setSelectedTasks(new Set());
-      setShowDataDictionaryDialog(false);
-      setDataDictionaryItems(null);
-      setSelectedDictionaryItems(new Set());
     }
   }, [analysisMode]);
 
@@ -3189,368 +3413,121 @@ ${analysisContent}
     setContextTarget(null);
   };
 
-  // 将后端树转换为 Arborist 数据
-  type ArborNode = {
-    id: string;
-    name: string;
-    isDir: boolean;
-    icon?: string;
-    download_url?: string;
-    extension?: string;
-    size?: number;
-    children?: ArborNode[];
-    isGenerated?: boolean; // 标识是否为代码生成的文件
-    isConverted?: boolean; // 标识是否为 UTF-8 编码转换后的文件
-  };
+  const workspaceOutputFiles = useMemo(() => {
+    const items: WorkspaceOutputFile[] = [];
 
-  const toArbor = (node: WorkspaceNode): ArborNode => ({
-    id: node.path || (node.is_dir ? "root_workspace" : `file_${node.name}`),
-    name: node.name || "workspace",
-    isDir: node.is_dir,
-    icon: node.icon,
-    download_url: node.download_url,
-    extension: node.extension,
-    size: node.size,
-    isGenerated: node.is_generated,
-    isConverted: node.is_converted,
-    children: node.children?.map(toArbor),
+    const visit = (
+      node: WorkspaceNode,
+      parentGenerated = false,
+      parentConverted = false
+    ) => {
+      const normalizedPath = String(node.path || "").replace(/^\/+|\/+$/g, "");
+      const isConverted =
+        parentConverted ||
+        Boolean(node.is_converted) ||
+        isConvertedWorkspacePath(normalizedPath);
+
+      if (isConverted) {
+        return;
+      }
+
+      const isGenerated =
+        parentGenerated ||
+        Boolean(node.is_generated) ||
+        normalizedPath === "generated" ||
+        normalizedPath.startsWith("generated/");
+
+      if (node.is_dir) {
+        node.children?.forEach((child) =>
+          visit(child as WorkspaceNode, isGenerated, isConverted)
+        );
+        return;
+      }
+
+      const name = String(node.name || "").trim();
+      if (!name || name.startsWith(".")) {
+        return;
+      }
+
+      const extension = normalizeWorkspaceExtension(name, node.extension);
+      items.push({
+        name,
+        size: node.size || 0,
+        extension,
+        icon: node.icon || "",
+        download_url: node.download_url || "",
+        preview_url: node.download_url || "",
+        path: normalizedPath || name,
+        category: getWorkspaceOutputCategory(extension),
+        isGenerated,
+      });
+    };
+
+    if (workspaceTree) {
+      visit(workspaceTree as WorkspaceNode);
+    }
+
+    return items.sort((left, right) => {
+      const leftCategoryIndex = OUTPUT_CATEGORY_ORDER.indexOf(left.category);
+      const rightCategoryIndex = OUTPUT_CATEGORY_ORDER.indexOf(right.category);
+      if (leftCategoryIndex !== rightCategoryIndex) {
+        return leftCategoryIndex - rightCategoryIndex;
+      }
+      if (left.isGenerated !== right.isGenerated) {
+        return left.isGenerated ? -1 : 1;
+      }
+      return left.path.localeCompare(right.path, "zh-CN", {
+        numeric: true,
+        sensitivity: "base",
+      });
+    });
+  }, [workspaceTree]);
+
+  const workspaceOutputFilesByCategory = useMemo(() => {
+    const grouped: Record<OutputCategoryId, WorkspaceOutputFile[]> = {
+      reports: [],
+      charts: [],
+      data: [],
+      other: [],
+    };
+
+    workspaceOutputFiles.forEach((file) => {
+      grouped[file.category].push(file);
+    });
+
+    return grouped;
+  }, [workspaceOutputFiles]);
+
+  const activeWorkspaceOutputFiles =
+    workspaceOutputFilesByCategory[activeWorkspaceOutputCategory];
+
+  useEffect(() => {
+    if (workspaceOutputFilesByCategory[activeWorkspaceOutputCategory].length) {
+      return;
+    }
+
+    const fallbackCategory =
+      OUTPUT_CATEGORY_ORDER.find(
+        (category) => workspaceOutputFilesByCategory[category].length > 0
+      ) || "reports";
+
+    if (fallbackCategory !== activeWorkspaceOutputCategory) {
+      setActiveWorkspaceOutputCategory(fallbackCategory);
+    }
+  }, [activeWorkspaceOutputCategory, workspaceOutputFilesByCategory]);
+
+  const toWorkspaceNodeFromOutput = (
+    file: WorkspaceOutputFile
+  ): WorkspaceNode => ({
+    name: file.name,
+    path: file.path,
+    is_dir: false,
+    size: file.size,
+    extension: file.extension,
+    icon: file.icon,
+    download_url: file.download_url,
+    is_generated: file.isGenerated,
   });
-
-  const getExt = (name?: string, ext?: string) => {
-    const fromExt = (ext || "").replace(/^\./, "").toLowerCase();
-    if (fromExt) return fromExt;
-    if (!name) return "txt";
-    const p = name.lastIndexOf(".");
-    return p > -1 ? name.slice(p + 1).toLowerCase() : "txt";
-  };
-
-  const Row = ({
-    node,
-    style,
-    dragHandle,
-  }: {
-    node: NodeApi<ArborNode>;
-    style: React.CSSProperties;
-    dragHandle?: (el: HTMLDivElement | null) => void;
-  }) => {
-    const data = node.data;
-    const isDir = data.isDir;
-    const isGenerated = data.isGenerated || false;
-    const isGeneratedFolder = isDir && data.name === "generated";
-    const ext = getExt(data.name, data.extension);
-
-    return (
-      <div style={style} className="w-full">
-        {/* Generated 分组标题 + 删除按钮（不遮挡、不受折叠影响） */}
-        {isGeneratedFolder && (
-          <div className="mt-2 mb-1 px-2 flex items-center justify-between select-none">
-            <div className="flex items-center gap-2 text-[11px] text-purple-600 dark:text-purple-400">
-              <span className="h-px w-4 bg-purple-200 dark:bg-purple-800" />
-              <span className="font-medium">代码生成文件</span>
-            </div>
-            <button
-              className="text-red-600 hover:text-red-700 p-1 rounded hover:bg-red-50 dark:hover:bg-red-950/20"
-              aria-label="删除生成文件夹"
-              title="删除生成文件夹"
-              onClick={(e) => {
-                e.stopPropagation();
-                setDeleteIsDir(true);
-                setDeleteConfirmPath(data.id);
-              }}
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        )}
-        <div
-          className={`flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2 py-1 w-full ${isGenerated ? "bg-purple-50 dark:bg-purple-950/20" : ""
-            }`}
-          style={{ paddingLeft: `${node.level * 14}px` }}
-          onClick={(e) => {
-            if (isDir) {
-              node.toggle();
-              return;
-            }
-            if (singleClickTimerRef.current) {
-              window.clearTimeout(singleClickTimerRef.current);
-              singleClickTimerRef.current = null;
-            }
-            // 延迟触发预览，若短时间内发生双击会被取消
-            singleClickTimerRef.current = window.setTimeout(() => {
-              openNode({
-                name: data.name,
-                path: data.id,
-                is_dir: false,
-                download_url: data.download_url,
-                extension: data.extension,
-                size: data.size,
-                icon: data.icon,
-              } as any);
-              singleClickTimerRef.current = null;
-            }, 180);
-          }}
-          onDoubleClick={(e) => {
-            if (isDir) return;
-            e.stopPropagation();
-            if (singleClickTimerRef.current) {
-              window.clearTimeout(singleClickTimerRef.current);
-              singleClickTimerRef.current = null;
-            }
-            if (data.download_url) {
-              downloadFileByUrl(data.name, data.download_url);
-            }
-          }}
-          onContextMenu={(e) =>
-            onContextMenu(
-              e as any,
-              {
-                name: data.name,
-                path: data.id,
-                is_dir: isDir,
-                download_url: data.download_url,
-                extension: data.extension,
-                size: data.size,
-                icon: data.icon,
-              } as any
-            )
-          }
-          onDragOver={(e) => {
-            if (isDir) {
-              e.preventDefault();
-              e.dataTransfer.dropEffect = (e.dataTransfer.types || []).includes(
-                "text/x-workspace-path"
-              )
-                ? "move"
-                : "copy";
-            }
-          }}
-          onDragEnter={(e) => {
-            if (isDir) setDragOverPath(data.id);
-          }}
-          onDragLeave={(e) => {
-            if (isDir) setDragOverPath(null);
-          }}
-          onDrop={(e) => {
-            if (!isDir) return;
-            e.preventDefault();
-            uploadToDir(data.id, e.dataTransfer.files || []);
-            setDragOverPath(null);
-          }}
-        >
-          <div
-            className="flex items-center gap-2 text-sm w-full min-w-0"
-            ref={dragHandle}
-            draggable={!isDir}
-            onDragStart={(e) => {
-              if (isDir) return;
-              // 将工作区内路径放入自定义 MIME，供目标目录 onDrop 读取
-              e.dataTransfer.setData("text/x-workspace-path", data.id);
-              // 提示为移动操作
-              e.dataTransfer.effectAllowed = "move";
-            }}
-          >
-            {isDir ? (
-              <>
-                <span
-                  className={
-                    isGenerated
-                      ? "text-purple-600 dark:text-purple-400"
-                      : "text-gray-500"
-                  }
-                >
-                  {node.isOpen ? "▾" : "▸"}
-                </span>
-                {isGenerated ? (
-                  <Code2 className="h-3.5 w-3.5 text-purple-600 dark:text-purple-400" />
-                ) : (
-                  <FolderOpen className="h-3.5 w-3.5 text-gray-500" />
-                )}
-              </>
-              ) : (
-                <div className="w-4 h-4">
-                {/* 动态扩展样式，fallback 到 txt */}
-                {/* @ts-ignore */}
-                <FileIcon
-                  extension={ext}
-                  {...((defaultStyles as any)[ext] ||
-                    (defaultStyles as any).txt)}
-                />
-              </div>
-            )}
-            <span
-              className={`${isGenerated
-                ? "text-purple-700 dark:text-purple-300 font-medium"
-                : ""
-                }`}
-            >
-              {data.name}
-            </span>
-            {typeof data.size === "number" && !isDir && (
-              <span className="text-[10px] text-gray-400 ml-2 shrink-0">
-                {formatFileSize(data.size)}
-              </span>
-            )}
-            {isGenerated && !isDir && (
-              <Sparkles className="h-3 w-3 text-purple-500 ml-1 shrink-0" />
-            )}
-          </div>
-          {/* 行尾不再展示下载/删除按钮。双击/点击行为保持不变；右键菜单提供下载/删除。*/}
-        </div>
-      </div>
-    );
-  };
-
-  const renderTree = (node: WorkspaceNode, depth = 0) => {
-    const isDir = node.is_dir;
-    const isGenerated = node.is_generated || false;
-    const isConverted = node.is_converted || false;
-    const isGeneratedFolder = isDir && node.name === "generated" && depth === 1;
-    const isConvertedFolder = isDir && node.name === "converted" && depth === 1;
-    const pad = { paddingLeft: `${8 + depth * 14}px` } as React.CSSProperties;
-
-    return (
-      <div key={node.path || "root"}>
-        {/* Converted (UTF-8) 分隔线 */}
-        {isConvertedFolder && (
-          <div className="mb-2 mt-2 ml-2 border-t-2 border-green-200 dark:border-green-800 relative">
-            <div className="absolute -top-2.5 left-2 bg-white dark:bg-gray-950 px-2 text-[10px] text-green-600 dark:text-green-400 font-medium">
-              编码自动转换
-            </div>
-          </div>
-        )}
-        {/* Generated 分隔线 */}
-        {isGeneratedFolder && (
-          <div className="mb-2 mt-2 ml-2 border-t-2 border-purple-200 dark:border-purple-800 relative">
-            <div className="absolute -top-2.5 left-2 bg-white dark:bg-gray-950 px-2 text-[10px] text-purple-600 dark:text-purple-400 font-medium">
-              代码生成文件
-            </div>
-          </div>
-        )}
-        <div
-          className={`flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2 py-1 cursor-default ${isGenerated ? "bg-purple-50 dark:bg-purple-950/20" : isConverted ? "bg-green-50 dark:bg-green-950/20" : ""}`}
-          style={pad}
-          onClick={(e) => {
-            if (isDir) return toggleExpand(node.path);
-            if (singleClickTimerRef.current) {
-              window.clearTimeout(singleClickTimerRef.current);
-              singleClickTimerRef.current = null;
-            }
-            singleClickTimerRef.current = window.setTimeout(() => {
-              openNode(node);
-              singleClickTimerRef.current = null;
-            }, 180);
-          }}
-          onDoubleClick={(e) => {
-            if (isDir) return;
-            e.stopPropagation();
-            if (singleClickTimerRef.current) {
-              window.clearTimeout(singleClickTimerRef.current);
-              singleClickTimerRef.current = null;
-            }
-            if (node.download_url) {
-              downloadFileByUrl(node.name, node.download_url);
-            } else {
-              openNode(node);
-            }
-          }}
-          onContextMenu={(e) => onContextMenu(e, node)}
-          onDragOver={(e) => {
-            if (isDir) e.preventDefault();
-          }}
-          onDrop={async (e) => {
-            if (!isDir) return;
-            e.preventDefault();
-            const dt = e.dataTransfer;
-            // 1) 如果是从 OS 拖入文件
-            if (dt.files && dt.files.length) {
-              uploadToDir(node.path, dt.files || []);
-              return;
-            }
-            // 2) 如果是从 generated/ 内部拖动的文件，使用自定义 data 传递路径
-            const srcPath = dt.getData("text/x-workspace-path");
-            if (srcPath) {
-              try {
-                const url = `${API_CONFIG.BACKEND_BASE_URL
-                  }/workspace/move?src=${encodeURIComponent(
-                    srcPath
-                  )}&dst_dir=${encodeURIComponent(
-                    node.path
-                  )}&session_id=${encodeURIComponent(sessionId)}`;
-                const res = await fetch(url, { method: "POST" });
-                if (res.ok) {
-                  await loadWorkspaceTree();
-                  await loadWorkspaceFiles();
-                }
-              } catch (err) {
-                console.error("move error", err);
-              }
-            }
-          }}
-        >
-          <div className="flex items-center gap-2 text-sm">
-            {isDir ? (
-              <>
-                <span
-                  className={
-                    isGenerated
-                      ? "text-purple-600 dark:text-purple-400"
-                      : isConverted
-                      ? "text-green-600 dark:text-green-400"
-                      : "text-gray-500"
-                  }
-                >
-                  {expanded[node.path] ? "▾" : "▸"}
-                </span>
-                {isGenerated ? (
-                  <Code2
-                    className={`h-3.5 w-3.5 ${isGenerated
-                      ? "text-purple-600 dark:text-purple-400"
-                      : isConverted
-                      ? "text-green-600 dark:text-green-400"
-                      : "text-gray-500"
-                      }`}
-                  />
-                ) : isConverted ? (
-                  <FileText className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />
-                ) : (
-                  <FolderOpen className="h-3.5 w-3.5 text-gray-500" />
-                )}
-              </>
-            ) : (
-              <span
-                className={isGenerated ? "text-purple-400" : isConverted ? "text-green-400" : "text-gray-400"}
-              >
-                •
-              </span>
-            )}
-            <span
-              className={`truncate ${isGenerated
-                ? "text-purple-700 dark:text-purple-300 font-medium"
-                : isConverted
-                ? "text-green-700 dark:text-green-300"
-                : ""
-                }`}
-            >
-              {node.icon && !isGenerated && !isConverted ? `${node.icon} ` : ""}
-              {node.name || "workspace"}
-            </span>
-            {!isDir && typeof node.size === "number" && (
-              <span className="text-[10px] text-gray-400 ml-2 shrink-0">
-                {formatFileSize(node.size)}
-              </span>
-            )}
-            {isGenerated && !isDir && (
-              <Sparkles className="h-3 w-3 text-purple-500 ml-1 shrink-0" />
-            )}
-          </div>
-          {/* 双击/点击行为已经在容器上：目录展开，文件预览/下载保持一致 */}
-        </div>
-        {isDir && expanded[node.path] && node.children && (
-          <div>{node.children.map((c) => renderTree(c, depth + 1))}</div>
-        )}
-      </div>
-    );
-  };
 
   const clearWorkspace = async () => {
     if (!sessionId) return;
@@ -4730,13 +4707,15 @@ ${analysisContent}
                   variant="ghost"
                   size="sm"
                   onClick={() => {
-                    toast({ description: "数据字典已记录到知识库。请在设置 → 数据字典中查看和修改AI理解的数据定义。" });
+                    setSystemSettingsTab("dictionary");
+                    setShowSystemSettings(true);
+                    void loadDataDictionary({ silent: true });
                   }}
                   className="h-5 px-2 text-xs text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
-                  title="查看数据字典"
+                  title="查看 AI 数据字典理解"
                 >
                   <BookOpen className="h-3 w-3 mr-1" />
-                  确认语义
+                  查看语义
                 </Button>
               )}
             </div>
@@ -4770,12 +4749,15 @@ ${analysisContent}
                   return <div className="text-sm text-gray-500">任务树数据格式异常，请重新生成</div>;
                 }
               })() : match.type === "DataDictionary" ? (() => {
-                // v1.1.17: DataDictionary is now stored in knowledge base, not displayed inline
+                const parsed = parseDataDictionaryContent(match.content);
+                const itemCount = parsed?.items.length || 0;
                 return (
                   <div className="text-sm text-amber-700 dark:text-amber-300">
-                    <div className="mb-2 font-medium">✓ 数据字典已记录到知识库</div>
+                    <div className="mb-2 font-medium">
+                      {itemCount > 0 ? `AI 已生成并记录 ${itemCount} 条数据字典理解` : "AI 已生成并记录数据字典理解"}
+                    </div>
                     <div className="text-xs text-gray-500">
-                      分析已完成，生成的数据字典定义已保存。请在设置 → 数据字典中查看和编辑AI的理解。
+                      这些字段释义已写入设置 → 数据字典。分析不会等待人工确认，您可以稍后在知识库中修改并保存。
                     </div>
                   </div>
                 );
@@ -5323,13 +5305,20 @@ ${analysisContent}
         }
       }
 
-      // DataDictionary detected - v1.1.17: moved to knowledge base mode, no longer pops up for confirmation
+      // 检测 <DataDictionary> 并自动写入知识库，不再弹出确认对话框
       if (/<datadictionary>/i.test(accumulatedMessage)) {
         const dictionaryMatch = accumulatedMessage.match(/<datadictionary>([\s\S]*?)<\/datadictionary>/i);
         if (dictionaryMatch) {
-          // In v1.1.17, DataDictionary is now stored for user review in Settings > Data Dictionary
-          // No popup is triggered - AI will reference these definitions during analysis
-          console.log("[DataDictionary] Detected and recorded (popup removed in v1.1.17)");
+          const parsed = parseDataDictionaryContent(dictionaryMatch[1]);
+          if (parsed) {
+            try {
+              await persistAiDataDictionaryEntries(parsed.items, { silent: true });
+            } catch (error) {
+              console.warn("[DataDictionary] 自动写入知识库失败:", error);
+            }
+          } else {
+            console.warn("[DataDictionary] JSON 解析失败, 原始内容:", dictionaryMatch[1].slice(0, 200));
+          }
         }
       }
 
@@ -5365,59 +5354,6 @@ ${analysisContent}
     setTaskTreeData(null);
     handleSendMessage(msg);
   }, [taskTreeData, selectedTasks, analysisLanguage]);
-
-  const toggleDataDictionaryItem = useCallback((id: string) => {
-    setSelectedDictionaryItems((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  const updateDataDictionaryItem = useCallback((id: string, patch: Partial<DataDictionaryItem>) => {
-    setDataDictionaryItems((prev) => {
-      if (!prev) return prev;
-      return prev.map((item) => {
-        if (item.id !== id) return item;
-        return {
-          ...item,
-          ...patch,
-        };
-      });
-    });
-  }, []);
-
-  const selectAllDataDictionaryItems = useCallback(() => {
-    if (!dataDictionaryItems) return;
-    setSelectedDictionaryItems(new Set(dataDictionaryItems.map((item) => item.id)));
-  }, [dataDictionaryItems]);
-
-  const clearAllDataDictionaryItems = useCallback(() => {
-    setSelectedDictionaryItems(new Set());
-  }, []);
-
-  // DataDictionary popup confirmation removed in v1.1.17
-  // Users now manage data dictionaries in Settings > Data Dictionary (knowledge base mode)
-  // AI will reference uploaded definitions during analysis without requiring confirmation
-  const handleConfirmDataDictionary = useCallback(async () => {
-    // This function is deprecated - kept as placeholder for backwards compatibility
-    return
-    });
-  }, [
-    analysisLanguage,
-    currentUser,
-    dataDictionaryItems,
-    effectiveSelectedDbSourceIds,
-    savedDbConnections,
-    selectedDictionaryItems,
-    sessionId,
-    handleSendMessage,
-    toast,
-  ]);
 
   const handleFileUpload = async (
     event: React.ChangeEvent<HTMLInputElement>
@@ -5722,7 +5658,7 @@ ${analysisContent}
 
               <div
                 ref={treeContainerRef}
-                className="flex-1 w-full min-h-0 overflow-hidden pl-3 pr-1 py-2"
+                className="flex-1 w-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-auto pl-3 pr-2 py-2"
               >
                 <div className="mb-5 rounded-xl border border-slate-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.96))] p-2.5 shadow-[0_12px_32px_rgba(15,23,42,0.08)] dark:border-slate-800 dark:bg-[linear-gradient(180deg,rgba(2,6,23,0.96),rgba(15,23,42,0.92))]">
                   <div className="grid grid-cols-2 gap-2.5">
@@ -5866,22 +5802,163 @@ ${analysisContent}
                   )}
                 </div>
 
-                {workspaceTree ? (
-                  <Tree
-                    width={treeSize.w || "100%"}
-                    height={Math.max(600, treeSize.h - 205)}
-                    data={toArbor(workspaceTree).children || []}
-                    initialOpenState={expanded}
-                    indent={14}
-                    rowHeight={28}
-                  >
-                    {Row}
-                  </Tree>
-                ) : (
-                  <div className="flex items-center justify-center h-full text-sm text-gray-500">
-                    Loading...
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    {OUTPUT_CATEGORY_ORDER.map((category) => {
+                      const meta = OUTPUT_CATEGORY_META[category];
+                      const Icon = meta.icon;
+                      const count = workspaceOutputFilesByCategory[category].length;
+                      const isActive = activeWorkspaceOutputCategory === category;
+
+                      return (
+                        <button
+                          key={category}
+                          type="button"
+                          onClick={() => setActiveWorkspaceOutputCategory(category)}
+                          className={cn(
+                            "group rounded-xl border px-3 py-3 text-left transition-all duration-200",
+                            isActive
+                              ? meta.tone
+                              : "border-slate-200/80 bg-white/85 text-slate-600 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-[0_12px_24px_rgba(15,23,42,0.08)] dark:border-slate-800 dark:bg-slate-950/60 dark:text-slate-200"
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-[10px] font-semibold uppercase tracking-[0.22em] opacity-70">
+                                {meta.hint}
+                              </div>
+                              <div className="mt-1 text-sm font-semibold tracking-[0.01em]">
+                                {meta.label}
+                              </div>
+                            </div>
+                            <div
+                              className={cn(
+                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-current/10 bg-white/50 dark:bg-white/5",
+                                meta.accent
+                              )}
+                            >
+                              <Icon className="h-4 w-4" />
+                            </div>
+                          </div>
+                          <div className="mt-3 flex items-end justify-between">
+                            <span className="text-2xl font-semibold leading-none">
+                              {count}
+                            </span>
+                            <span className="text-[10px] opacity-70">
+                              {isActive ? "当前展开" : "点击查看列表"}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
-                )}
+
+                  <div className="rounded-2xl border border-slate-200/80 bg-white/90 p-3 shadow-[0_12px_28px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-950/70">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
+                          Workspace Files
+                        </div>
+                        <div className="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {OUTPUT_CATEGORY_META[activeWorkspaceOutputCategory].label}
+                        </div>
+                      </div>
+                      <span className="rounded-full border border-slate-200 px-2.5 py-1 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-300">
+                        {activeWorkspaceOutputFiles.length} 个文件
+                      </span>
+                    </div>
+
+                    {activeWorkspaceOutputFiles.length ? (
+                      <div className="space-y-2">
+                        {activeWorkspaceOutputFiles.map((file) => {
+                          const ext = normalizeWorkspaceExtension(
+                            file.name,
+                            file.extension
+                          );
+
+                          return (
+                            <div
+                              key={file.path}
+                              className="flex items-center gap-2 rounded-xl border border-slate-200/80 bg-slate-50/80 p-2.5 transition-colors hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/70 dark:hover:border-slate-700"
+                            >
+                              <button
+                                type="button"
+                                className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                                onClick={() => openPreview(file)}
+                                onContextMenu={(event) =>
+                                  onContextMenu(
+                                    event,
+                                    toWorkspaceNodeFromOutput(file)
+                                  )
+                                }
+                              >
+                                <div className="h-9 w-9 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-white p-2 dark:border-slate-700 dark:bg-slate-950">
+                                  <FileIcon
+                                    extension={ext}
+                                    {...((defaultStyles as any)[ext] ||
+                                      (defaultStyles as any).txt)}
+                                  />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
+                                      {file.name}
+                                    </span>
+                                    {file.isGenerated && (
+                                      <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-200">
+                                        <Sparkles className="h-3 w-3" />
+                                        生成
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
+                                    <span>{formatFileSize(file.size || 0)}</span>
+                                    <span className="truncate">{file.path}</span>
+                                  </div>
+                                </div>
+                              </button>
+
+                              <div className="flex shrink-0 items-center gap-1">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2 text-[11px] text-slate-600 hover:bg-slate-200/70 dark:text-slate-200 dark:hover:bg-slate-800"
+                                  onClick={() => openPreview(file)}
+                                >
+                                  预览
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2 text-[11px] text-slate-600 hover:bg-slate-200/70 dark:text-slate-200 dark:hover:bg-slate-800"
+                                  onClick={() =>
+                                    downloadFileByUrl(
+                                      file.name,
+                                      ensureGeneratedInUrl(file.download_url)
+                                    )
+                                  }
+                                >
+                                  <Download className="mr-1 h-3.5 w-3.5" />
+                                  下载
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : workspaceOutputFiles.length ? (
+                      <div className="rounded-xl border border-dashed border-slate-300/90 bg-slate-50/70 px-3 py-6 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-400">
+                        {OUTPUT_CATEGORY_META[activeWorkspaceOutputCategory].empty}
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-slate-300/90 bg-slate-50/70 px-3 py-6 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-400">
+                        暂无可展示文件。系统目录如 converted 已自动隐藏，请先上传数据或运行分析任务。
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
 
               <div className="shrink-0 border-t border-gray-200 bg-slate-50/70 px-3 py-3 dark:border-gray-800 dark:bg-slate-950/30">
@@ -6722,7 +6799,7 @@ ${analysisContent}
           {!contextTarget.is_dir && contextTarget.download_url && (
             <a
               className="block px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"
-              href={contextTarget.download_url}
+              href={ensureGeneratedInUrl(contextTarget.download_url)}
               download={contextTarget.name}
               onClick={closeContext}
             >
@@ -7023,8 +7100,6 @@ ${analysisContent}
         onConfirm={handleConfirmTaskSelection}
       />
 
-      {/* DataDictionaryDialog popup removed in v1.1.17 - moved to knowledge base upload mode */}
-
       {/* 保存项目弹窗 */}
       <ProjectSaveDialog
         showSaveDialog={showSaveDialog}
@@ -7233,8 +7308,11 @@ ${analysisContent}
         dataDictionaryTotal={dataDictionaryTotal}
         isLoadingDataDictionary={isLoadingDataDictionary}
         isDeletingDataDictionary={isDeletingDataDictionary}
+        isImportingDataDictionary={isImportingDataDictionary}
         handleRefreshDataDictionary={() => void loadDataDictionary()}
         handleDeleteDataDictionaryEntries={handleDeleteDataDictionaryEntries}
+        handleSaveDataDictionaryEntry={handleSaveDataDictionaryEntry}
+        handleImportDataDictionaryFile={handleImportDataDictionaryFile}
         isLoadingKnowledgeConfig={isLoadingKnowledgeConfig}
         loadKnowledgeConfig={loadKnowledgeConfig}
         knowledgeBaseEnabled={knowledgeBaseEnabled}

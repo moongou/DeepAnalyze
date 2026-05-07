@@ -150,8 +150,11 @@ interface SystemSettingsDialogProps {
   dataDictionaryTotal: number;
   isLoadingDataDictionary: boolean;
   isDeletingDataDictionary: boolean;
+  isImportingDataDictionary: boolean;
   handleRefreshDataDictionary: () => void;
   handleDeleteDataDictionaryEntries: (ids: string[]) => Promise<void>;
+  handleSaveDataDictionaryEntry: (id: string, aiUnderstanding: string) => Promise<void>;
+  handleImportDataDictionaryFile: (file: File) => Promise<void>;
   // Knowledge tab
   isLoadingKnowledgeConfig: boolean;
   loadKnowledgeConfig: () => void;
@@ -213,8 +216,8 @@ export function SystemSettingsDialog({
   isSavingAnalysisHistorySettings,
   handleRefreshAnalysisHistory, handleSelectAnalysisHistoryRun, handleSaveAnalysisHistorySettings,
   dataDictionaryEntries, dataDictionaryTotal,
-  isLoadingDataDictionary, isDeletingDataDictionary,
-  handleRefreshDataDictionary, handleDeleteDataDictionaryEntries,
+  isLoadingDataDictionary, isDeletingDataDictionary, isImportingDataDictionary,
+  handleRefreshDataDictionary, handleDeleteDataDictionaryEntries, handleSaveDataDictionaryEntry, handleImportDataDictionaryFile,
   isLoadingKnowledgeConfig, loadKnowledgeConfig,
   knowledgeBaseEnabled, setKnowledgeBaseEnabled,
   yutuRecords, currentUser, isRecordingKnowledge,
@@ -838,8 +841,11 @@ export function SystemSettingsDialog({
                 total={dataDictionaryTotal}
                 isLoading={isLoadingDataDictionary}
                 isDeleting={isDeletingDataDictionary}
+                isImporting={isImportingDataDictionary}
                 onRefresh={handleRefreshDataDictionary}
                 onDelete={handleDeleteDataDictionaryEntries}
+                onSaveUnderstanding={handleSaveDataDictionaryEntry}
+                onImportFile={handleImportDataDictionaryFile}
               />
             </TabsContent>
 
@@ -1055,7 +1061,7 @@ export function SystemSettingsDialog({
               : systemSettingsTab === "database"
                 ? `数据库测试状态：${isDbTested ? "已通过" : "未测试"}`
                 : systemSettingsTab === "dictionary"
-                  ? `已确认数据字典 ${dataDictionaryTotal} 条`
+                  ? `AI 数据字典理解 ${dataDictionaryTotal} 条`
                 : systemSettingsTab === "history"
                   ? `已加载分析历史 ${analysisHistoryRuns.length} 条`
                 : knowledgeSettingsLoaded

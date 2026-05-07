@@ -12,6 +12,7 @@ import sys
 import re
 import traceback
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -57,13 +58,31 @@ if not FONTS_DIR.exists():
 # 中文字体定义（按优先级排序）
 # 格式: (字体文件名, 字体名称, 字体类型, 描述)
 CHINESE_FONTS = [
-    # assets/fonts 目录下的纯 TTF 字体（reportlab 兼容性最好）
     ("simhei.ttf", "SimHei", "normal", "黑体 - 主标题/重点内容"),
     ("simkai.ttf", "SimKai", "normal", "楷体 - 引用/强调"),
     ("STFangSong.ttf", "STFangSong", "normal", "仿宋 - 正文/报告"),
     ("STHeiti.ttf", "STHeiti", "normal", "黑体备选"),
-    ("LiSongPro.ttf", "LiSongPro", "normal", "隶书 - 可选"),
+    ("LiSongPro.ttf", "LiSongPro", "normal", "宋体风格补充"),
 ]
+
+AGENT_BRAND_NAME = "观雨"
+AGENT_BRAND_FULL = "观雨出口"
+
+
+def _resolve_font_for_role(role: str) -> str:
+    if not _REGISTERED_FONTS:
+        register_chinese_fonts()
+
+    role_candidates = {
+        "title": ["SimHei", "STHeiti", "LiSongPro"],
+        "heading": ["SimHei", "STHeiti"],
+        "body": ["STFangSong", "LiSongPro", "SimHei"],
+        "quote": ["SimKai", "STFangSong", "SimHei"],
+    }
+    for candidate in role_candidates.get(role, []):
+        if candidate in _REGISTERED_FONTS:
+            return candidate
+    return get_chinese_font_name()
 
 # 字体注册状态缓存
 _REGISTERED_FONTS: Dict[str, str] = {}  # font_name -> font_path
@@ -177,7 +196,10 @@ def get_chinese_style(style_type: str = "normal") -> ParagraphStyle:
     if not _REGISTERED_FONTS:
         register_chinese_fonts()
 
-    font_name = get_chinese_font_name()
+    heading_font = _resolve_font_for_role("heading")
+    body_font = _resolve_font_for_role("body")
+    quote_font = _resolve_font_for_role("quote")
+    title_font = _resolve_font_for_role("title")
     styles = getSampleStyleSheet()
 
     # 样式配置字典
@@ -185,62 +207,64 @@ def get_chinese_style(style_type: str = "normal") -> ParagraphStyle:
         "normal": {
             "name": "ChineseNormal",
             "parent": styles["Normal"],
-            "fontName": font_name,
-            "fontSize": 11,
-            "leading": 16,
+            "fontName": body_font,
+            "fontSize": 12,
+            "leading": 20,
             "spaceAfter": 8,
-            "alignment": 0,  # 左对齐
+            "firstLineIndent": 24,
+            "alignment": 4,
         },
         "heading1": {
             "name": "ChineseHeading1",
             "parent": styles["Heading1"],
-            "fontName": font_name,
-            "fontSize": 22,
-            "leading": 26,
-            "spaceAfter": 12,
-            "spaceBefore": 14,
-            "alignment": 1,  # 居中
+            "fontName": title_font,
+            "fontSize": 20,
+            "leading": 28,
+            "spaceAfter": 16,
+            "spaceBefore": 10,
+            "alignment": 1,
             "bold": True,
+            "textColor": colors.HexColor("#111827"),
         },
         "heading2": {
             "name": "ChineseHeading2",
             "parent": styles["Heading2"],
-            "fontName": font_name,
-            "fontSize": 16,
-            "leading": 20,
-            "spaceAfter": 8,
+            "fontName": heading_font,
+            "fontSize": 15,
+            "leading": 22,
+            "spaceAfter": 10,
             "spaceBefore": 10,
-            "alignment": 0,  # 左对齐
+            "alignment": 0,
             "bold": True,
         },
         "heading3": {
             "name": "ChineseHeading3",
             "parent": styles["Heading3"],
-            "fontName": font_name,
+            "fontName": heading_font,
             "fontSize": 13,
-            "leading": 16,
+            "leading": 18,
             "spaceAfter": 6,
             "spaceBefore": 8,
-            "alignment": 0,  # 左对齐
+            "alignment": 0,
             "bold": True,
         },
         "list": {
             "name": "ChineseList",
             "parent": styles["Normal"],
-            "fontName": font_name,
-            "fontSize": 11,
-            "leading": 16,
+            "fontName": body_font,
+            "fontSize": 12,
+            "leading": 20,
             "spaceAfter": 6,
             "leftIndent": 20,
         },
         "caption": {
             "name": "ChineseCaption",
             "parent": styles["Normal"],
-            "fontName": font_name,
-            "fontSize": 9,
+            "fontName": quote_font,
+            "fontSize": 10,
             "leading": 12,
             "spaceAfter": 8,
-            "alignment": 1,  # 居中
+            "alignment": 1,
             "italic": True,
         },
     }
@@ -470,6 +494,11 @@ def generate_pdf(
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
+        register_chinese_fonts()
+        heading_font = _resolve_font_for_role("heading")
+        body_font = _resolve_font_for_role("body")
+        title_font = _resolve_font_for_role("title")
+
         # 初始化 PDF 文档
         doc = SimpleDocTemplate(
             output_path,
@@ -496,6 +525,86 @@ def generate_pdf(
 
         # 提取并处理各个块
         blocks = extract_markdown_sections(clean_text)
+        report_title = (title or "").strip()
+        if not report_title:
+            for block in blocks:
+                if block.get("type") == "heading1":
+                    report_title = str(block.get("content") or "").strip()
+                    if report_title:
+                        break
+        if not report_title:
+            report_title = "分析报告"
+
+        if blocks and blocks[0].get("type") == "heading1":
+            first_heading = str(blocks[0].get("content") or "").strip()
+            if first_heading == report_title:
+                blocks = blocks[1:]
+
+        cover_title_style = ParagraphStyle(
+            name="ChineseCoverTitle",
+            parent=get_chinese_style("heading1"),
+            fontName=title_font,
+            fontSize=28,
+            leading=34,
+            alignment=1,
+            textColor=colors.white,
+            spaceAfter=12,
+        )
+        cover_subtitle_style = ParagraphStyle(
+            name="ChineseCoverSubtitle",
+            parent=get_chinese_style("normal"),
+            fontName=heading_font,
+            fontSize=12,
+            leading=18,
+            alignment=1,
+            textColor=colors.HexColor("#DCE6F2"),
+            spaceAfter=6,
+        )
+        cover_meta_style = ParagraphStyle(
+            name="ChineseCoverMeta",
+            parent=get_chinese_style("normal"),
+            fontName=body_font,
+            fontSize=10,
+            leading=14,
+            alignment=1,
+            textColor=colors.HexColor("#EEF3F8"),
+        )
+
+        story.append(Spacer(1, A4[1] * 0.16))
+        cover_card = Table(
+            [[
+                Paragraph(report_title, cover_title_style),
+            ], [
+                Paragraph(f"{AGENT_BRAND_FULL} 智能分析报告", cover_subtitle_style),
+            ], [
+                Paragraph(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}", cover_meta_style),
+            ]],
+            colWidths=[doc.width],
+        )
+        cover_card.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#0F3D66')),
+            ('BOX', (0, 0), (-1, -1), 0.8, colors.HexColor('#0F3D66')),
+            ('LEFTPADDING', (0, 0), (-1, -1), 28),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 28),
+            ('TOPPADDING', (0, 0), (-1, -1), 24),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 24),
+        ]))
+        story.append(cover_card)
+        story.append(Spacer(1, 18))
+        intro_style = get_chinese_style("normal")
+        story.append(Paragraph(f"本报告由{AGENT_BRAND_NAME}智能体自动整理生成，正文参照政府部门公文写作习惯，组织为“目标任务、问题定义、数据探查、核心结论、证据链与分析、处置建议”等部分。", intro_style))
+        story.append(PageBreak())
+
+        def _draw_page(canvas, pdf_doc):
+            canvas.saveState()
+            canvas.setStrokeColor(colors.HexColor('#D7DFE9'))
+            canvas.setLineWidth(0.5)
+            canvas.line(pdf_doc.leftMargin, A4[1] - 24, A4[0] - pdf_doc.rightMargin, A4[1] - 24)
+            canvas.line(pdf_doc.leftMargin, 24, A4[0] - pdf_doc.rightMargin, 24)
+            canvas.setFont(body_font, 9)
+            canvas.setFillColor(colors.HexColor('#4A5C73'))
+            canvas.drawRightString(A4[0] - pdf_doc.rightMargin, 14, f"第 {canvas.getPageNumber()} 页")
+            canvas.restoreState()
 
         for block in blocks:
             block_type = block["type"]
@@ -634,7 +743,7 @@ def generate_pdf(
                 story.append(Spacer(1, 8))
 
         # 构建 PDF
-        doc.build(story)
+        doc.build(story, onFirstPage=_draw_page, onLaterPages=_draw_page)
 
         logger.info(f"PDF 生成成功: {output_path}")
         return True

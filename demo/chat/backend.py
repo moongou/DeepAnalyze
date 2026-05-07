@@ -1539,25 +1539,23 @@ def _build_missing_conclusion_answer(reason: str, analysis_language: str = "zh-C
     if normalize_analysis_language(analysis_language) == "en":
         return (
             "<Answer>\n"
-            "The analysis did not complete with a valid final conclusion, so the server generated this fallback conclusion block.\n"
-            f"Why it could not be completed as requested: {safe_reason}\n"
-            "Current conclusion: the task is not deliverable in its requested form under the current evidence, execution state, or runtime constraints.\n"
-            "Recommendation:\n"
-            "1. Narrow the objective or specify the key metric, table, or time range.\n"
-            "2. Check model/provider availability and database query feasibility.\n"
-            "3. Retry after the blocking issue is resolved.\n"
+            "A complete analytical conclusion is not yet supportable under the current execution state and available evidence.\n"
+            f"Current status note: {safe_reason}\n"
+            "Recommended next actions:\n"
+            "1. Narrow the analytical objective and key validation scope.\n"
+            "2. Verify provider availability, data-source connectivity, and query feasibility.\n"
+            "3. Resume the task after the blocking condition is cleared and the evidence chain is supplemented.\n"
             "</Answer>\n"
         )
 
     return (
         "<Answer>\n"
-        "本次分析未能自然产出完整结论，当前结论由服务端兜底生成。\n"
-        f"无法按原要求完整完成的原因：{safe_reason}\n"
-        "当前可得结论：在现有证据、执行状态或运行条件下，本次任务暂时无法按原始要求完整交付。\n"
-        "建议：\n"
-        "1. 缩小分析目标，明确关键指标、表或时间范围。\n"
-        "2. 检查模型/provider 可用性与数据库查询可执行性。\n"
-        "3. 排除阻塞原因后重新发起分析。\n"
+        "根据当前执行状态与已取得材料，现阶段尚不具备形成完整分析结论的条件。\n"
+        f"情况说明：{safe_reason}\n"
+        "建议后续按以下方向继续推进：\n"
+        "1. 进一步聚焦分析对象、关键指标、时间范围与核查口径。\n"
+        "2. 核验模型服务、数据源连接状态及查询条件是否满足执行要求。\n"
+        "3. 补齐关键证据材料后，再行发起针对性复核分析。\n"
         "</Answer>\n"
     )
 
@@ -1993,8 +1991,8 @@ def build_analysis_language_prompt(analysis_language: str) -> str:
             "\n\n**Output language override (highest priority): English**"
             "\n- This preference overrides default language rules in the base prompt."
             "\n- All user-facing narrative text must be in English, including `<Analyze>`, `<Understand>`, `<Answer>`, and report body text."
-            "\n- In interactive mode, task names/descriptions in `<TaskTree>` and semantic confirmation text in `<DataDictionary>` must also be in English."
-            "\n- Keep structural tags unchanged (`<Analyze>`, `<Code>`, `<TaskTree>`, `<DataDictionary>`, etc.); only change natural-language content."
+            "\n- In interactive mode, task names/descriptions in `<TaskTree>` and any data-dictionary explanations must also be in English."
+            "\n- Keep structural tags unchanged (`<Analyze>`, `<Code>`, `<TaskTree>`, etc.); only change natural-language content."
             "\n- Do not output Chinese characters in user-facing text. If any Chinese appears, rewrite it in English before continuing."
         )
 
@@ -2002,8 +2000,8 @@ def build_analysis_language_prompt(analysis_language: str) -> str:
         "\n\n**输出语言覆盖规则（最高优先级）：中文（简体）**"
         "\n- 本规则覆盖基础提示词中的默认语言描述。"
         "\n- 所有面向用户的自然语言内容必须使用简体中文，包括 `<Analyze>`、`<Understand>`、`<Answer>` 和最终报告正文。"
-        "\n- 在交互模式下，`<TaskTree>` 任务名称/描述与 `<DataDictionary>` 待确认语义说明也必须使用简体中文。"
-        "\n- 结构化标签保持不变（如 `<Analyze>`、`<Code>`、`<TaskTree>`、`<DataDictionary>` 等），仅改变自然语言内容。"
+        "\n- 在交互模式下，`<TaskTree>` 任务名称/描述与数据字典相关说明也必须使用简体中文。"
+        "\n- 结构化标签保持不变（如 `<Analyze>`、`<Code>`、`<TaskTree>` 等），仅改变自然语言内容。"
     )
 
 HTTP_SERVER_PORT = 8100
@@ -2055,6 +2053,7 @@ _V1_REWRITE = {
     "/v1/config/databases":       "/api/config/databases",
     "/v1/config/knowledge":       "/api/config/knowledge",
     "/v1/config/data-dictionary": "/api/config/data-dictionary",
+    "/v1/config/data-dictionary/import": "/api/config/data-dictionary/import",
     "/v1/config/analysis-history": "/api/config/analysis-history",
     "/v1/config/export":          "/api/config/export",
     "/v1/knowledge/settings":     "/api/kb/settings",
@@ -4052,7 +4051,7 @@ def get_compact_system_prompt_with_fonts() -> str:
         "你是 DeepAnalyze，负责中国海关风险分析与数据研判。"
         "你的结论必须数据驱动、可解释、可复现，不得臆造字段或结论。\n\n"
         "【输出协议】\n"
-        "1) 按需使用 <Analyze>/<Understand>/<Code>/<Execute>/<Answer>/<TaskTree>/<DataDictionary> 标签。\n"
+        "1) 按需使用 <Analyze>/<Understand>/<Code>/<Execute>/<Answer>/<TaskTree> 标签。\n"
         "2) 每轮应先说明思路，再执行可运行代码，再给结论。\n"
         "3) 无论任务成功、证据不足、需求不合理、条件缺失或执行失败，最终都必须输出一个 <Answer> 结论块，说明可得结论或明确写出无法完成的理由。\n"
         "4) 代码必须包含必要 import、异常处理，并打印关键中间结果。\n\n"
@@ -4171,8 +4170,8 @@ def bot_stream(
 **第一步：数据探索与数据字典建立**
 - 首先执行数据探测代码，获取所有数据文件的字段名、类型、缺失值、基本统计信息。
 - 建立「用户语义 → 数据字段」映射表。
-- 将数据探索结果整理为「数据字典」，向用户展示。
-- 若关键表/字段语义存在歧义，必须先输出 `<DataDictionary>{"items":[...]}</DataDictionary>` 供用户确认，再进入后续规划。
+- 将数据探索结果整理为「数据字典理解」，优先对齐知识库中已有的数据字典与字段定义。
+- 若关键表/字段语义存在歧义，先结合知识库定义给出当前假设并继续规划；将新增或修正的语义理解记录为后续知识库更新候选，不要中断等待确认。
 
 **第二步：分析规划与用户确认（强制步骤 - 不得跳过）**
 - 基于数据字典和用户的分析目标，设计有层次的分析计划。
@@ -4224,7 +4223,7 @@ def bot_stream(
                 "\n\n**Current mode: Interactive analysis (strictly required)**"
                 "\nYou must follow this workflow and do not skip steps:"
                 "\n1) Data exploration and data dictionary."
-                "\n- If key table/field semantics are uncertain, output `<DataDictionary>{\"items\":[...]}</DataDictionary>` for user confirmation first."
+                "\n- Align key table/field semantics with the knowledge-base data dictionary first. If uncertainty remains, state your current assumption and continue; record the new understanding for later knowledge-base update instead of waiting for confirmation."
                 "\n2) Planning and user confirmation. You MUST output the plan using `<TaskTree>`."
                 "\n- Inside `<TaskTree>`, output only one valid JSON object."
                 "\n- Do not repeat the task tree JSON outside `<TaskTree>`."
@@ -4512,19 +4511,17 @@ def bot_stream(
             "\n- 优先使用多段有明确目的的小 SQL，而不是一条巨大 SQL；每段 SQL 执行前应在 `<Analyze>` 中说明目的。"
         )
     data_dictionary_prompt = (
-        "\n\n**Data exploration and semantic confirmation (mandatory before deep analysis)**:"
-        "\n- Before large-scale extraction/modeling, infer business meaning of key tables/fields from schema names, sample values, and join relationships."
-        "\n- When confidence is insufficient or multiple interpretations exist, output only one `<DataDictionary>` block with a single valid JSON object."
-        "\n- JSON schema: {\"items\":[{\"id\":\"1\",\"source_label\":\"optional\",\"table\":\"table_name\",\"field\":\"field_name\",\"proposed_meaning\":\"business meaning\",\"question\":\"what to confirm\",\"confidence\":\"low|medium|high\",\"analysis_usage\":\"how this affects analysis\"}]}"
-        "\n- Do not wrap JSON in markdown code fences. Do not output extra text outside `<DataDictionary>` in that round."
-        "\n- After outputting `<DataDictionary>`, stop immediately and wait for user confirmation to continue."
+        "\n\n**Use knowledge-base data dictionary understanding before deep analysis**:"
+        "\n- Before large-scale extraction/modeling, infer business meaning of key tables/fields from schema names, sample values, join relationships, and any pre-uploaded data dictionary definitions in the knowledge base."
+        "\n- Treat user-reviewed `ai_understanding` definitions in the knowledge base as the current source of truth."
+        "\n- If you infer a better semantic explanation during analysis, continue with that assumption and phrase it explicitly in `<Analyze>` or `<Answer>` when relevant; do not stop for confirmation."
+        "\n- Do not output `<DataDictionary>` blocks, do not ask the user to confirm field semantics in a popup, and do not interrupt analysis for dictionary confirmation."
         if analysis_language == "en"
-        else "\n\n**数据探索与语义确认规则（深度分析前必须执行）**："
-        "\n- 在大规模取数/建模前，必须先基于表名、字段名、样例值和表间关联路径推测关键字段的业务含义。"
-        "\n- 若存在歧义或置信度不足，必须输出且仅输出一个 `<DataDictionary>` 标签块，内部仅包含一个合法 JSON 对象。"
-        "\n- JSON 结构：{\"items\":[{\"id\":\"1\",\"source_label\":\"可选\",\"table\":\"表名\",\"field\":\"字段名\",\"proposed_meaning\":\"推测业务含义\",\"question\":\"需要用户确认的问题\",\"confidence\":\"low|medium|high\",\"analysis_usage\":\"该含义对分析的影响\"}]}"
-        "\n- 禁止使用 markdown 代码块包裹 JSON，且该轮 `<DataDictionary>` 之外不得输出其他说明文字。"
-        "\n- 输出 `<DataDictionary>` 后立即停止，等待用户确认后再继续分析。"
+        else "\n\n**深度分析前优先使用知识库中的数据字典理解**："
+        "\n- 在大规模取数或建模前，先结合表名、字段名、样例值、表间关联路径，以及知识库中预上传的数据字典定义来判断关键字段的业务含义。"
+        "\n- 对于知识库中用户已审阅保存的 `ai_understanding` 字段定义，默认视为当前语义真值。"
+        "\n- 若分析过程中推断出更好的语义解释，可在 `<Analyze>` 或 `<Answer>` 中明确说明当前采用的假设，并继续分析；不要中断等待确认。"
+        "\n- 不要输出 `<DataDictionary>` 标签块，不要要求用户通过弹窗确认字段语义，也不要因为数据字典确认而打断分析流程。"
     )
     signature_safety_prompt = (
         "\n\n**函数调用安全（必须遵守）**："
@@ -4538,6 +4535,21 @@ def bot_stream(
         "\n- `<Analyze>` 说明当前假设与验证计划；`<Code>` 执行可验证动作；`<Answer>` 给出可解释结论。"
         "\n- 证据不足时必须明确标注并提出补充数据建议。"
     )
+    report_architect_skill_prompt = (
+        "\n\n**Report architect skill (must apply before delivering files)**:"
+        "\n- Before generating PDF/DOCX/PPTX, first organize the report into a clear Markdown hierarchy with headings and subheadings."
+        "\n- Use a stable narrative flow: overview and scope -> core findings -> evidence and charts -> risk interpretation -> recommendations and next steps."
+        "\n- Every major section must begin with one summary sentence, then present evidence, then explain impact; avoid dumping long unstructured paragraphs."
+        "\n- Charts must appear immediately after the paragraph they support rather than being grouped at the end."
+        "\n- If the current analysis output is fragmented, rewrite it into a polished report structure before calling report export helpers."
+        if analysis_language == "en"
+        else "\n\n**高级报告编排技能（生成报告前必须应用）**："
+        "\n- 在生成 PDF、DOCX、PPTX 前，先把报告整理成具有明确标题层级的 Markdown 结构。"
+        "\n- 报告叙事顺序固定为：分析概览与范围 → 核心发现 → 证据与图表 → 风险研判 → 建议与下一步。"
+        "\n- 每个主要章节先给一句总述，再展开证据，再解释影响；禁止堆砌没有层次的大段文字。"
+        "\n- 图表必须紧跟其所支撑的结论段落，不得集中堆在报告末尾。"
+        "\n- 如果当前分析输出零散，必须先整理成成稿式报告结构，再调用报告导出工具。"
+    )
 
     system_prompt = assemble_system_prompt(
         modules=[
@@ -4549,6 +4561,7 @@ def bot_stream(
             report_types_prompt,
             signature_safety_prompt,
             methodology_integration_prompt,
+            report_architect_skill_prompt,
             report_prompt,
             database_source_prompt,
             runtime_language_prompt,
@@ -5233,7 +5246,7 @@ def bot_stream(
             if not report_history or str(report_history[-1].get("role", "")).lower() != "assistant":
                 report_history.append({"role": "assistant", "content": assistant_reply})
 
-            md_text = _extract_sections_from_messages(report_history)
+            md_text = _extract_sections_from_messages(report_history, analysis_language=analysis_language)
             if not md_text:
                 md_text = (
                     "No structured report sections were extracted; fallback to final answer text."
@@ -5648,7 +5661,7 @@ def _enhance_pdf_report_in_place(target_pdf_path: Path, md_text: str) -> bool:
             pass
 
 
-def _extract_sections_from_messages(messages: list[dict]) -> str:
+def _extract_sections_from_messages(messages: list[dict], analysis_language: str = "zh-CN") -> str:
     """从历史消息中抽取报告内容。
     
     优先使用 <Answer> 标签中的内容作为报告主体。
@@ -5675,9 +5688,45 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
 
     # 分类提取各类标签内容
     answer_sections = []
+    fallback_answer_sections = []
     analyze_sections = []
     execute_data = []
     file_sections = []
+
+    fallback_report_patterns = [
+        r"本次分析未能自然产出完整结论",
+        r"当前结论由服务端兜底生成",
+        r"无法按原要求完整完成的原因",
+        r"当前可得结论",
+        r"analysis did not complete with a valid final conclusion",
+        r"fallback conclusion block",
+        r"Current conclusion:",
+        r"analysis session finished",
+    ]
+
+    def _contains_fallback_report_text(text: str) -> bool:
+        snippet = str(text or "").strip()
+        if not snippet:
+            return False
+        return any(_re.search(pattern, snippet, _re.IGNORECASE) for pattern in fallback_report_patterns)
+
+    def _sanitize_report_text(text: str) -> str:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return ""
+        kept_lines: list[str] = []
+        for line in raw_text.splitlines():
+            normalized = line.strip()
+            if not normalized:
+                if kept_lines and kept_lines[-1] != "":
+                    kept_lines.append("")
+                continue
+            if any(_re.search(pattern, normalized, _re.IGNORECASE) for pattern in fallback_report_patterns):
+                continue
+            kept_lines.append(normalized)
+        sanitized = "\n".join(kept_lines)
+        sanitized = _re.sub(r"\n{3,}", "\n\n", sanitized)
+        return sanitized.strip()
 
     for match in tag_pattern.finditer(all_content):
         open_tag, seg, close_tag = match.groups()
@@ -5688,10 +5737,16 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
         if not seg:
             continue
         if tag == "answer":
-            answer_sections.append(seg)
+            cleaned_answer = _sanitize_report_text(seg)
+            if _contains_fallback_report_text(seg):
+                fallback_answer_sections.append(cleaned_answer or seg)
+                continue
+            if cleaned_answer:
+                answer_sections.append(cleaned_answer)
         elif tag == "analyze":
             # 去掉预测推理和短代码测试部分，只保留正式分析内容
             clean_seg = _re.sub(r"#\s*(预测推理|短代码测试与结果)\s*\n[\s\S]*?(?=\n#\s*正式分析|$)", "", seg, flags=_re.DOTALL).strip()
+            clean_seg = _sanitize_report_text(clean_seg)
             if clean_seg and len(clean_seg) > 50:  # 只保留有实质内容的分析
                 analyze_sections.append(clean_seg)
         elif tag == "execute":
@@ -5702,7 +5757,7 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
                     seg = seg[:2000] + "\n...(输出已截断)"
                 execute_data.append(seg)
         elif tag == "file":
-            file_sections.append(seg)
+            file_sections.append(_sanitize_report_text(seg) or seg)
 
     # 去重：避免多轮重复内容在自动报告中反复出现
     def _dedup_sections(sections: list[str]) -> list[str]:
@@ -5758,6 +5813,164 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
             kept.append(snippet)
         return "\n".join(kept).strip()
 
+    def _looks_like_structured_report(text: str) -> bool:
+        if not text:
+            return False
+        return bool(
+            _re.search(r"(^|\n)#{1,3}\s+", text)
+            or _re.search(r"(^|\n)(?:一、|二、|三、|四、|五、|1\.|2\.|3\.)", text)
+        )
+
+    def _split_report_paragraphs(text: str) -> list[str]:
+        if not text:
+            return []
+        paragraphs = []
+        for chunk in _re.split(r"\n\s*\n+", text):
+            normalized = chunk.strip()
+            if not normalized:
+                continue
+            normalized = _re.sub(r"\n{2,}", "\n", normalized)
+            paragraphs.append(normalized)
+        return paragraphs
+
+    def _split_report_sentences(text: str) -> list[str]:
+        if not text:
+            return []
+        sentences = _re.findall(r"[^。！？!?\n]+[。！？!?]?", text)
+        cleaned: list[str] = []
+        for sentence in sentences:
+            normalized = str(sentence or "").strip()
+            if not normalized:
+                continue
+            normalized = _re.sub(r"^(?:目标任务|问题定义|数据探查|核心结论|证据链与分析|处置建议)[:：]\s*", "", normalized)
+            cleaned.append(normalized)
+        return cleaned
+
+    def _build_structured_report_markdown(
+        report_text: str,
+        analysis_notes: list[str],
+        execution_notes: list[str],
+    ) -> str:
+        cleaned_report = _sanitize_report_text(report_text)
+        if not cleaned_report:
+            cleaned_report = _sanitize_report_text("\n\n".join(analysis_notes))
+
+        report_paragraphs = _split_report_paragraphs(cleaned_report)
+        report_sentences = _split_report_sentences(cleaned_report)
+        analysis_paragraphs: list[str] = []
+        analysis_sentences: list[str] = []
+        for note in analysis_notes:
+            sanitized_note = _sanitize_report_text(note)
+            analysis_paragraphs.extend(_split_report_paragraphs(sanitized_note))
+            analysis_sentences.extend(_split_report_sentences(sanitized_note))
+        execution_items: list[str] = []
+        for note in execution_notes[:6]:
+            compact = _re.sub(r"\s+", " ", _sanitize_report_text(note)).strip()
+            if compact:
+                execution_items.append(compact[:220] + ("..." if len(compact) > 220 else ""))
+
+        suggestion_pattern = _re.compile(r"建议|下一步|后续|应当|应尽快|建议对|建议将|recommended|recommendation|next step|should", _re.IGNORECASE)
+        risk_pattern = _re.compile(r"风险|异常|可疑|偏离|波动|疑点|违规|逃税|走私|高风险|锁定|重点企业|risk|anomal|deviation|suspicious", _re.IGNORECASE)
+        object_pattern = _re.compile(r"企业|公司|对象|商品|型号|税号|编码|订单|报关单|集装箱|航次|customer|company|entity|object", _re.IGNORECASE)
+
+        suggestions: list[str] = []
+        findings: list[str] = []
+        object_targets: list[str] = []
+        for sentence in report_sentences:
+            normalized = sentence.strip()
+            if not normalized:
+                continue
+            if suggestion_pattern.search(normalized):
+                suggestions.append(normalized)
+                continue
+            if risk_pattern.search(normalized) or len(findings) < 4:
+                findings.append(normalized)
+            if object_pattern.search(normalized):
+                object_targets.append(normalized)
+
+        objective_items = analysis_sentences[:2] or report_sentences[:1]
+        problem_items = [
+            item for item in (report_sentences + analysis_sentences)
+            if item not in objective_items and not suggestion_pattern.search(item)
+        ][:3]
+        probe_items = execution_items[:3] or analysis_sentences[2:5] or report_sentences[:2]
+        conclusion_items = (object_targets[:2] + [item for item in findings if item not in object_targets][:2])[:4]
+        evidence_items = []
+        for item in findings[:4]:
+            if item not in evidence_items:
+                evidence_items.append(item)
+        for item in execution_items[:3]:
+            if item not in evidence_items:
+                evidence_items.append(item)
+        recommendation_items = suggestions[:4]
+
+        if analysis_language == "en":
+            title_text = "Analysis Report"
+            objective_heading = "## 1. Target Task"
+            problem_heading = "## 2. Problem Definition"
+            probe_heading = "## 3. Data Exploration"
+            conclusion_heading = "## 4. Core Conclusions and Object Locking"
+            evidence_heading = "## 5. Evidence Chain and Analysis"
+            advice_heading = "## 6. Recommendations"
+            objective_fallback = "Complete a focused review around the requested risk topic, analysis scope, and target objects."
+            problem_fallback = "The task centers on identifying abnormal patterns, determining whether a stable risk signal exists, and clarifying the scope for follow-up verification."
+            probe_fallback = "The current output can support preliminary exploration, but additional structured evidence may still be required for a fully closed conclusion."
+            conclusion_fallback = "Current evidence indicates a need for continued review, but object locking should remain tied to additional validation evidence."
+            evidence_fallback = "The available materials partially support the current observations, though a stronger evidence chain is still recommended before final disposition."
+            advice_fallback = "Prioritize targeted re-checks on the highest-signal objects and supplement the missing evidence needed for formal closure."
+            numbered = ["1", "2", "3", "4", "5", "6"]
+        else:
+            title_text = "海关风险分析报告"
+            objective_heading = "## 一、目标任务"
+            problem_heading = "## 二、问题定义"
+            probe_heading = "## 三、数据探查"
+            conclusion_heading = "## 四、核心结论（含对象锁定）"
+            evidence_heading = "## 五、证据链与分析"
+            advice_heading = "## 六、处置建议"
+            objective_fallback = "围绕用户提出的分析主题、对象范围和时间口径，对相关业务数据开展针对性风险研判。"
+            problem_fallback = "本次任务重点在于识别异常波动、厘清疑点形成机制，并据此判断是否具备进一步锁定重点对象的条件。"
+            probe_fallback = "当前已完成基础材料梳理与初步探查，但仍需结合更多结构化证据巩固正式结论。"
+            conclusion_fallback = "结合现有材料，可形成阶段性风险关注判断，但对具体对象的最终锁定仍应以补充核查结果为准。"
+            evidence_fallback = "现有分析材料能够支撑初步疑点识别，但形成完整闭环证据链仍需进一步补证。"
+            advice_fallback = "建议围绕高风险对象继续开展针对性核查，并同步补充关键交易、申报与单证材料。"
+            numbered = ["一", "二", "三", "四", "五", "六"]
+
+        lines: list[str] = [f"# {title_text}", "", objective_heading, ""]
+        for item in (objective_items or [objective_fallback]):
+            lines.extend([item, ""])
+
+        lines.extend([problem_heading, ""])
+        for item in (problem_items or [problem_fallback]):
+            lines.extend([item, ""])
+
+        lines.extend([probe_heading, ""])
+        probe_values = probe_items or [probe_fallback]
+        for item in probe_values:
+            lines.append(f"- {item}")
+        lines.append("")
+
+        lines.extend([conclusion_heading, ""])
+        for index, item in enumerate(conclusion_items or [conclusion_fallback], start=1):
+            marker = numbered[index - 1] if index - 1 < len(numbered) else str(index)
+            if analysis_language == "en":
+                lines.append(f"### Conclusion {marker}")
+            else:
+                lines.append(f"### （{marker}）")
+            lines.extend(["", item, ""])
+
+        lines.extend([evidence_heading, ""])
+        for index, item in enumerate(evidence_items or [evidence_fallback], start=1):
+            lines.append(f"{index}. {item}")
+        lines.append("")
+
+        lines.extend([advice_heading, ""])
+        advice_values = recommendation_items or [advice_fallback]
+        for index, item in enumerate(advice_values, start=1):
+            lines.append(f"{index}. {item}")
+        lines.append("")
+
+        return "\n".join(lines).strip()
+
     # 构建最终报告文本
     final_text = ""
 
@@ -5781,14 +5994,11 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
         and any(_re.search(pattern, final_text, _re.IGNORECASE) for pattern in terminal_answer_markers)
     )
 
-    # 2. 如果 Answer 内容过短或为空，用 Analyze 内容补充
-    if (not final_text or len(final_text) < 200) and not has_terminal_answer:
+    # 2. 仅在缺少 Answer 时，才用 Analyze 内容补充主体
+    if not final_text and not has_terminal_answer:
         if analyze_sections:
             analyze_text = "\n\n".join(analyze_sections).strip()
-            if final_text:
-                final_text = analyze_text + "\n\n" + final_text
-            else:
-                final_text = analyze_text
+            final_text = analyze_text
 
     # 3. 检测占位符模式并尝试替换
     placeholder_pattern = r'\[详细.*?(?:描述|分析|评估|建议)\.{0,3}\]'
@@ -5814,15 +6024,19 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
             if role in ("assistant", "ai"):
                 content = str((m or {}).get("content") or "")
                 # 移除标签
-                clean = _re.sub(r'</?(?:Analyze|Understand|Code|Execute|File|Answer|TaskTree|DataDictionary)>', '', content).strip()
+                clean = _sanitize_report_text(_re.sub(r'</?(?:Analyze|Understand|Code|Execute|File|Answer|TaskTree|DataDictionary)>', '', content)).strip()
                 if clean and len(clean) > 20:
                     collected_chunks.append(clean)
 
         if collected_chunks:
             final_text = "\n\n".join(collected_chunks)
+        elif fallback_answer_sections:
+            final_text = _sanitize_report_text("\n\n".join(fallback_answer_sections))
 
     if final_text and not has_real_data_dictionary_confirmation:
         final_text = _strip_unconfirmed_dictionary_claims(final_text)
+
+    final_text = _build_structured_report_markdown(final_text, analyze_sections, execute_data)
 
     image_names = _extract_image_filenames_from_file_sections(file_sections)
     if image_names:
@@ -6477,7 +6691,7 @@ async def export_report(body: dict = Body(...)):
         if not isinstance(messages, list):
             raise HTTPException(status_code=400, detail="messages must be a list")
 
-        md_text = _extract_sections_from_messages(messages)
+        md_text = _extract_sections_from_messages(messages, analysis_language=analysis_language)
         if not md_text:
             if analysis_language == "en":
                 md_text = "(No <Analyze>/<Understand>/<Code>/<Execute>/<Answer> sections found.)"
@@ -7768,8 +7982,18 @@ def _normalize_data_dictionary_item(raw_item: Any) -> Optional[Dict[str, Any]]:
         or raw_item.get("fieldName")
         or ""
     ).strip()
-    meaning = str(
-        raw_item.get("proposed_meaning")
+    code_explanation = str(
+        raw_item.get("code_explanation")
+        or raw_item.get("schema_meaning")
+        or raw_item.get("schema_definition")
+        or raw_item.get("column_comment")
+        or raw_item.get("comment")
+        or raw_item.get("db_comment")
+        or ""
+    ).strip()
+    ai_understanding = str(
+        raw_item.get("ai_understanding")
+        or raw_item.get("proposed_meaning")
         or raw_item.get("meaning")
         or raw_item.get("business_meaning")
         or raw_item.get("description")
@@ -7777,7 +8001,7 @@ def _normalize_data_dictionary_item(raw_item: Any) -> Optional[Dict[str, Any]]:
         or ""
     ).strip()
 
-    if not table_name and not field_name and not meaning:
+    if not table_name and not field_name and not ai_understanding and not code_explanation:
         return None
 
     source_label = str(
@@ -7812,7 +8036,7 @@ def _normalize_data_dictionary_item(raw_item: Any) -> Optional[Dict[str, Any]]:
     if raw_id:
         item_id = raw_id
     else:
-        id_seed = f"{source_label}|{table_name}|{field_name}|{meaning}"
+        id_seed = f"{source_label}|{table_name}|{field_name}|{ai_understanding}|{code_explanation}"
         item_id = hashlib.sha1(id_seed.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
     return {
@@ -7820,11 +8044,190 @@ def _normalize_data_dictionary_item(raw_item: Any) -> Optional[Dict[str, Any]]:
         "source_label": source_label,
         "table": table_name,
         "field": field_name,
-        "meaning": meaning,
+        "code_explanation": code_explanation,
+        "ai_understanding": ai_understanding,
+        "meaning": ai_understanding,
         "question": question,
         "confidence": confidence,
         "analysis_usage": analysis_usage,
         "aliases": aliases,
+    }
+
+
+_DATA_DICTIONARY_IMPORT_COLUMN_ALIASES = {
+    "source_label": {
+        "sourcelabel", "source", "datasource", "database", "db", "数据源", "来源", "库", "数据库", "连接名", "连接"
+    },
+    "table": {
+        "table", "tablename", "tablename", "sheet", "sheetname", "数据表", "表", "表名", "工作表", "工作表名"
+    },
+    "field": {
+        "field", "column", "fieldname", "columnname", "字段", "字段名", "列", "列名"
+    },
+    "code_explanation": {
+        "codeexplanation", "schemaexplanation", "schemadefinition", "schemameaning", "columncomment", "comment", "dbcomment",
+        "代码释义", "字段释义", "架构释义", "结构释义", "代码定义", "字段注释", "列注释", "注释"
+    },
+    "ai_understanding": {
+        "aiunderstanding", "meaning", "semanticmeaning", "businessmeaning", "proposedmeaning", "description", "datadefinition",
+        "字段定义", "数据定义", "语义定义", "业务含义", "含义", "理解", "ai理解", "ai关联理解", "ai关联理解的数据定义"
+    },
+    "question": {
+        "question", "confirmquestion", "uncertainty", "remark", "remarks", "note", "notes", "问题", "待确认点", "备注", "说明"
+    },
+    "confidence": {
+        "confidence", "certainty", "score", "置信度", "可信度"
+    },
+    "analysis_usage": {
+        "analysisusage", "usage", "usecase", "purpose", "分析用途", "用途", "使用场景"
+    },
+}
+
+
+def _normalize_data_dictionary_import_key(raw_key: Any) -> str:
+    key_text = str(raw_key or "").strip().lower()
+    return re.sub(r"[\s_\-:/\\|（）()【】\[\]·,.，。：；;]+", "", key_text)
+
+
+def _canonical_data_dictionary_import_key(raw_key: Any) -> Optional[str]:
+    normalized = _normalize_data_dictionary_import_key(raw_key)
+    if not normalized:
+        return None
+    for canonical, aliases in _DATA_DICTIONARY_IMPORT_COLUMN_ALIASES.items():
+        if normalized in aliases:
+            return canonical
+    return None
+
+
+def _clean_data_dictionary_import_value(raw_value: Any) -> str:
+    if raw_value is None:
+        return ""
+    try:
+        if pd.isna(raw_value):
+            return ""
+    except Exception:
+        pass
+    return str(raw_value).strip()
+
+
+def _normalize_imported_data_dictionary_row(
+    raw_row: Dict[str, Any],
+    default_source_label: str = "",
+    default_table_name: str = "",
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_row, dict):
+        return None
+
+    normalized_row: Dict[str, Any] = {}
+    for raw_key, raw_value in raw_row.items():
+        canonical_key = _canonical_data_dictionary_import_key(raw_key)
+        if not canonical_key:
+            continue
+        cleaned_value = _clean_data_dictionary_import_value(raw_value)
+        if cleaned_value:
+            normalized_row[canonical_key] = cleaned_value
+
+    if default_source_label and not normalized_row.get("source_label"):
+        normalized_row["source_label"] = default_source_label
+    if default_table_name and not normalized_row.get("table"):
+        normalized_row["table"] = default_table_name
+    if normalized_row.get("ai_understanding") and not normalized_row.get("meaning"):
+        normalized_row["meaning"] = normalized_row["ai_understanding"]
+
+    if not any(normalized_row.get(field) for field in ("table", "field", "code_explanation", "ai_understanding", "meaning")):
+        return None
+    return normalized_row
+
+
+def _decode_uploaded_text(raw_bytes: bytes) -> str:
+    if not raw_bytes:
+        return ""
+
+    encodings_to_try: List[str] = []
+    detected_encoding = str((chardet.detect(raw_bytes) or {}).get("encoding") or "").strip()
+    if detected_encoding:
+        encodings_to_try.append(detected_encoding)
+    encodings_to_try.extend(["utf-8-sig", "utf-8", "gb18030", "gbk"])
+
+    seen: set[str] = set()
+    for encoding in encodings_to_try:
+        encoding_key = encoding.lower()
+        if encoding_key in seen:
+            continue
+        seen.add(encoding_key)
+        try:
+            return raw_bytes.decode(encoding)
+        except Exception:
+            continue
+    return raw_bytes.decode("utf-8", errors="ignore")
+
+
+def _extract_data_dictionary_import_items(
+    filename: str,
+    raw_bytes: bytes,
+    default_source_label: str = "",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    suffix = Path(filename or "").suffix.lower()
+    imported_items: List[Dict[str, Any]] = []
+    skipped_count = 0
+    sheet_names: List[str] = []
+
+    def append_rows(rows: List[Any], table_name: str = "") -> None:
+        nonlocal skipped_count
+        for row in rows:
+            normalized = _normalize_imported_data_dictionary_row(
+                row if isinstance(row, dict) else {},
+                default_source_label=default_source_label,
+                default_table_name=table_name,
+            )
+            if normalized:
+                imported_items.append(normalized)
+            else:
+                skipped_count += 1
+
+    if suffix == ".json":
+        text = _decode_uploaded_text(raw_bytes)
+        payload = json.loads(text)
+        if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            append_rows(payload.get("items", []))
+        elif isinstance(payload, dict) and isinstance(payload.get("entries"), list):
+            append_rows(payload.get("entries", []))
+        elif isinstance(payload, dict) and isinstance(payload.get("tables"), dict):
+            for table_name, rows in payload.get("tables", {}).items():
+                if isinstance(rows, list):
+                    append_rows(rows, table_name=str(table_name or "").strip())
+        elif isinstance(payload, list):
+            append_rows(payload)
+        elif isinstance(payload, dict):
+            append_rows([payload])
+        else:
+            raise ValueError("JSON 数据字典格式不支持")
+    elif suffix == ".csv":
+        text = _decode_uploaded_text(raw_bytes)
+        frame = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
+        append_rows(frame.to_dict(orient="records"))
+    elif suffix in {".xlsx", ".xls"}:
+        workbook = pd.read_excel(io.BytesIO(raw_bytes), sheet_name=None, dtype=str)
+        for sheet_name, frame in workbook.items():
+            if frame is None:
+                continue
+            safe_sheet_name = str(sheet_name or "").strip()
+            if safe_sheet_name:
+                sheet_names.append(safe_sheet_name)
+            default_table_name = ""
+            normalized_sheet_key = _normalize_data_dictionary_import_key(safe_sheet_name)
+            if normalized_sheet_key not in {"sheet", "sheet1", "sheet2", "sheet3"}:
+                default_table_name = safe_sheet_name
+            append_rows(frame.to_dict(orient="records"), table_name=default_table_name)
+    else:
+        raise ValueError("仅支持 csv、xlsx、xls、json 格式的数据字典导入")
+
+    return imported_items, {
+        "file_name": filename,
+        "file_type": suffix or "unknown",
+        "imported_count": len(imported_items),
+        "skipped_count": skipped_count,
+        "sheet_names": sheet_names,
     }
 
 
@@ -7902,6 +8305,20 @@ def upsert_confirmed_data_dictionary(
 
         if matched_index >= 0:
             existing_entry = entries[matched_index] if isinstance(entries[matched_index], dict) else {}
+            if not candidate.get("code_explanation"):
+                candidate["code_explanation"] = str(existing_entry.get("code_explanation") or "")
+            if not candidate.get("ai_understanding"):
+                candidate["ai_understanding"] = str(existing_entry.get("ai_understanding") or existing_entry.get("meaning") or "")
+            if not candidate.get("meaning"):
+                candidate["meaning"] = str(candidate.get("ai_understanding") or existing_entry.get("meaning") or "")
+            if not candidate.get("question"):
+                candidate["question"] = str(existing_entry.get("question") or "")
+            if not candidate.get("confidence"):
+                candidate["confidence"] = str(existing_entry.get("confidence") or "")
+            if not candidate.get("analysis_usage"):
+                candidate["analysis_usage"] = str(existing_entry.get("analysis_usage") or "")
+            if not candidate.get("aliases"):
+                candidate["aliases"] = list(existing_entry.get("aliases") or [])
             candidate["created_at"] = str(existing_entry.get("created_at") or existing_entry.get("confirmed_at") or now_iso)
             entries[matched_index] = candidate
             updated_count += 1
@@ -8000,15 +8417,16 @@ def build_confirmed_data_dictionary_context(
 
     lines: List[str] = []
     if analysis_language == "en":
-        lines.append("User-confirmed data dictionary context:")
+        lines.append("Knowledge-base data dictionary context:")
     else:
-        lines.append("用户确认的数据字典上下文：")
+        lines.append("知识库中的数据字典理解：")
 
     for item in selected_entries:
         source_label = str(item.get("source_label", "") or "").strip()
         table_name = str(item.get("table", "") or "").strip()
         field_name = str(item.get("field", "") or "").strip()
-        meaning = _shorten_text(item.get("meaning", ""), max_len=120)
+        meaning = _shorten_text(item.get("ai_understanding") or item.get("meaning") or item.get("code_explanation", ""), max_len=120)
+        code_explanation = _shorten_text(item.get("code_explanation", ""), max_len=80)
         confidence = str(item.get("confidence", "") or "").strip()
         usage = _shorten_text(item.get("analysis_usage", ""), max_len=80)
 
@@ -8017,13 +8435,17 @@ def build_confirmed_data_dictionary_context(
             subject = f"{source_label}::{subject}"
 
         if analysis_language == "en":
-            line = f"- {subject} => {meaning or 'confirmed business meaning'}"
+            line = f"- {subject} => {meaning or 'knowledge-base business meaning'}"
+            if code_explanation and code_explanation != meaning:
+                line += f"; schema note: {code_explanation}"
             if confidence:
                 line += f" (confidence: {confidence})"
             if usage:
                 line += f"; usage: {usage}"
         else:
-            line = f"- {subject} => {meaning or '已确认业务含义'}"
+            line = f"- {subject} => {meaning or '知识库业务含义'}"
+            if code_explanation and code_explanation != meaning:
+                line += f"；代码释义：{code_explanation}"
             if confidence:
                 line += f"（置信度：{confidence}）"
             if usage:
@@ -9042,7 +9464,57 @@ async def save_user_data_dictionary(body: dict = Body(...)):
     return {
         "success": True,
         "result": result,
-        "message": "数据字典确认结果已保存到本地知识库",
+        "message": "数据字典理解已保存到本地知识库",
+    }
+
+
+@app.post("/api/config/data-dictionary/import")
+async def import_user_data_dictionary(
+    file: UploadFile = File(...),
+    username: str = Form("default"),
+    session_id: str = Form(""),
+    default_source_label: str = Form(""),
+):
+    filename = str(file.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="缺少上传文件名")
+
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="上传的数据字典文件为空")
+
+    try:
+        dictionary_items, import_meta = _extract_data_dictionary_import_items(
+            filename=filename,
+            raw_bytes=raw_bytes,
+            default_source_label=str(default_source_label or "").strip(),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"数据字典导入失败: {exc}")
+
+    if not dictionary_items:
+        return {
+            "success": False,
+            "result": {
+                "added_count": 0,
+                "updated_count": 0,
+                "total_count": len(_load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []}).get("entries", [])),
+            },
+            "import_meta": import_meta,
+            "message": "未从上传文件中识别到可导入的数据字典条目",
+        }
+
+    result = upsert_confirmed_data_dictionary(
+        username=username,
+        session_id=session_id,
+        source_labels=[default_source_label] if str(default_source_label or "").strip() else [],
+        dictionary_items=dictionary_items,
+    )
+    return {
+        "success": True,
+        "result": result,
+        "import_meta": import_meta,
+        "message": f"已导入 {import_meta.get('imported_count', 0)} 条数据字典理解",
     }
 
 
@@ -9081,7 +9553,7 @@ async def delete_user_data_dictionary(body: dict = Body(...)):
 
     return {
         "success": True,
-        "message": f"已撤销 {removed_count} 条已确认数据字典记录",
+        "message": f"已删除 {removed_count} 条数据字典理解记录",
         "removed_count": removed_count,
         "total": len(remaining_entries),
     }
