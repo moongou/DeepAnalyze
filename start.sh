@@ -3,14 +3,40 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 print_banner() {
-	echo "╔══════════════════════════════════════════════════╗"
-	echo "║                                                  ║"
-	echo "║              🔬  D e e p A n a l y z e           ║"
-	echo "║                                                  ║"
-	echo "║       Intelligent Analysis Platform              ║"
-	echo "║       智能分析平台                                ║"
-	echo "║                                                  ║"
-	echo "╚══════════════════════════════════════════════════╝"
+	local term_cols
+	term_cols="$(tput cols 2>/dev/null || echo 80)"
+	if [[ ! "$term_cols" =~ ^[0-9]+$ ]]; then
+		term_cols=80
+	fi
+
+	print_centered_line() {
+		local line="$1"
+		local width="$2"
+		local line_len="${#line}"
+		if (( line_len >= width )); then
+			echo "$line"
+			return
+		fi
+		local pad=$(( (width - line_len) / 2 ))
+		printf "%*s%s\n" "$pad" "" "$line"
+	}
+
+	while IFS= read -r line; do
+		print_centered_line "$line" "$term_cols"
+	done <<'EOF'
+           ▄▄▄▄▄▄▄▄▄▄    ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+   ███████ ██▀▀▀▀▀▀██    ▀▀▀▀▀▀▀▀▀██▀▀▀▀▀▀▀▀▀
+       ▄█▀ ██  ▄▄  ██      ▄▄▄▄▄▄▄██▄▄▄▄▄▄▄
+   ██▄ ██  ██  ██  ██     ▀██▀▀▀▀▀██▀▀▀▀▀██▀
+    ▀█▄██  ██  ██  ██      ██ ▄▄  ██ ██▄ ██
+      ██▄  ██ ▄█▀  ██      ██  ▀█ ██  ▀█ ██
+    ▄██▀█▄ ▀  ████         ██ ▄▄  ██ █▄  ██
+  ▄██▀  ▀▀  ▄██▀██   ▄     ██ ▀██ ██  ██ ██
+  ▀▀     ▄▄██▀  ██  ███    ██     ██   ▄▄██
+        ▀█▀▀    ▀▀▀▀▀▀    ▀▀▀          ▀█▀▀
+EOF
+	echo ""
+	print_centered_line "AI-powered Customs Risk Analysis Expert" "$term_cols"
 	echo ""
 }
 
@@ -64,9 +90,9 @@ apply_backend_profile() {
 	local backend="$1"
 	if [[ "$backend" == "mlx" ]]; then
 		local mlx_model_dir
-		mlx_model_dir="${DEEPANALYZE_MLX_MODEL_DIR:-$SCRIPT_DIR/DeepAnalyze-8B-MLX-4bit}"
-		if [[ ! -d "$mlx_model_dir" && -d "$SCRIPT_DIR/DeepAnalyze-8B-MLX-FP16" ]]; then
-			mlx_model_dir="$SCRIPT_DIR/DeepAnalyze-8B-MLX-FP16"
+		mlx_model_dir="${DEEPANALYZE_MLX_MODEL_DIR:-$SCRIPT_DIR/DeepAnalyze-8B-MLX-FP16}"
+		if [[ ! -d "$mlx_model_dir" && -d "$SCRIPT_DIR/DeepAnalyze-8B-MLX-4bit" ]]; then
+			mlx_model_dir="$SCRIPT_DIR/DeepAnalyze-8B-MLX-4bit"
 		fi
 		export DEEPANALYZE_MLX_MODEL_DIR="$mlx_model_dir"
 		export DEEPANALYZE_COMPUTE_BACKEND="mlx"
@@ -126,6 +152,8 @@ warn_if_backend_mismatch() {
 	fi
 }
 
+print_banner
+
 BACKEND_ARG=""
 if [[ "${1:-}" == "--backend" ]]; then
 	BACKEND_ARG="$(normalize_backend "${2:-}")"
@@ -141,7 +169,6 @@ elif [[ -n "${DEEPANALYZE_COMPUTE_BACKEND:-}" ]]; then
 fi
 
 if [[ -z "$SELECTED_BACKEND" ]]; then
-	print_banner
 	DEFAULT_BACKEND="$(detect_default_backend)"
 	echo "DeepAnalyze startup profile selection"
 	echo "1) Apple Silicon / MLX"

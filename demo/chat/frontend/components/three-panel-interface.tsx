@@ -7,12 +7,11 @@ import {
   oneLight,
 } from "react-syntax-highlighter/dist/esm/styles/prism";
 import Editor from "@monaco-editor/react";
-import { useState, useRef, useEffect, useCallback, memo } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react";
 import { configureMonaco } from "@/lib/monaco-config";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Slider } from "@/components/ui/slider";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -21,6 +20,7 @@ import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -59,15 +59,13 @@ import {
   Terminal,
   BookOpen,
   Bot,
-  Settings,
   Languages,
-  Cpu,
-  Zap,
-  Monitor,
+  GitBranch,
   ListTree,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
-import { Tree, NodeApi } from "react-arborist";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
 import { useDatabase, normalizeDbType as normalizeDbTypeForRequest, getDefaultPort as getDefaultPortForDbType } from "@/hooks/useDatabase";
@@ -77,6 +75,7 @@ import { useWorkspace } from "@/hooks/useWorkspace";
 import { AgentIntroDialog } from "@/components/dialogs/AgentIntroDialog";
 import { SideGuidanceDialog } from "@/components/dialogs/SideGuidanceDialog";
 import { TaskTreeDialog, type TaskTreeNode, parseTaskTreeContent } from "@/components/dialogs/TaskTreeDialog";
+import { parseDataDictionaryContent } from "@/components/dialogs/DataDictionaryDialog";
 import { ProjectSaveDialog } from "@/components/dialogs/ProjectSaveDialog";
 import { ProjectManagerDialog } from "@/components/dialogs/ProjectManagerDialog";
 import { BackupRestoreDialog } from "@/components/dialogs/BackupRestoreDialog";
@@ -87,6 +86,14 @@ import { YutuPanel } from "@/components/dialogs/YutuPanel";
 import { SimpleSettingsDialog } from "@/components/dialogs/SimpleSettingsDialog";
 import { KnowledgeSettingsDialog } from "@/components/dialogs/KnowledgeSettingsDialog";
 import { SystemSettingsDialog } from "@/components/dialogs/SystemSettingsDialog";
+import { type DataDictionaryKnowledgeEntry } from "@/components/dialogs/DataDictionarySettingsPanel";
+import { DatabaseRelationshipDialog } from "@/components/dialogs/DatabaseRelationshipDialog";
+import {
+  type AnalysisHistoryEvent,
+  type AnalysisHistoryRunSummary,
+  type AnalysisHistorySettings,
+} from "@/components/dialogs/AnalysisHistorySettingsPanel";
+import { AnalysisRuntimeSidebar } from "@/components/dialogs/AnalysisRuntimeSidebar";
 import { FileIcon, defaultStyles } from "react-file-icon";
 import {
   Select,
@@ -106,6 +113,12 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Checkbox } from "@/components/ui/checkbox";
 
 interface Message {
   id: string;
@@ -133,6 +146,40 @@ interface WorkspaceFile {
   preview_url?: string;
 }
 
+const DATA_PROFILE_REPORT_PATTERN = /^Data_Exploration_SKILL_.*\.md$/i;
+const DATA_SOURCE_FILE_EXTENSIONS = new Set([
+  "csv",
+  "tsv",
+  "txt",
+  "json",
+  "jsonl",
+  "xls",
+  "xlsx",
+  "parquet",
+  "feather",
+  "orc",
+  "db",
+  "sqlite",
+]);
+
+interface SavedDatabaseConnection {
+  id: string;
+  dbType: string;
+  label: string;
+  config: {
+    host?: string;
+    port?: string;
+    user?: string;
+    password?: string;
+    database: string;
+  };
+}
+
+interface DataSourceSelectionState {
+  selectedDbSourceIds: string[];
+  allowFilesOnly: boolean;
+}
+
 type WorkspaceNode = {
   name: string;
   path: string; // relative path
@@ -146,12 +193,137 @@ type WorkspaceNode = {
   is_converted?: boolean; // 标识是否为 UTF-8 编码转换后的文件
 };
 
+type OutputCategoryId = "reports" | "charts" | "data" | "other";
+
+type WorkspaceOutputFile = WorkspaceFile & {
+  path: string;
+  category: OutputCategoryId;
+  isGenerated: boolean;
+};
+
+const OUTPUT_CATEGORY_ORDER: OutputCategoryId[] = [
+  "reports",
+  "charts",
+  "data",
+  "other",
+];
+
+const OUTPUT_REPORT_EXTENSIONS = new Set([
+  "pdf",
+  "doc",
+  "docx",
+  "ppt",
+  "pptx",
+]);
+
+const OUTPUT_CHART_EXTENSIONS = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "svg",
+  "webp",
+]);
+
+const OUTPUT_DATA_EXTENSIONS = new Set([
+  "csv",
+  "tsv",
+  "xls",
+  "xlsx",
+  "json",
+  "jsonl",
+  "parquet",
+  "feather",
+  "orc",
+  "db",
+  "sqlite",
+]);
+
+const OUTPUT_CATEGORY_META = {
+  reports: {
+    label: "分析报告",
+    hint: "PDF / Word / PPT",
+    empty: "当前还没有分析报告文件。",
+    icon: FileText,
+    tone: "border-amber-300/70 bg-amber-50/90 text-amber-700 shadow-[0_12px_24px_rgba(245,158,11,0.14)] dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100",
+    accent: "text-amber-600 dark:text-amber-300",
+  },
+  charts: {
+    label: "图表图像",
+    hint: "PNG / SVG / JPG",
+    empty: "当前还没有图表图像输出。",
+    icon: ImageIcon,
+    tone: "border-cyan-300/70 bg-cyan-50/90 text-cyan-700 shadow-[0_12px_24px_rgba(6,182,212,0.14)] dark:border-cyan-500/30 dark:bg-cyan-500/10 dark:text-cyan-100",
+    accent: "text-cyan-600 dark:text-cyan-300",
+  },
+  data: {
+    label: "数据结果",
+    hint: "CSV / XLSX / JSON",
+    empty: "当前还没有数据结果文件。",
+    icon: Database,
+    tone: "border-emerald-300/70 bg-emerald-50/90 text-emerald-700 shadow-[0_12px_24px_rgba(16,185,129,0.14)] dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-100",
+    accent: "text-emerald-600 dark:text-emerald-300",
+  },
+  other: {
+    label: "其他材料",
+    hint: "MD / TXT / HTML",
+    empty: "当前还没有其他材料文件。",
+    icon: FolderOpen,
+    tone: "border-slate-300/80 bg-slate-50/95 text-slate-700 shadow-[0_12px_24px_rgba(15,23,42,0.1)] dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-100",
+    accent: "text-slate-600 dark:text-slate-300",
+  },
+} as const;
+
+const normalizeWorkspaceExtension = (name?: string, extension?: string) => {
+  const normalizedExtension = String(extension || "")
+    .replace(/^\./, "")
+    .toLowerCase();
+  if (normalizedExtension) {
+    return normalizedExtension;
+  }
+  if (!name) {
+    return "txt";
+  }
+  const lastDot = name.lastIndexOf(".");
+  return lastDot > -1 ? name.slice(lastDot + 1).toLowerCase() : "txt";
+};
+
+const getWorkspaceOutputCategory = (extension: string): OutputCategoryId => {
+  if (OUTPUT_REPORT_EXTENSIONS.has(extension)) {
+    return "reports";
+  }
+  if (OUTPUT_CHART_EXTENSIONS.has(extension)) {
+    return "charts";
+  }
+  if (OUTPUT_DATA_EXTENSIONS.has(extension)) {
+    return "data";
+  }
+  return "other";
+};
+
+const isConvertedWorkspacePath = (path: string) => {
+  const segments = String(path || "")
+    .split("/")
+    .filter(Boolean)
+    .map((segment) => segment.toLowerCase());
+  return segments.includes("converted");
+};
+
 interface AnalysisSection {
   type: "Analyze" | "Understand" | "Code" | "Execute" | "Answer";
   content: string;
   icon: string;
   color: string;
 }
+
+const DEFAULT_ANALYSIS_HISTORY_SETTINGS: AnalysisHistorySettings = {
+  enabled: true,
+  capture_stream_progress: true,
+  capture_prompt_preview: true,
+  max_runs: 120,
+  stream_progress_chunk_interval: 40,
+  stream_progress_char_interval: 1600,
+};
 
 const createClientId = () =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -160,6 +332,103 @@ const createClientId = () =>
 
 const MODEL_PROVIDER_STORE_KEY = "modelProviderStore";
 const ANALYSIS_LANGUAGE_STORE_KEY = "analysisLanguage";
+const LEGACY_DB_SETTINGS_STORE_KEY = "systemDbSettings";
+const LEFT_PANEL_DOCKED_STORE_KEY = "leftPanelDocked";
+const LEFT_PANEL_DOCKED_DEFAULT_SIZE = 6;
+const LEFT_PANEL_DOCKED_MIN_SIZE = 4;
+
+const getUserDbSettingsStorageKey = (username?: string | null) => {
+  const normalized = String(username || "default").trim() || "default";
+  return `systemDbSettings:${normalized}`;
+};
+
+const getUserDataSourceSelectionStorageKey = (username?: string | null) => {
+  const normalized = String(username || "default").trim() || "default";
+  return `dataSourceSelection:${normalized}`;
+};
+
+const sanitizeDbSourceToken = (value: unknown) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+const buildDatabaseConnectionId = (
+  dbType: string,
+  config: Record<string, unknown>
+) => {
+  const normalizedType = normalizeDbTypeForRequest(dbType);
+  const dbName = sanitizeDbSourceToken(config.database);
+  if (normalizedType === "sqlite") {
+    return `db_${normalizedType}_${dbName || "local"}`;
+  }
+  const host = sanitizeDbSourceToken(config.host);
+  const port = sanitizeDbSourceToken(config.port);
+  const user = sanitizeDbSourceToken(config.user);
+  return `db_${normalizedType}_${host || "localhost"}_${port || "default"}_${user || "user"}_${dbName || "database"}`;
+};
+
+const normalizeSavedDbConnections = (connections: unknown): SavedDatabaseConnection[] => {
+  if (!Array.isArray(connections)) {
+    return [];
+  }
+
+  const normalized: SavedDatabaseConnection[] = [];
+  const seenIds = new Set<string>();
+
+  connections.forEach((raw, index) => {
+    if (!raw || typeof raw !== "object") {
+      return;
+    }
+
+    const source = raw as Record<string, unknown>;
+    const dbType = normalizeDbTypeForRequest(String(source.dbType || source.db_type || "mysql"));
+    const sourceConfig =
+      source.config && typeof source.config === "object"
+        ? (source.config as Record<string, unknown>)
+        : {};
+
+    const normalizedConfig = {
+      host: String(sourceConfig.host || "").trim(),
+      port: String(sourceConfig.port || "").trim(),
+      user: String(sourceConfig.user || "").trim(),
+      password: String(sourceConfig.password || ""),
+      database: String(sourceConfig.database || "").trim(),
+    };
+
+    if (!normalizedConfig.database) {
+      return;
+    }
+
+    const fallbackId = buildDatabaseConnectionId(dbType, normalizedConfig as Record<string, unknown>);
+    const incomingId = String(source.id || "").trim();
+    const candidateId = incomingId || fallbackId || `db_source_${index + 1}`;
+    const uniqueId = seenIds.has(candidateId) ? `${candidateId}_${index + 1}` : candidateId;
+    seenIds.add(uniqueId);
+
+    const defaultLabel =
+      dbType === "sqlite"
+        ? `${dbType}@${normalizedConfig.database}`
+        : `${dbType}@${normalizedConfig.user || "anonymous"}@${normalizedConfig.host || "localhost"}:${normalizedConfig.port || "default"}/${normalizedConfig.database}`;
+
+    normalized.push({
+      id: uniqueId,
+      dbType,
+      label: String(source.label || "").trim() || defaultLabel,
+      config: normalizedConfig,
+    });
+  });
+
+  return normalized;
+};
+
+const areSameStringArrays = (left: string[], right: string[]) => {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((item, index) => item === right[index]);
+};
 
 type AnalysisLanguage = "zh-CN" | "en";
 
@@ -439,7 +708,8 @@ type StructuredSectionType =
   | "Execute"
   | "Answer"
   | "File"
-  | "TaskTree";
+  | "TaskTree"
+  | "DataDictionary";
 
 const StreamingMarkdownBlock = memo(
   function StreamingMarkdownBlock({
@@ -478,6 +748,13 @@ const StreamingSectionBody = memo(
         return (
           <div className="p-3 text-sm text-amber-600 dark:text-amber-400 animate-pulse">
             正在生成分析任务树...
+          </div>
+        );
+      }
+      if (type === "DataDictionary") {
+        return (
+          <div className="p-3 text-sm text-amber-600 dark:text-amber-400 animate-pulse">
+            正在生成 AI 数据字典理解...
           </div>
         );
       }
@@ -525,6 +802,20 @@ const StreamingSectionBody = memo(
         );
       }
       return <div className="text-sm text-gray-500">任务树数据格式异常，请重新生成</div>;
+    }
+    if (type === "DataDictionary") {
+      const parsed = parseDataDictionaryContent(content);
+      const itemCount = parsed?.items.length || 0;
+      return (
+        <div className="text-sm text-amber-700 dark:text-amber-300">
+          <div className="mb-2 font-medium">
+            {itemCount > 0 ? `AI 已记录 ${itemCount} 条数据字典理解` : "AI 已记录数据字典理解"}
+          </div>
+          <div className="text-xs text-gray-500">
+            分析过程中不再弹出确认对话框。请在设置 → 数据字典中查看、修改并保存 AI 关联理解的数据定义。
+          </div>
+        </div>
+      );
     }
     return <div className="markdown-content">{renderSectionContent(content)}</div>;
   },
@@ -604,14 +895,15 @@ export function ThreePanelInterface() {
   const [inputValue, setInputValue] = useState("");
   const [historyInputs, setHistoryInputs] = useState<string[]>([]);
   const [isTyping, setIsTyping] = useState(false);
+  const [isLeftPanelDocked, setIsLeftPanelDocked] = useState(false);
+  const [showModelConfigAlert, setShowModelConfigAlert] = useState(false);
   // 抑制轮询刷新的计数器（>0 时轮询不更新状态）
   const {
     attachments, setAttachments,
     workspaceFiles, setWorkspaceFiles,
     workspaceTree, setWorkspaceTree,
-    expanded, toggleExpand,
     isUploading, setIsUploading,
-    treeContainerRef, treeSize,
+    treeContainerRef,
     suppressRefreshCount: suppressWorkspaceRefreshCount,
     suppressDuringFileRestore,
     loadFiles: loadWorkspaceFiles,
@@ -645,7 +937,8 @@ export function ThreePanelInterface() {
 
   // 数据库连接相关状态
   const [showSystemSettings, setShowSystemSettings] = useState(false);
-  const [systemSettingsTab, setSystemSettingsTab] = useState<"model" | "database" | "knowledge">("model");
+  const [showDatabaseRelationshipDialog, setShowDatabaseRelationshipDialog] = useState(false);
+  const [systemSettingsTab, setSystemSettingsTab] = useState<"model" | "database" | "knowledge" | "history" | "dictionary">("model");
   const [modelProviderConfig, setModelProviderConfig] = useState<ModelProviderConfig>(
     cloneModelProviderConfig()
   );
@@ -673,9 +966,21 @@ export function ThreePanelInterface() {
     dbDatasetName, setDbDatasetName,
     dbExecuteMode, setDbExecuteMode,
     isTestingDb, isGeneratingSql, isExecutingDbSql, isDbTested,
+    availableDatabaseNames,
+    isLoadingDatabaseNames,
+    databaseListError,
+    dbContextSummary,
+    dbKnowledgeSummary,
+    dbKnowledgeUpdatedAt,
+    dbSchemaGraph,
     testConnection: handleTestConnection,
     generateSql: handleGenerateSql,
     executeSql: handleExecuteDbSql,
+    isLoadingDbContext,
+    loadDbContext: handleLoadDbContext,
+    isLoadingSchemaGraph,
+    loadSchemaGraph: handleLoadSchemaGraph,
+    fetchDatabaseNames: handleFetchDatabaseNames,
     buildPayload: buildDbRequestPayload,
     workspaceFilesRef,
   } = useDatabase({
@@ -684,6 +989,92 @@ export function ThreePanelInterface() {
     modelProviderConfig,
     onRefreshWorkspace: refreshWorkspace,
   });
+
+  const [savedDbConnections, setSavedDbConnections] = useState<SavedDatabaseConnection[]>([]);
+  const [selectedDbSourceIds, setSelectedDbSourceIds] = useState<string[]>([]);
+  const [sourceSelectionExplicit, setSourceSelectionExplicit] = useState(false);
+  const [showDataSourceDialog, setShowDataSourceDialog] = useState(false);
+  const [pendingDataSourceSelection, setPendingDataSourceSelection] = useState<DataSourceSelectionState>({
+    selectedDbSourceIds: [],
+    allowFilesOnly: false,
+  });
+  const [dataSourceSelection, setDataSourceSelection] = useState<DataSourceSelectionState>({
+    selectedDbSourceIds: [],
+    allowFilesOnly: false,
+  });
+  const [pendingSendOverrideMessage, setPendingSendOverrideMessage] = useState<string | null>(null);
+  const [deletingDbConnectionId, setDeletingDbConnectionId] = useState<string | null>(null);
+  const [isGeneratingDataProfileReport, setIsGeneratingDataProfileReport] = useState(false);
+  const [analysisHistorySettings, setAnalysisHistorySettings] = useState<AnalysisHistorySettings>({
+    ...DEFAULT_ANALYSIS_HISTORY_SETTINGS,
+  });
+  const [analysisHistoryRuns, setAnalysisHistoryRuns] = useState<AnalysisHistoryRunSummary[]>([]);
+  const [analysisHistoryStats, setAnalysisHistoryStats] = useState({ total: 0, completed: 0, failed: 0, warning: 0 });
+  const [selectedAnalysisHistoryRun, setSelectedAnalysisHistoryRun] = useState<AnalysisHistoryRunSummary | null>(null);
+  const [analysisHistoryEvents, setAnalysisHistoryEvents] = useState<AnalysisHistoryEvent[]>([]);
+  const [isLoadingAnalysisHistory, setIsLoadingAnalysisHistory] = useState(false);
+  const [isLoadingAnalysisHistoryDetail, setIsLoadingAnalysisHistoryDetail] = useState(false);
+  const [isSavingAnalysisHistorySettings, setIsSavingAnalysisHistorySettings] = useState(false);
+  const [dataDictionaryEntries, setDataDictionaryEntries] = useState<DataDictionaryKnowledgeEntry[]>([]);
+  const [dataDictionaryTotal, setDataDictionaryTotal] = useState(0);
+  const [isLoadingDataDictionary, setIsLoadingDataDictionary] = useState(false);
+  const [isDeletingDataDictionary, setIsDeletingDataDictionary] = useState(false);
+  const [isImportingDataDictionary, setIsImportingDataDictionary] = useState(false);
+  const [runtimeAnalysisRun, setRuntimeAnalysisRun] = useState<AnalysisHistoryRunSummary | null>(null);
+  const [runtimeAnalysisEvents, setRuntimeAnalysisEvents] = useState<AnalysisHistoryEvent[]>([]);
+  const [isLoadingRuntimeAnalysisTrace, setIsLoadingRuntimeAnalysisTrace] = useState(false);
+
+  const workspaceDataSourceFiles = useMemo(() => {
+    return workspaceFiles.filter((file) => {
+      const name = String(file.name || "").trim();
+      if (!name) {
+        return false;
+      }
+      // 隐藏文件属于系统元数据（如 .encoding_map.json），不计入数据源数量。
+      if (name.startsWith(".")) {
+        return false;
+      }
+      const ext = String(file.extension || "").replace(/^\./, "").toLowerCase();
+      return Boolean(ext) && DATA_SOURCE_FILE_EXTENSIONS.has(ext);
+    });
+  }, [workspaceFiles]);
+
+  const hasWorkspaceDataSource = workspaceDataSourceFiles.length > 0;
+
+  const effectiveSelectedDbSourceIds = useMemo(() => {
+    if (!savedDbConnections.length) {
+      return [] as string[];
+    }
+    const validIds = new Set(savedDbConnections.map((item) => item.id));
+    return selectedDbSourceIds.filter((id) => validIds.has(id));
+  }, [savedDbConnections, selectedDbSourceIds]);
+
+  const selectedDatabaseSources = useMemo(() => {
+    if (!savedDbConnections.length || !effectiveSelectedDbSourceIds.length) {
+      return [] as SavedDatabaseConnection[];
+    }
+    const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+    return savedDbConnections.filter((item) => selectedIdSet.has(item.id));
+  }, [effectiveSelectedDbSourceIds, savedDbConnections]);
+
+  const hasSelectedDataSource = selectedDatabaseSources.length > 0 || hasWorkspaceDataSource;
+
+  const isModelProviderConfigured = useMemo(() => {
+    const normalized = normalizeModelProviderEntry(modelProviderConfig);
+    const baseUrl = String(normalized.baseUrl || "").trim();
+    const modelName = String(normalized.model || "").trim();
+    if (!baseUrl || !modelName || modelName === "your-model-name") {
+      return false;
+    }
+
+    const providerType = String(normalized.providerType || "").toLowerCase();
+    const requiresApiKey =
+      !normalized.isLocal && !["deepanalyze", "ollama"].includes(providerType);
+    if (requiresApiKey && !String(normalized.apiKey || "").trim()) {
+      return false;
+    }
+    return true;
+  }, [modelProviderConfig]);
 
   useEffect(() => {
     workspaceFilesRef.current = workspaceFiles;
@@ -722,31 +1113,6 @@ export function ThreePanelInterface() {
   const [analysisLanguage, setAnalysisLanguage] = useState<AnalysisLanguage>("zh-CN");
   const [showLanguagePicker, setShowLanguagePicker] = useState(false);
   const [pendingAnalysisLanguage, setPendingAnalysisLanguage] = useState<AnalysisLanguage>("zh-CN");
-  // 点击外部关闭报告类型选择器
-  useEffect(() => {
-    if (!showReportTypePicker) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('[data-report-type-picker]')) {
-        setShowReportTypePicker(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showReportTypePicker]);
-
-  // 点击外部关闭语言选择器
-  useEffect(() => {
-    if (!showLanguagePicker) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('[data-language-picker]')) {
-        setShowLanguagePicker(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showLanguagePicker]);
   // 雨途斩棘录知识库
   const {
     showYutuPanel, setShowYutuPanel,
@@ -891,30 +1257,671 @@ export function ThreePanelInterface() {
     }
   };
 
-  const handleSaveDatabaseConfig = async () => {
+  const handleSaveDatabaseConfig = useCallback(async (options?: { silent?: boolean }) => {
+    const username = (currentUser || "default").trim() || "default";
+    const normalizedType = normalizeDbTypeForRequest(dbType);
+    const normalizedConfig = {
+      host: (dbConfig.host || "").trim() || "localhost",
+      port: (dbConfig.port || "").trim() || getDefaultPortForDbType(normalizedType),
+      user: (dbConfig.user || "").trim(),
+      password: dbConfig.password || "",
+      database: (dbConfig.database || "").trim(),
+    };
+    const connectionId = buildDatabaseConnectionId(
+      normalizedType,
+      normalizedConfig as unknown as Record<string, unknown>
+    );
+    const snapshot = { dbType: normalizedType, dbConfig: normalizedConfig };
+
     if (typeof window !== "undefined") {
       localStorage.setItem(
-        "systemDbSettings",
-        JSON.stringify({ dbType, dbConfig })
+        getUserDbSettingsStorageKey(username),
+        JSON.stringify(snapshot)
       );
+      // 兼容历史版本默认用户缓存，避免升级后丢失旧配置
+      if (username === "default") {
+        localStorage.setItem(LEGACY_DB_SETTINGS_STORE_KEY, JSON.stringify(snapshot));
+      }
     }
+
     try {
       await fetch(
-        `${API_URLS.CONFIG_DATABASES_SAVE}?username=${currentUser || "default"}`,
+        `${API_URLS.CONFIG_DATABASES_SAVE}?username=${username}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            username: currentUser || "default",
-            connection: { id: `db_${dbType}`, dbType, config: dbConfig, label: `${dbType}@${dbConfig.host}` },
+            username,
+            connection: {
+              id: connectionId,
+              dbType: normalizedType,
+              config: normalizedConfig,
+              label:
+                normalizedType === "sqlite"
+                  ? `${normalizedType}@${normalizedConfig.database}`
+                  : `${normalizedType}@${normalizedConfig.user || "anonymous"}@${normalizedConfig.host || "localhost"}:${normalizedConfig.port || getDefaultPortForDbType(normalizedType)}/${normalizedConfig.database}`,
+            },
           }),
         }
       );
-      toast({ description: "数据库配置已保存到本地" });
+
+      const normalizedSaved = normalizeSavedDbConnections([
+        {
+          id: connectionId,
+          dbType: normalizedType,
+          config: normalizedConfig,
+        },
+      ]);
+      const savedItem = normalizedSaved[0];
+      if (savedItem) {
+        setSavedDbConnections((prev) => {
+          const existing = prev.filter((item) => item.id !== savedItem.id);
+          return [...existing, savedItem];
+        });
+        setSelectedDbSourceIds((prev) => {
+          if (prev.includes(savedItem.id)) {
+            return prev;
+          }
+          return [...prev, savedItem.id];
+        });
+        setDataSourceSelection((prev) => {
+          if (prev.selectedDbSourceIds.includes(savedItem.id)) {
+            return prev;
+          }
+          return {
+            ...prev,
+            selectedDbSourceIds: [...prev.selectedDbSourceIds, savedItem.id],
+          };
+        });
+        setSourceSelectionExplicit(true);
+      }
+
+      if (!options?.silent) {
+        toast({ description: "数据库配置已保存到本地" });
+      }
     } catch {
-      toast({ description: "数据库配置已保存到当前浏览器" });
+      if (!options?.silent) {
+        toast({ description: "数据库配置已保存到当前浏览器" });
+      }
     }
-  };
+  }, [currentUser, dbConfig, dbType, toast]);
+
+  const prevDbTestedRef = useRef(false);
+  useEffect(() => {
+    if (isDbTested && !prevDbTestedRef.current) {
+      void handleSaveDatabaseConfig({ silent: true });
+    }
+    prevDbTestedRef.current = isDbTested;
+  }, [isDbTested, handleSaveDatabaseConfig]);
+
+  const handleApplySavedDbConnection = useCallback((connectionId: string) => {
+    const target = savedDbConnections.find((item) => item.id === connectionId);
+    if (!target) {
+      return;
+    }
+
+    handleDbTypeChange(target.dbType);
+    setDbConfig((prev) => ({
+      ...prev,
+      host: target.config.host || "localhost",
+      port: target.config.port || getDefaultPortForDbType(target.dbType),
+      user: target.config.user || "",
+      password: target.config.password || "",
+      database: target.config.database || "",
+    }));
+
+    setSelectedDbSourceIds((prev) => {
+      if (prev.includes(connectionId)) {
+        return prev;
+      }
+      return [...prev, connectionId];
+    });
+
+    setDataSourceSelection((prev) => {
+      if (prev.selectedDbSourceIds.includes(connectionId)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        selectedDbSourceIds: [...prev.selectedDbSourceIds, connectionId],
+      };
+    });
+
+    setSourceSelectionExplicit(true);
+    toast({ description: `已切换到连接: ${target.label}` });
+  }, [savedDbConnections, handleDbTypeChange, setDbConfig, toast]);
+
+  const handleToggleSavedDbSourceSelection = useCallback((connectionId: string, checked: boolean) => {
+    setSelectedDbSourceIds((prev) => {
+      const idSet = new Set(prev);
+      if (checked) {
+        idSet.add(connectionId);
+      } else {
+        idSet.delete(connectionId);
+      }
+      return Array.from(idSet);
+    });
+
+    setDataSourceSelection((prev) => {
+      const idSet = new Set(prev.selectedDbSourceIds);
+      if (checked) {
+        idSet.add(connectionId);
+      } else {
+        idSet.delete(connectionId);
+      }
+      return {
+        ...prev,
+        selectedDbSourceIds: Array.from(idSet),
+      };
+    });
+
+    setSourceSelectionExplicit(true);
+  }, []);
+
+  const handleDeleteSavedDbConnection = useCallback(async (connectionId: string) => {
+    const username = (currentUser || "default").trim() || "default";
+    const target = savedDbConnections.find((item) => item.id === connectionId);
+
+    if (!target) {
+      return;
+    }
+
+    setDeletingDbConnectionId(connectionId);
+    try {
+      const response = await fetch(API_URLS.CONFIG_DATABASES_DELETE, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, id: connectionId }),
+      });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.message || "删除连接失败");
+      }
+
+      setSavedDbConnections((prev) => prev.filter((item) => item.id !== connectionId));
+      setSelectedDbSourceIds((prev) => prev.filter((id) => id !== connectionId));
+      setDataSourceSelection((prev) => ({
+        ...prev,
+        selectedDbSourceIds: prev.selectedDbSourceIds.filter((id) => id !== connectionId),
+      }));
+
+      toast({ description: `已删除连接: ${target.label}` });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除连接失败";
+      toast({ description: message, variant: "destructive" });
+    } finally {
+      setDeletingDbConnectionId(null);
+    }
+  }, [currentUser, savedDbConnections, toast]);
+
+  const handleGenerateDataProfileReport = useCallback(async () => {
+    if (isGeneratingDataProfileReport) {
+      return;
+    }
+
+    const existingDataProfileReport = workspaceFiles.find((file) => DATA_PROFILE_REPORT_PATTERN.test(file.name));
+    if (existingDataProfileReport) {
+      toast({ description: `已生成数据探查报告：${existingDataProfileReport.name}，无需重复生成。` });
+      return;
+    }
+
+    const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+    const databaseSourcesForReport = savedDbConnections
+      .filter((connection) => selectedIdSet.has(connection.id))
+      .map((connection) => ({
+        id: connection.id,
+        label: connection.label,
+        dbType: connection.dbType,
+        config: connection.config,
+      }));
+
+    let fallbackPayload: ReturnType<typeof buildDbRequestPayload> | null = null;
+    if (!databaseSourcesForReport.length && dbConfig.database?.trim()) {
+      fallbackPayload = buildDbRequestPayload();
+    }
+
+    if (!databaseSourcesForReport.length && !fallbackPayload && workspaceDataSourceFiles.length === 0) {
+      toast({ description: "请先连接数据库或上传数据文件后再生成数据探查报告", variant: "destructive" });
+      return;
+    }
+
+    setIsGeneratingDataProfileReport(true);
+    try {
+      const response = await fetch(API_URLS.DATA_PROFILE_REPORT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          username: currentUser || "default",
+          selected_database_sources: databaseSourcesForReport,
+          db_type: fallbackPayload?.db_type,
+          config: fallbackPayload?.config,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.message || payload?.detail || "数据探查报告生成失败");
+      }
+
+      await refreshWorkspace();
+      if (payload?.skipped && payload?.filename) {
+        toast({ description: `已生成数据探查报告：${payload.filename}，无需重复生成。` });
+        return;
+      }
+      toast({ description: payload.summary || payload.message || "数据探查 SKILL 文档已生成" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "数据探查报告生成失败";
+      toast({ description: message, variant: "destructive" });
+    } finally {
+      setIsGeneratingDataProfileReport(false);
+    }
+  }, [
+    buildDbRequestPayload,
+    currentUser,
+    dbConfig.database,
+    effectiveSelectedDbSourceIds,
+    isGeneratingDataProfileReport,
+    refreshWorkspace,
+    savedDbConnections,
+    sessionId,
+    toast,
+    workspaceDataSourceFiles.length,
+  ]);
+
+  const loadAnalysisHistoryDetail = useCallback(async (runId: string, options?: { silent?: boolean }) => {
+    if (!runId) {
+      setSelectedAnalysisHistoryRun(null);
+      setAnalysisHistoryEvents([]);
+      return;
+    }
+    setIsLoadingAnalysisHistoryDetail(true);
+    try {
+      const username = encodeURIComponent((currentUser || "default").trim() || "default");
+      const response = await fetch(`${API_URLS.ANALYSIS_HISTORY_LIST}/${encodeURIComponent(runId)}?username=${username}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "分析历史详情加载失败");
+      }
+      setSelectedAnalysisHistoryRun(payload.run || null);
+      setAnalysisHistoryEvents(Array.isArray(payload.events) ? payload.events : []);
+    } catch (error) {
+      if (!options?.silent) {
+        const message = error instanceof Error ? error.message : "分析历史详情加载失败";
+        toast({ description: message, variant: "destructive" });
+      }
+    } finally {
+      setIsLoadingAnalysisHistoryDetail(false);
+    }
+  }, [currentUser, toast]);
+
+  const loadAnalysisHistory = useCallback(async (options?: { preferredRunId?: string; silent?: boolean }) => {
+    setIsLoadingAnalysisHistory(true);
+    try {
+      const username = encodeURIComponent((currentUser || "default").trim() || "default");
+      const response = await fetch(`${API_URLS.ANALYSIS_HISTORY_LIST}?username=${username}&limit=40`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "分析历史加载失败");
+      }
+
+      setAnalysisHistorySettings({
+        ...DEFAULT_ANALYSIS_HISTORY_SETTINGS,
+        ...(payload.settings || {}),
+      });
+      const runs = Array.isArray(payload.runs) ? payload.runs : [];
+      setAnalysisHistoryRuns(runs);
+      setAnalysisHistoryStats({
+        total: Number(payload.stats?.total || 0),
+        completed: Number(payload.stats?.completed || 0),
+        failed: Number(payload.stats?.failed || 0),
+        warning: Number(payload.stats?.warning || 0),
+      });
+
+      const preferredRunId =
+        options?.preferredRunId ||
+        selectedAnalysisHistoryRun?.run_id ||
+        (runs[0]?.run_id as string | undefined) ||
+        "";
+
+      if (preferredRunId) {
+        await loadAnalysisHistoryDetail(preferredRunId, { silent: true });
+      } else {
+        setSelectedAnalysisHistoryRun(null);
+        setAnalysisHistoryEvents([]);
+      }
+    } catch (error) {
+      if (!options?.silent) {
+        const message = error instanceof Error ? error.message : "分析历史加载失败";
+        toast({ description: message, variant: "destructive" });
+      }
+    } finally {
+      setIsLoadingAnalysisHistory(false);
+    }
+  }, [currentUser, loadAnalysisHistoryDetail, selectedAnalysisHistoryRun?.run_id, toast]);
+
+  const handleSelectAnalysisHistoryRun = useCallback((runId: string) => {
+    const existingRun = analysisHistoryRuns.find((item) => item.run_id === runId) || null;
+    if (existingRun) {
+      setSelectedAnalysisHistoryRun(existingRun);
+    }
+    void loadAnalysisHistoryDetail(runId);
+  }, [analysisHistoryRuns, loadAnalysisHistoryDetail]);
+
+  const handleSaveAnalysisHistorySettings = useCallback(async () => {
+    setIsSavingAnalysisHistorySettings(true);
+    try {
+      const response = await fetch(API_URLS.CONFIG_ANALYSIS_HISTORY_SAVE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: currentUser || "default",
+          settings: analysisHistorySettings,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "分析历史配置保存失败");
+      }
+      setAnalysisHistorySettings({
+        ...DEFAULT_ANALYSIS_HISTORY_SETTINGS,
+        ...(payload.settings || {}),
+      });
+      toast({ description: payload.message || "分析历史配置已保存" });
+      await loadAnalysisHistory({ preferredRunId: selectedAnalysisHistoryRun?.run_id, silent: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "分析历史配置保存失败";
+      toast({ description: message, variant: "destructive" });
+    } finally {
+      setIsSavingAnalysisHistorySettings(false);
+    }
+  }, [analysisHistorySettings, currentUser, loadAnalysisHistory, selectedAnalysisHistoryRun?.run_id, toast]);
+
+  useEffect(() => {
+    if (showSystemSettings && systemSettingsTab === "history") {
+      void loadAnalysisHistory({ silent: true });
+    }
+  }, [showSystemSettings, systemSettingsTab, loadAnalysisHistory]);
+
+  const loadDataDictionary = useCallback(async (options?: { silent?: boolean }) => {
+    setIsLoadingDataDictionary(true);
+    try {
+      const username = encodeURIComponent((currentUser || "default").trim() || "default");
+      const response = await fetch(`${API_URLS.CONFIG_DATA_DICTIONARY_GET}?username=${username}&limit=800`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "数据字典加载失败");
+      }
+
+      const entries = Array.isArray(payload.entries) ? payload.entries : [];
+      setDataDictionaryEntries(entries);
+      setDataDictionaryTotal(Number(payload.total || entries.length || 0));
+    } catch (error) {
+      if (!options?.silent) {
+        const message = error instanceof Error ? error.message : "数据字典加载失败";
+        toast({ description: message, variant: "destructive" });
+      }
+    } finally {
+      setIsLoadingDataDictionary(false);
+    }
+  }, [currentUser, toast]);
+
+  const handleDeleteDataDictionaryEntries = useCallback(async (ids: string[]) => {
+    if (!ids.length) {
+      return;
+    }
+
+    setIsDeletingDataDictionary(true);
+    try {
+      const response = await fetch(API_URLS.CONFIG_DATA_DICTIONARY_DELETE, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: currentUser || "default",
+          ids,
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "撤销数据字典失败");
+      }
+
+      toast({ description: payload.message || `已撤销 ${ids.length} 条数据字典记录` });
+      await loadDataDictionary({ silent: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "撤销数据字典失败";
+      toast({ description: message, variant: "destructive" });
+    } finally {
+      setIsDeletingDataDictionary(false);
+    }
+  }, [currentUser, loadDataDictionary, toast]);
+
+  const handleImportDataDictionaryFile = useCallback(async (file: File) => {
+    setIsImportingDataDictionary(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("username", currentUser || "default");
+      formData.append("session_id", sessionId);
+
+      const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+      const selectedSources = savedDbConnections.filter((item) => selectedIdSet.has(item.id));
+      if (selectedSources.length === 1) {
+        formData.append("default_source_label", selectedSources[0].label);
+      }
+
+      const response = await fetch(API_URLS.CONFIG_DATA_DICTIONARY_IMPORT, {
+        method: "POST",
+        body: formData,
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "数据字典导入失败");
+      }
+
+      await loadDataDictionary({ silent: true });
+      const addedCount = Number(payload?.result?.added_count || 0);
+      const updatedCount = Number(payload?.result?.updated_count || 0);
+      const importedCount = Number(payload?.import_meta?.imported_count || addedCount + updatedCount || 0);
+      toast({ description: payload?.message || `已导入 ${importedCount} 条数据字典理解（新增 ${addedCount}，更新 ${updatedCount}）` });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "数据字典导入失败";
+      toast({ description: message, variant: "destructive" });
+      throw error;
+    } finally {
+      setIsImportingDataDictionary(false);
+    }
+  }, [currentUser, effectiveSelectedDbSourceIds, loadDataDictionary, savedDbConnections, sessionId, toast]);
+
+  const persistAiDataDictionaryEntries = useCallback(async (
+    rawItems: Array<{
+      id: string;
+      source_label?: string;
+      table?: string;
+      field?: string;
+      proposed_meaning?: string;
+      question?: string;
+      confidence?: string;
+      analysis_usage?: string;
+    }>,
+    options?: { silent?: boolean },
+  ) => {
+    const normalizedItems = rawItems
+      .map((item) => ({
+        id: String(item.id || "").trim(),
+        source_label: String(item.source_label || "").trim(),
+        table: String(item.table || "").trim(),
+        field: String(item.field || "").trim(),
+        code_explanation: "",
+        ai_understanding: String(item.proposed_meaning || "").trim(),
+        meaning: String(item.proposed_meaning || "").trim(),
+        question: String(item.question || "").trim(),
+        confidence: String(item.confidence || "").trim(),
+        analysis_usage: String(item.analysis_usage || "").trim(),
+      }))
+      .filter((item) => item.id || item.table || item.field || item.ai_understanding);
+
+    if (!normalizedItems.length) {
+      return false;
+    }
+
+    const selectedIdSet = new Set(effectiveSelectedDbSourceIds);
+    const selectedSources = savedDbConnections.filter((item) => selectedIdSet.has(item.id));
+
+    const response = await fetch(API_URLS.CONFIG_DATA_DICTIONARY_SAVE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: currentUser || "default",
+        session_id: sessionId,
+        source_labels: selectedSources.map((item) => item.label),
+        dictionary: {
+          items: normalizedItems,
+        },
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.success) {
+      throw new Error(payload?.detail || payload?.message || "保存 AI 数据字典理解失败");
+    }
+
+    await loadDataDictionary({ silent: true });
+    if (!options?.silent) {
+      toast({ description: `已将 ${normalizedItems.length} 条 AI 数据字典理解写入设置 → 数据字典` });
+    }
+    return true;
+  }, [currentUser, effectiveSelectedDbSourceIds, loadDataDictionary, savedDbConnections, sessionId, toast]);
+
+  const handleSaveDataDictionaryEntry = useCallback(async (entryId: string, aiUnderstanding: string) => {
+    const targetEntry = dataDictionaryEntries.find((item) => item.id === entryId);
+    if (!targetEntry) {
+      throw new Error("未找到要保存的数据字典条目");
+    }
+
+    const response = await fetch(API_URLS.CONFIG_DATA_DICTIONARY_SAVE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: currentUser || "default",
+        session_id: sessionId,
+        source_labels: targetEntry.source_label ? [targetEntry.source_label] : [],
+        dictionary: {
+          items: [
+            {
+              id: targetEntry.id,
+              source_label: targetEntry.source_label,
+              table: targetEntry.table,
+              field: targetEntry.field,
+              code_explanation: targetEntry.code_explanation,
+              ai_understanding: aiUnderstanding,
+              meaning: aiUnderstanding,
+              question: targetEntry.question,
+              confidence: targetEntry.confidence,
+              analysis_usage: targetEntry.analysis_usage,
+            },
+          ],
+        },
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload?.success) {
+      throw new Error(payload?.detail || payload?.message || "保存 AI 数据字典理解失败");
+    }
+
+    await loadDataDictionary({ silent: true });
+    toast({ description: "AI 关联理解的数据定义已保存到知识库" });
+  }, [currentUser, dataDictionaryEntries, loadDataDictionary, sessionId, toast]);
+
+  useEffect(() => {
+    if (showSystemSettings && systemSettingsTab === "dictionary") {
+      void loadDataDictionary({ silent: true });
+    }
+  }, [showSystemSettings, systemSettingsTab, loadDataDictionary]);
+
+  const loadRuntimeAnalysisTrace = useCallback(async (options?: { silent?: boolean }) => {
+    if (!currentUser) {
+      setRuntimeAnalysisRun(null);
+      setRuntimeAnalysisEvents([]);
+      return;
+    }
+
+    setIsLoadingRuntimeAnalysisTrace(true);
+    try {
+      const username = encodeURIComponent((currentUser || "default").trim() || "default");
+      const response = await fetch(`${API_URLS.ANALYSIS_HISTORY_LIST}?username=${username}&limit=20`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload?.success) {
+        throw new Error(payload?.detail || payload?.message || "运行态分析历史加载失败");
+      }
+
+      const runs = Array.isArray(payload.runs) ? payload.runs : [];
+      const latestRunForSession = runs.find((item: AnalysisHistoryRunSummary) => item.session_id === sessionId) || null;
+      if (!latestRunForSession) {
+        setRuntimeAnalysisRun(null);
+        setRuntimeAnalysisEvents([]);
+        return;
+      }
+
+      const unchanged =
+        runtimeAnalysisRun?.run_id === latestRunForSession.run_id &&
+        runtimeAnalysisRun?.event_count === latestRunForSession.event_count &&
+        runtimeAnalysisRun?.updated_at === latestRunForSession.updated_at &&
+        runtimeAnalysisEvents.length > 0;
+
+      setRuntimeAnalysisRun(latestRunForSession);
+      if (unchanged) {
+        return;
+      }
+
+      const detailResponse = await fetch(`${API_URLS.ANALYSIS_HISTORY_LIST}/${encodeURIComponent(latestRunForSession.run_id)}?username=${username}`);
+      const detailPayload = await detailResponse.json().catch(() => ({}));
+      if (!detailResponse.ok || !detailPayload?.success) {
+        throw new Error(detailPayload?.detail || detailPayload?.message || "运行态分析详情加载失败");
+      }
+
+      setRuntimeAnalysisRun(detailPayload.run || latestRunForSession);
+      setRuntimeAnalysisEvents(Array.isArray(detailPayload.events) ? detailPayload.events : []);
+    } catch (error) {
+      if (!options?.silent) {
+        const message = error instanceof Error ? error.message : "运行态分析历史加载失败";
+        toast({ description: message, variant: "destructive" });
+      }
+    } finally {
+      setIsLoadingRuntimeAnalysisTrace(false);
+    }
+  }, [currentUser, runtimeAnalysisEvents.length, runtimeAnalysisRun?.event_count, runtimeAnalysisRun?.run_id, runtimeAnalysisRun?.updated_at, sessionId, toast]);
+
+  const [isAnalyzing, setIsAnalyzing] = useState(false); // 是否正在分析中
+
+  useEffect(() => {
+    const shouldPollRuntimeTrace = isAnalyzing || runtimeAnalysisRun?.status === "running";
+    if (!shouldPollRuntimeTrace) {
+      return;
+    }
+
+    void loadRuntimeAnalysisTrace({ silent: true });
+    const timer = window.setInterval(() => {
+      void loadRuntimeAnalysisTrace({ silent: true });
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [isAnalyzing, loadRuntimeAnalysisTrace, runtimeAnalysisRun?.status]);
+
+  useEffect(() => {
+    setAnalysisHistoryRuns([]);
+    setAnalysisHistoryEvents([]);
+    setSelectedAnalysisHistoryRun(null);
+    setAnalysisHistoryStats({ total: 0, completed: 0, failed: 0, warning: 0 });
+    setAnalysisHistorySettings({ ...DEFAULT_ANALYSIS_HISTORY_SETTINGS });
+    setDataDictionaryEntries([]);
+    setDataDictionaryTotal(0);
+    setRuntimeAnalysisRun(null);
+    setRuntimeAnalysisEvents([]);
+  }, [currentUser]);
+
+  useEffect(() => {
+    setRuntimeAnalysisRun(null);
+    setRuntimeAnalysisEvents([]);
+  }, [sessionId]);
 
   // 智能体介绍面板状态
   const [showAgentIntro, setShowAgentIntro] = useState(false);
@@ -923,7 +1930,6 @@ export function ThreePanelInterface() {
   const [sideGuidanceOpen, setSideGuidanceOpen] = useState(false);
   const [sideGuidanceText, setSideGuidanceText] = useState("");
   const [isSubmittingGuidance, setIsSubmittingGuidance] = useState(false);
-  const [isAnalyzing, setIsAnalyzing] = useState(false); // 是否正在分析中
 
   // 预览弹窗状态
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
@@ -935,6 +1941,8 @@ export function ThreePanelInterface() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewDownloadUrl, setPreviewDownloadUrl] = useState<string>("");
   const previewScrollRef = useRef<HTMLDivElement>(null);
+  const [activeWorkspaceOutputCategory, setActiveWorkspaceOutputCategory] =
+    useState<OutputCategoryId>("reports");
   const [deleteConfirmPath, setDeleteConfirmPath] = useState<string | null>(
     null
   );
@@ -944,14 +1952,12 @@ export function ThreePanelInterface() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const singleClickTimerRef = useRef<number | null>(null);
   const [contextPos, setContextPos] = useState<{ x: number; y: number } | null>(
     null
   );
   const [contextTarget, setContextTarget] = useState<WorkspaceNode | null>(
     null
   );
-  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string>("");
 
@@ -1058,13 +2064,11 @@ export function ThreePanelInterface() {
         const stepRect = activeStepElement.getBoundingClientRect();
         const containerRect = container.getBoundingClientRect();
 
-        // 计算需要滚动的距离
         const scrollLeft =
           activeStepElement.offsetLeft -
           containerRect.width / 2 +
           stepRect.width / 2;
 
-        // 平滑滚动到目标位置
         container.scrollTo({
           left: scrollLeft,
           behavior: "smooth",
@@ -1161,7 +2165,6 @@ export function ThreePanelInterface() {
       toast({ description: "只有超级用户可以初始化", variant: "destructive" });
       return false;
     }
-    // 确认初始化操作
     if (!window.confirm("确定要初始化雨途斩棘录吗？此操作将重置所有记录！")) {
       return false;
     }
@@ -1185,7 +2188,6 @@ export function ThreePanelInterface() {
     return false;
   };
 
-  // 确认整理结果 - 使用完整URL
   const confirmOrganize = async () => {
     try {
       const confirmUrl = `${API_URLS.YUTU_ORGANIZE_CONFIRM}?username=${encodeURIComponent(currentUser || "")}`;
@@ -1213,7 +2215,6 @@ export function ThreePanelInterface() {
     setIsRecordingKnowledge(true);
 
     try {
-      // 从消息中提取分析结果
       const aiMessages = messages.filter(m => m.sender === "ai" && m.content);
       if (aiMessages.length === 0) {
         toast({ description: "暂无分析内容", variant: "destructive" });
@@ -1222,8 +2223,6 @@ export function ThreePanelInterface() {
       }
 
       const lastContent = aiMessages[aiMessages.length - 1].content;
-
-      // 使用VLLM生成总结（简化版）
       const prompt = `请从以下分析内容中提取本次分析的亮点和成功要点（最多10条，总300字以内）。只列出要点，用简洁的中文描述。
 分析内容摘要：${lastContent.slice(0, 2000)}
 请直接输出要点列表，每条一行，不要有额外说明。`;
@@ -1242,11 +2241,9 @@ export function ThreePanelInterface() {
         if (response.ok) {
           const data = await response.json();
           const summary = data.choices?.[0]?.message?.content || "";
-          // 限制总长度
           const truncated = summary.length > 300 ? summary.slice(0, 300) + "..." : summary;
           setSuccessSummary(truncated);
         } else {
-          // 如果API失败，使用本地简单提取
           setSuccessSummary(extractLocalSuccessPoints(lastContent));
         }
       } catch {
@@ -1273,7 +2270,6 @@ export function ThreePanelInterface() {
     toast({ description: "正在分析并记录知识..." });
 
     try {
-      // 获取当前的聊天消息
       const analysisContent = messages
         .filter(m => m.sender === "ai")
         .map(m => m.content)
@@ -1285,7 +2281,6 @@ export function ThreePanelInterface() {
         return;
       }
 
-      // 构造提示让AI分析并提取知识
       const prompt = `你是雨途斩棘录的知识提取助手。请分析以下智能体分析过程，提取其中出现的错误和解决方案。
 
 分析过程：
@@ -1316,7 +2311,6 @@ ${analysisContent}
       });
 
       if (response.ok) {
-        // 解析返回的知识记录
         const reader = response.body?.getReader();
         if (reader) {
           let result = "";
@@ -1327,7 +2321,6 @@ ${analysisContent}
             result += decoder.decode(value);
           }
 
-          // 提取JSON数组
           const jsonMatch = result.match(/\[[\s\S]*\]/);
           if (jsonMatch) {
             try {
@@ -1339,11 +2332,9 @@ ${analysisContent}
                 return;
               }
 
-              // 检查重复并记录
               let recordedCount = 0;
               for (const record of knowledgeRecords) {
                 if (record.error_type && record.error_message) {
-                  // 检查是否已存在相似记录
                   const searchResult = await fetch(`${API_URLS.YUTU_SEARCH}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -1411,14 +2402,12 @@ ${analysisContent}
     setAttachments([]);
     setInputValue("");
     setSideGuidanceHistory([]);
-    setUserProjects([]);
     setProjectName("");
     setShowSaveDialog(false);
     setShowProjectManager(false);
     setShowTaskTreeDialog(false);
     setTaskTreeData(null);
     setSelectedTasks(new Set());
-    setRegisteredUsers([]);
     loadRegisteredUsers();
   };
 
@@ -1959,26 +2948,9 @@ ${analysisContent}
       }
     }
 
-    const savedDbSettings = localStorage.getItem("systemDbSettings");
-    if (savedDbSettings) {
-      try {
-        const parsed = JSON.parse(savedDbSettings);
-        const normalizedType = normalizeDbTypeForRequest(parsed?.dbType || "mysql");
-        if (typeof parsed?.dbType === "string") {
-          handleDbTypeChange(normalizedType);
-        }
-        if (parsed?.dbConfig && typeof parsed.dbConfig === "object") {
-          setDbConfig((prev) => {
-            const merged = { ...prev, ...parsed.dbConfig };
-            if (!String(merged.port || "").trim()) {
-              merged.port = getDefaultPortForDbType(normalizedType);
-            }
-            return merged;
-          });
-        }
-      } catch {
-        // ignore invalid db settings cache
-      }
+    const savedDockedState = localStorage.getItem(LEFT_PANEL_DOCKED_STORE_KEY);
+    if (savedDockedState !== null) {
+      setIsLeftPanelDocked(savedDockedState === "true");
     }
 
     let hasLoadedModelProvider = false;
@@ -2080,22 +3052,128 @@ ${analysisContent}
           }
         }
 
-        // 2. 加载数据库配置
+        // 2. 加载数据库配置与数据源选择状态
+        const applyDbSettings = (typeValue: unknown, configValue: unknown) => {
+          const normalizedType = normalizeDbTypeForRequest(String(typeValue || "mysql"));
+          handleDbTypeChange(normalizedType);
+          if (configValue && typeof configValue === "object") {
+            setDbConfig((prev) => {
+              const merged = { ...prev, ...(configValue as Record<string, unknown>) };
+              const nextPort = String(merged.port || "").trim();
+              return {
+                ...merged,
+                port: nextPort || getDefaultPortForDbType(normalizedType),
+              } as typeof prev;
+            });
+          }
+        };
+
+        const restoreDataSourceSelection = (connections: SavedDatabaseConnection[]) => {
+          if (typeof window === "undefined") {
+            setSelectedDbSourceIds([]);
+            setDataSourceSelection({ selectedDbSourceIds: [], allowFilesOnly: false });
+            setSourceSelectionExplicit(false);
+            return;
+          }
+
+          const selectionKey = getUserDataSourceSelectionStorageKey(currentUser);
+          const selectionRaw = localStorage.getItem(selectionKey);
+          let storedSelection: DataSourceSelectionState | null = null;
+
+          if (selectionRaw) {
+            try {
+              const parsed = JSON.parse(selectionRaw);
+              if (parsed && typeof parsed === "object") {
+                const parsedIds = Array.isArray(parsed.selectedDbSourceIds)
+                  ? parsed.selectedDbSourceIds.map((item: unknown) => String(item || "").trim()).filter(Boolean)
+                  : [];
+                storedSelection = {
+                  selectedDbSourceIds: parsedIds,
+                  allowFilesOnly: Boolean(parsed.allowFilesOnly),
+                };
+              }
+            } catch {
+              // ignore invalid storage payload
+            }
+          }
+
+          const availableIds = new Set(connections.map((item) => item.id));
+          const restoredIds = (storedSelection?.selectedDbSourceIds || []).filter((id) => availableIds.has(id));
+
+          setSelectedDbSourceIds(restoredIds);
+          setDataSourceSelection({
+            selectedDbSourceIds: restoredIds,
+            allowFilesOnly: Boolean(storedSelection?.allowFilesOnly),
+          });
+          setSourceSelectionExplicit(restoredIds.length > 0 || Boolean(storedSelection?.allowFilesOnly));
+        };
+
+        let dbLoadedFromBackend = false;
         const dbRes = await fetch(
           `${API_URLS.CONFIG_DATABASES_GET}?username=${currentUser}`
         );
         if (dbRes.ok) {
           const dbData = await dbRes.json();
-          if (dbData.connections && dbData.connections.length > 0) {
-            const savedConn = dbData.connections[0];
-            if (savedConn.dbType) handleDbTypeChange(savedConn.dbType);
-            if (savedConn.config && typeof savedConn.config === "object") {
-              setDbConfig((prev) => ({
-                ...prev,
-                ...savedConn.config,
-                port: String(savedConn.config.port || prev.port),
-              }));
+          const normalizedConnections = normalizeSavedDbConnections(dbData.connections);
+          setSavedDbConnections(normalizedConnections);
+          restoreDataSourceSelection(normalizedConnections);
+
+          if (normalizedConnections.length > 0) {
+            const preferred = normalizedConnections[0];
+            applyDbSettings(preferred.dbType, preferred.config);
+            dbLoadedFromBackend = true;
+
+            if (typeof window !== "undefined") {
+              localStorage.setItem(
+                getUserDbSettingsStorageKey(currentUser),
+                JSON.stringify({
+                  dbType: preferred.dbType,
+                  dbConfig: preferred.config,
+                })
+              );
             }
+          }
+        }
+
+        if (!dbLoadedFromBackend && typeof window !== "undefined") {
+          const scopedKey = getUserDbSettingsStorageKey(currentUser);
+          let savedDbSettings = localStorage.getItem(scopedKey);
+
+          // 兼容旧版单 key 缓存：迁移到当前用户维度
+          if (!savedDbSettings) {
+            const legacy = localStorage.getItem(LEGACY_DB_SETTINGS_STORE_KEY);
+            if (legacy) {
+              savedDbSettings = legacy;
+              localStorage.setItem(scopedKey, legacy);
+            }
+          }
+
+          if (savedDbSettings) {
+            try {
+              const parsed = JSON.parse(savedDbSettings);
+              applyDbSettings(parsed?.dbType, parsed?.dbConfig);
+
+              const fallbackType = normalizeDbTypeForRequest(String(parsed?.dbType || "mysql"));
+              const fallbackConfig = parsed?.dbConfig && typeof parsed.dbConfig === "object"
+                ? (parsed.dbConfig as Record<string, unknown>)
+                : {};
+              const fallbackConnection = normalizeSavedDbConnections([
+                {
+                  id: buildDatabaseConnectionId(fallbackType, fallbackConfig),
+                  dbType: fallbackType,
+                  config: fallbackConfig,
+                },
+              ]);
+              setSavedDbConnections(fallbackConnection);
+              restoreDataSourceSelection(fallbackConnection);
+            } catch {
+              // ignore invalid per-user db settings cache
+              setSavedDbConnections([]);
+              setSelectedDbSourceIds([]);
+            }
+          } else {
+            setSavedDbConnections([]);
+            setSelectedDbSourceIds([]);
           }
         }
 
@@ -2121,6 +3199,50 @@ ${analysisContent}
       }
     })();
   }, [isLoggedIn, currentUser]);
+
+  useEffect(() => {
+    if (!savedDbConnections.length) {
+      if (selectedDbSourceIds.length > 0) {
+        setSelectedDbSourceIds([]);
+      }
+      setDataSourceSelection((prev) => {
+        if (prev.selectedDbSourceIds.length === 0 && !prev.allowFilesOnly) {
+          return prev;
+        }
+        return { selectedDbSourceIds: [], allowFilesOnly: false };
+      });
+      setSourceSelectionExplicit(false);
+      return;
+    }
+
+    const validIds = new Set(savedDbConnections.map((item) => item.id));
+    const sanitizedIds = selectedDbSourceIds.filter((id) => validIds.has(id));
+    if (!areSameStringArrays(selectedDbSourceIds, sanitizedIds)) {
+      setSelectedDbSourceIds(sanitizedIds);
+    }
+    setDataSourceSelection((prev) => {
+      if (areSameStringArrays(prev.selectedDbSourceIds, sanitizedIds)) {
+        return prev;
+      }
+      return {
+        ...prev,
+        selectedDbSourceIds: sanitizedIds,
+      };
+    });
+  }, [savedDbConnections, selectedDbSourceIds]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !currentUser) {
+      return;
+    }
+    localStorage.setItem(
+      getUserDataSourceSelectionStorageKey(currentUser),
+      JSON.stringify({
+        selectedDbSourceIds: dataSourceSelection.selectedDbSourceIds,
+        allowFilesOnly: dataSourceSelection.allowFilesOnly,
+      })
+    );
+  }, [currentUser, dataSourceSelection]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -2192,6 +3314,11 @@ ${analysisContent}
   }, [analysisLanguage]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(LEFT_PANEL_DOCKED_STORE_KEY, String(isLeftPanelDocked));
+  }, [isLeftPanelDocked]);
+
+  useEffect(() => {
     if (analysisMode !== "interactive") {
       setShowTaskTreeDialog(false);
       setTaskTreeData(null);
@@ -2200,22 +3327,10 @@ ${analysisContent}
   }, [analysisMode]);
 
   useEffect(() => {
-    const loadRegisteredUsers = async () => {
-      try {
-        const res = await fetch(API_URLS.USERS_LIST);
-        if (res.ok) {
-          const data = await res.json();
-          setRegisteredUsers(data.users || []);
-        }
-      } catch (e) {
-        console.warn("Failed to load registered users", e);
-      }
-    };
-
     if (showAuthModal) {
       loadRegisteredUsers();
     }
-  }, [showAuthModal]);
+  }, [showAuthModal, loadRegisteredUsers]);
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -2298,368 +3413,121 @@ ${analysisContent}
     setContextTarget(null);
   };
 
-  // 将后端树转换为 Arborist 数据
-  type ArborNode = {
-    id: string;
-    name: string;
-    isDir: boolean;
-    icon?: string;
-    download_url?: string;
-    extension?: string;
-    size?: number;
-    children?: ArborNode[];
-    isGenerated?: boolean; // 标识是否为代码生成的文件
-    isConverted?: boolean; // 标识是否为 UTF-8 编码转换后的文件
-  };
+  const workspaceOutputFiles = useMemo(() => {
+    const items: WorkspaceOutputFile[] = [];
 
-  const toArbor = (node: WorkspaceNode): ArborNode => ({
-    id: node.path || (node.is_dir ? "root_workspace" : `file_${node.name}`),
-    name: node.name || "workspace",
-    isDir: node.is_dir,
-    icon: node.icon,
-    download_url: node.download_url,
-    extension: node.extension,
-    size: node.size,
-    isGenerated: node.is_generated,
-    isConverted: node.is_converted,
-    children: node.children?.map(toArbor),
+    const visit = (
+      node: WorkspaceNode,
+      parentGenerated = false,
+      parentConverted = false
+    ) => {
+      const normalizedPath = String(node.path || "").replace(/^\/+|\/+$/g, "");
+      const isConverted =
+        parentConverted ||
+        Boolean(node.is_converted) ||
+        isConvertedWorkspacePath(normalizedPath);
+
+      if (isConverted) {
+        return;
+      }
+
+      const isGenerated =
+        parentGenerated ||
+        Boolean(node.is_generated) ||
+        normalizedPath === "generated" ||
+        normalizedPath.startsWith("generated/");
+
+      if (node.is_dir) {
+        node.children?.forEach((child) =>
+          visit(child as WorkspaceNode, isGenerated, isConverted)
+        );
+        return;
+      }
+
+      const name = String(node.name || "").trim();
+      if (!name || name.startsWith(".")) {
+        return;
+      }
+
+      const extension = normalizeWorkspaceExtension(name, node.extension);
+      items.push({
+        name,
+        size: node.size || 0,
+        extension,
+        icon: node.icon || "",
+        download_url: node.download_url || "",
+        preview_url: node.download_url || "",
+        path: normalizedPath || name,
+        category: getWorkspaceOutputCategory(extension),
+        isGenerated,
+      });
+    };
+
+    if (workspaceTree) {
+      visit(workspaceTree as WorkspaceNode);
+    }
+
+    return items.sort((left, right) => {
+      const leftCategoryIndex = OUTPUT_CATEGORY_ORDER.indexOf(left.category);
+      const rightCategoryIndex = OUTPUT_CATEGORY_ORDER.indexOf(right.category);
+      if (leftCategoryIndex !== rightCategoryIndex) {
+        return leftCategoryIndex - rightCategoryIndex;
+      }
+      if (left.isGenerated !== right.isGenerated) {
+        return left.isGenerated ? -1 : 1;
+      }
+      return left.path.localeCompare(right.path, "zh-CN", {
+        numeric: true,
+        sensitivity: "base",
+      });
+    });
+  }, [workspaceTree]);
+
+  const workspaceOutputFilesByCategory = useMemo(() => {
+    const grouped: Record<OutputCategoryId, WorkspaceOutputFile[]> = {
+      reports: [],
+      charts: [],
+      data: [],
+      other: [],
+    };
+
+    workspaceOutputFiles.forEach((file) => {
+      grouped[file.category].push(file);
+    });
+
+    return grouped;
+  }, [workspaceOutputFiles]);
+
+  const activeWorkspaceOutputFiles =
+    workspaceOutputFilesByCategory[activeWorkspaceOutputCategory];
+
+  useEffect(() => {
+    if (workspaceOutputFilesByCategory[activeWorkspaceOutputCategory].length) {
+      return;
+    }
+
+    const fallbackCategory =
+      OUTPUT_CATEGORY_ORDER.find(
+        (category) => workspaceOutputFilesByCategory[category].length > 0
+      ) || "reports";
+
+    if (fallbackCategory !== activeWorkspaceOutputCategory) {
+      setActiveWorkspaceOutputCategory(fallbackCategory);
+    }
+  }, [activeWorkspaceOutputCategory, workspaceOutputFilesByCategory]);
+
+  const toWorkspaceNodeFromOutput = (
+    file: WorkspaceOutputFile
+  ): WorkspaceNode => ({
+    name: file.name,
+    path: file.path,
+    is_dir: false,
+    size: file.size,
+    extension: file.extension,
+    icon: file.icon,
+    download_url: file.download_url,
+    is_generated: file.isGenerated,
   });
-
-  const getExt = (name?: string, ext?: string) => {
-    const fromExt = (ext || "").replace(/^\./, "").toLowerCase();
-    if (fromExt) return fromExt;
-    if (!name) return "txt";
-    const p = name.lastIndexOf(".");
-    return p > -1 ? name.slice(p + 1).toLowerCase() : "txt";
-  };
-
-  const Row = ({
-    node,
-    style,
-    dragHandle,
-  }: {
-    node: NodeApi<ArborNode>;
-    style: React.CSSProperties;
-    dragHandle?: (el: HTMLDivElement | null) => void;
-  }) => {
-    const data = node.data;
-    const isDir = data.isDir;
-    const isGenerated = data.isGenerated || false;
-    const isGeneratedFolder = isDir && data.name === "generated";
-    const ext = getExt(data.name, data.extension);
-
-    return (
-      <div style={style} className="w-full">
-        {/* Generated 分组标题 + 删除按钮（不遮挡、不受折叠影响） */}
-        {isGeneratedFolder && (
-          <div className="mt-2 mb-1 px-2 flex items-center justify-between select-none">
-            <div className="flex items-center gap-2 text-[11px] text-purple-600 dark:text-purple-400">
-              <span className="h-px w-4 bg-purple-200 dark:bg-purple-800" />
-              <span className="font-medium">代码生成文件</span>
-            </div>
-            <button
-              className="text-red-600 hover:text-red-700 p-1 rounded hover:bg-red-50 dark:hover:bg-red-950/20"
-              aria-label="删除生成文件夹"
-              title="删除生成文件夹"
-              onClick={(e) => {
-                e.stopPropagation();
-                setDeleteIsDir(true);
-                setDeleteConfirmPath(data.id);
-              }}
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        )}
-        <div
-          className={`flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2 py-1 w-full ${isGenerated ? "bg-purple-50 dark:bg-purple-950/20" : ""
-            }`}
-          style={{ paddingLeft: `${node.level * 14}px` }}
-          onClick={(e) => {
-            if (isDir) {
-              node.toggle();
-              return;
-            }
-            if (singleClickTimerRef.current) {
-              window.clearTimeout(singleClickTimerRef.current);
-              singleClickTimerRef.current = null;
-            }
-            // 延迟触发预览，若短时间内发生双击会被取消
-            singleClickTimerRef.current = window.setTimeout(() => {
-              openNode({
-                name: data.name,
-                path: data.id,
-                is_dir: false,
-                download_url: data.download_url,
-                extension: data.extension,
-                size: data.size,
-                icon: data.icon,
-              } as any);
-              singleClickTimerRef.current = null;
-            }, 180);
-          }}
-          onDoubleClick={(e) => {
-            if (isDir) return;
-            e.stopPropagation();
-            if (singleClickTimerRef.current) {
-              window.clearTimeout(singleClickTimerRef.current);
-              singleClickTimerRef.current = null;
-            }
-            if (data.download_url) {
-              downloadFileByUrl(data.name, data.download_url);
-            }
-          }}
-          onContextMenu={(e) =>
-            onContextMenu(
-              e as any,
-              {
-                name: data.name,
-                path: data.id,
-                is_dir: isDir,
-                download_url: data.download_url,
-                extension: data.extension,
-                size: data.size,
-                icon: data.icon,
-              } as any
-            )
-          }
-          onDragOver={(e) => {
-            if (isDir) {
-              e.preventDefault();
-              e.dataTransfer.dropEffect = (e.dataTransfer.types || []).includes(
-                "text/x-workspace-path"
-              )
-                ? "move"
-                : "copy";
-            }
-          }}
-          onDragEnter={(e) => {
-            if (isDir) setDragOverPath(data.id);
-          }}
-          onDragLeave={(e) => {
-            if (isDir) setDragOverPath(null);
-          }}
-          onDrop={(e) => {
-            if (!isDir) return;
-            e.preventDefault();
-            uploadToDir(data.id, e.dataTransfer.files || []);
-            setDragOverPath(null);
-          }}
-        >
-          <div
-            className="flex items-center gap-2 text-sm w-full min-w-0"
-            ref={dragHandle}
-            draggable={!isDir}
-            onDragStart={(e) => {
-              if (isDir) return;
-              // 将工作区内路径放入自定义 MIME，供目标目录 onDrop 读取
-              e.dataTransfer.setData("text/x-workspace-path", data.id);
-              // 提示为移动操作
-              e.dataTransfer.effectAllowed = "move";
-            }}
-          >
-            {isDir ? (
-              <>
-                <span
-                  className={
-                    isGenerated
-                      ? "text-purple-600 dark:text-purple-400"
-                      : "text-gray-500"
-                  }
-                >
-                  {node.isOpen ? "▾" : "▸"}
-                </span>
-                {isGenerated ? (
-                  <Code2 className="h-3.5 w-3.5 text-purple-600 dark:text-purple-400" />
-                ) : (
-                  <FolderOpen className="h-3.5 w-3.5 text-gray-500" />
-                )}
-              </>
-            ) : (
-              <div style={{ width: 16, height: 16 }}>
-                {/* 动态扩展样式，fallback 到 txt */}
-                {/* @ts-ignore */}
-                <FileIcon
-                  extension={ext}
-                  {...((defaultStyles as any)[ext] ||
-                    (defaultStyles as any).txt)}
-                />
-              </div>
-            )}
-            <span
-              className={`${isGenerated
-                ? "text-purple-700 dark:text-purple-300 font-medium"
-                : ""
-                }`}
-            >
-              {data.name}
-            </span>
-            {typeof data.size === "number" && !isDir && (
-              <span className="text-[10px] text-gray-400 ml-2 shrink-0">
-                {formatFileSize(data.size)}
-              </span>
-            )}
-            {isGenerated && !isDir && (
-              <Sparkles className="h-3 w-3 text-purple-500 ml-1 shrink-0" />
-            )}
-          </div>
-          {/* 行尾不再展示下载/删除按钮。双击/点击行为保持不变；右键菜单提供下载/删除。*/}
-        </div>
-      </div>
-    );
-  };
-
-  const renderTree = (node: WorkspaceNode, depth = 0) => {
-    const isDir = node.is_dir;
-    const isGenerated = node.is_generated || false;
-    const isConverted = node.is_converted || false;
-    const isGeneratedFolder = isDir && node.name === "generated" && depth === 1;
-    const isConvertedFolder = isDir && node.name === "converted" && depth === 1;
-    const pad = { paddingLeft: `${8 + depth * 14}px` } as React.CSSProperties;
-
-    return (
-      <div key={node.path || "root"}>
-        {/* Converted (UTF-8) 分隔线 */}
-        {isConvertedFolder && (
-          <div className="mb-2 mt-2 ml-2 border-t-2 border-green-200 dark:border-green-800 relative">
-            <div className="absolute -top-2.5 left-2 bg-white dark:bg-gray-950 px-2 text-[10px] text-green-600 dark:text-green-400 font-medium">
-              编码自动转换
-            </div>
-          </div>
-        )}
-        {/* Generated 分隔线 */}
-        {isGeneratedFolder && (
-          <div className="mb-2 mt-2 ml-2 border-t-2 border-purple-200 dark:border-purple-800 relative">
-            <div className="absolute -top-2.5 left-2 bg-white dark:bg-gray-950 px-2 text-[10px] text-purple-600 dark:text-purple-400 font-medium">
-              代码生成文件
-            </div>
-          </div>
-        )}
-        <div
-          className={`flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 rounded px-2 py-1 cursor-default ${isGenerated ? "bg-purple-50 dark:bg-purple-950/20" : isConverted ? "bg-green-50 dark:bg-green-950/20" : ""}`}
-          style={pad}
-          onClick={(e) => {
-            if (isDir) return toggleExpand(node.path);
-            if (singleClickTimerRef.current) {
-              window.clearTimeout(singleClickTimerRef.current);
-              singleClickTimerRef.current = null;
-            }
-            singleClickTimerRef.current = window.setTimeout(() => {
-              openNode(node);
-              singleClickTimerRef.current = null;
-            }, 180);
-          }}
-          onDoubleClick={(e) => {
-            if (isDir) return;
-            e.stopPropagation();
-            if (singleClickTimerRef.current) {
-              window.clearTimeout(singleClickTimerRef.current);
-              singleClickTimerRef.current = null;
-            }
-            if (node.download_url) {
-              downloadFileByUrl(node.name, node.download_url);
-            } else {
-              openNode(node);
-            }
-          }}
-          onContextMenu={(e) => onContextMenu(e, node)}
-          onDragOver={(e) => {
-            if (isDir) e.preventDefault();
-          }}
-          onDrop={async (e) => {
-            if (!isDir) return;
-            e.preventDefault();
-            const dt = e.dataTransfer;
-            // 1) 如果是从 OS 拖入文件
-            if (dt.files && dt.files.length) {
-              uploadToDir(node.path, dt.files || []);
-              return;
-            }
-            // 2) 如果是从 generated/ 内部拖动的文件，使用自定义 data 传递路径
-            const srcPath = dt.getData("text/x-workspace-path");
-            if (srcPath) {
-              try {
-                const url = `${API_CONFIG.BACKEND_BASE_URL
-                  }/workspace/move?src=${encodeURIComponent(
-                    srcPath
-                  )}&dst_dir=${encodeURIComponent(
-                    node.path
-                  )}&session_id=${encodeURIComponent(sessionId)}`;
-                const res = await fetch(url, { method: "POST" });
-                if (res.ok) {
-                  await loadWorkspaceTree();
-                  await loadWorkspaceFiles();
-                }
-              } catch (err) {
-                console.error("move error", err);
-              }
-            }
-          }}
-        >
-          <div className="flex items-center gap-2 text-sm">
-            {isDir ? (
-              <>
-                <span
-                  className={
-                    isGenerated
-                      ? "text-purple-600 dark:text-purple-400"
-                      : isConverted
-                      ? "text-green-600 dark:text-green-400"
-                      : "text-gray-500"
-                  }
-                >
-                  {expanded[node.path] ? "▾" : "▸"}
-                </span>
-                {isGenerated ? (
-                  <Code2
-                    className={`h-3.5 w-3.5 ${isGenerated
-                      ? "text-purple-600 dark:text-purple-400"
-                      : isConverted
-                      ? "text-green-600 dark:text-green-400"
-                      : "text-gray-500"
-                      }`}
-                  />
-                ) : isConverted ? (
-                  <FileText className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />
-                ) : (
-                  <FolderOpen className="h-3.5 w-3.5 text-gray-500" />
-                )}
-              </>
-            ) : (
-              <span
-                className={isGenerated ? "text-purple-400" : isConverted ? "text-green-400" : "text-gray-400"}
-              >
-                •
-              </span>
-            )}
-            <span
-              className={`truncate ${isGenerated
-                ? "text-purple-700 dark:text-purple-300 font-medium"
-                : isConverted
-                ? "text-green-700 dark:text-green-300"
-                : ""
-                }`}
-            >
-              {node.icon && !isGenerated && !isConverted ? `${node.icon} ` : ""}
-              {node.name || "workspace"}
-            </span>
-            {!isDir && typeof node.size === "number" && (
-              <span className="text-[10px] text-gray-400 ml-2 shrink-0">
-                {formatFileSize(node.size)}
-              </span>
-            )}
-            {isGenerated && !isDir && (
-              <Sparkles className="h-3 w-3 text-purple-500 ml-1 shrink-0" />
-            )}
-          </div>
-          {/* 双击/点击行为已经在容器上：目录展开，文件预览/下载保持一致 */}
-        </div>
-        {isDir && expanded[node.path] && node.children && (
-          <div>{node.children.map((c) => renderTree(c, depth + 1))}</div>
-        )}
-      </div>
-    );
-  };
 
   const clearWorkspace = async () => {
     if (!sessionId) return;
@@ -3142,6 +4010,7 @@ ${analysisContent}
       Answer: { icon: "✅", color: "bg-green-500" },
       File: { icon: "📎", color: "bg-purple-500" },
       TaskTree: { icon: "🌲", color: "bg-amber-500" },
+      DataDictionary: { icon: "📚", color: "bg-amber-500" },
     };
 
     const allMatches: Array<{
@@ -3318,6 +4187,7 @@ ${analysisContent}
         "Answer",
         "File",
         "TaskTree",
+        "DataDictionary",
       ] as const;
       const sectionConfigs: Record<
         (typeof sectionTypes)[number],
@@ -3358,6 +4228,11 @@ ${analysisContent}
           color:
             "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
         },
+        DataDictionary: {
+          icon: "📚",
+          color:
+            "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
+        },
       };
 
       // 没有结构化标签时，保持最轻量文本渲染（避免每个 chunk 都触发 Markdown/高亮重解析）
@@ -3378,8 +4253,9 @@ ${analysisContent}
         answer: "Answer",
         file: "File",
         tasktree: "TaskTree",
+        datadictionary: "DataDictionary",
       };
-      const openRe = /<(Analyze|Understand|Code|Execute|Answer|File|TaskTree)>/gi;
+      const openRe = /<(Analyze|Understand|Code|Execute|Answer|File|TaskTree|DataDictionary)>/gi;
       let cursor = 0;
       let sectionIndex = 0;
       let m: RegExpExecArray | null;
@@ -3547,6 +4423,11 @@ ${analysisContent}
       },
       TaskTree: {
         icon: "🌲",
+        color:
+          "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
+      },
+      DataDictionary: {
+        icon: "📚",
         color:
           "bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-800",
       },
@@ -3821,6 +4702,22 @@ ${analysisContent}
                   选择任务
                 </Button>
               )}
+              {match.type === "DataDictionary" && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setSystemSettingsTab("dictionary");
+                    setShowSystemSettings(true);
+                    void loadDataDictionary({ silent: true });
+                  }}
+                  className="h-5 px-2 text-xs text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+                  title="查看 AI 数据字典理解"
+                >
+                  <BookOpen className="h-3 w-3 mr-1" />
+                  查看语义
+                </Button>
+              )}
             </div>
           </div>
           {!isCollapsed && (
@@ -3851,6 +4748,19 @@ ${analysisContent}
                 } else {
                   return <div className="text-sm text-gray-500">任务树数据格式异常，请重新生成</div>;
                 }
+              })() : match.type === "DataDictionary" ? (() => {
+                const parsed = parseDataDictionaryContent(match.content);
+                const itemCount = parsed?.items.length || 0;
+                return (
+                  <div className="text-sm text-amber-700 dark:text-amber-300">
+                    <div className="mb-2 font-medium">
+                      {itemCount > 0 ? `AI 已生成并记录 ${itemCount} 条数据字典理解` : "AI 已生成并记录数据字典理解"}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      这些字段释义已写入设置 → 数据字典。分析不会等待人工确认，您可以稍后在知识库中修改并保存。
+                    </div>
+                  </div>
+                );
               })() : renderSectionContent(sectionBody)}
               {fileGallery}
             </div>
@@ -3888,6 +4798,7 @@ ${analysisContent}
         "File",
         "Answer",
         "TaskTree",
+        "DataDictionary",
       ] as const;
       const matches: Array<{ type: string; index: number; pos: number }> = [];
       sectionTypes.forEach((t) => {
@@ -3963,6 +4874,62 @@ ${analysisContent}
     toast({ description: "分析语言已切换为中文（简体）" });
   };
 
+  const openDataSourcePicker = (overrideMessage?: string | null) => {
+    setPendingDataSourceSelection({
+      selectedDbSourceIds: effectiveSelectedDbSourceIds,
+      allowFilesOnly: dataSourceSelection.allowFilesOnly || hasWorkspaceDataSource,
+    });
+    setPendingSendOverrideMessage(overrideMessage ?? null);
+    setShowDataSourceDialog(true);
+  };
+
+  const cancelDataSourcePicker = () => {
+    setShowDataSourceDialog(false);
+    setPendingSendOverrideMessage(null);
+    setPendingDataSourceSelection(dataSourceSelection);
+  };
+
+  const confirmDataSourcePicker = () => {
+    const validIds = new Set(savedDbConnections.map((item) => item.id));
+    const nextIds = pendingDataSourceSelection.selectedDbSourceIds.filter((id) => validIds.has(id));
+    const hasAtLeastOneSource = nextIds.length > 0 || hasWorkspaceDataSource;
+
+    if (!hasAtLeastOneSource) {
+      toast({
+        description: "请至少选择一个数据库数据源，或先上传文件后再开始分析。",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setSelectedDbSourceIds(nextIds);
+    setDataSourceSelection({
+      selectedDbSourceIds: nextIds,
+      allowFilesOnly: pendingDataSourceSelection.allowFilesOnly,
+    });
+    setSourceSelectionExplicit(true);
+    setShowDataSourceDialog(false);
+
+    const queuedOverride = pendingSendOverrideMessage ?? undefined;
+    setPendingSendOverrideMessage(null);
+
+    const shouldSendNow =
+      typeof queuedOverride === "string"
+        ? queuedOverride.trim().length > 0
+        : inputValue.trim().length > 0 || attachments.length > 0;
+
+    if (!shouldSendNow) {
+      toast({ description: "数据源选择已生效" });
+      return;
+    }
+
+    void handleSendMessage(queuedOverride, {
+      bypassSourceSelectionDialog: true,
+      sourceSelectionConfirmed: true,
+      confirmedSelectedDbSourceIds: nextIds,
+    });
+  };
+
   const handleSendGuidance = async () => {
     if (!sideGuidanceText.trim()) return;
     setIsSubmittingGuidance(true);
@@ -4018,11 +4985,69 @@ ${analysisContent}
 
   const deselectAllTasks = useCallback(() => setSelectedTasks(new Set()), []);
 
-  const handleSendMessage = async (overrideMessage?: string) => {
+  const handleSendMessage = async (
+    overrideMessage?: string,
+    options?: {
+      bypassSourceSelectionDialog?: boolean;
+      sourceSelectionConfirmed?: boolean;
+      confirmedSelectedDbSourceIds?: string[];
+    }
+  ) => {
     const messageText = overrideMessage ?? inputValue;
     const outgoingAttachments = overrideMessage ? [] : attachments;
     if (!messageText.trim() && outgoingAttachments.length === 0) return;
+
+    if (!isModelProviderConfigured) {
+      setShowModelConfigAlert(true);
+      return;
+    }
+
+    const selectedSourceIdsForRequest = (() => {
+      if (options?.confirmedSelectedDbSourceIds) {
+        const availableIds = new Set(savedDbConnections.map((item) => item.id));
+        return options.confirmedSelectedDbSourceIds.filter((id) => availableIds.has(id));
+      }
+      return effectiveSelectedDbSourceIds;
+    })();
+
+    const selectedIdSet = new Set(selectedSourceIdsForRequest);
+    const selectedSourcesForRequest = savedDbConnections.filter((item) => selectedIdSet.has(item.id));
+    const hasDataSource = selectedSourcesForRequest.length > 0 || hasWorkspaceDataSource;
+    const shouldPromptSourceSelection =
+      !options?.bypassSourceSelectionDialog &&
+      savedDbConnections.length > 1 &&
+      !sourceSelectionExplicit;
+
+    const shouldPromptMissingSourceSelection =
+      !options?.bypassSourceSelectionDialog &&
+      savedDbConnections.length > 0 &&
+      selectedSourcesForRequest.length === 0 &&
+      !hasWorkspaceDataSource;
+
+    if (shouldPromptSourceSelection || shouldPromptMissingSourceSelection) {
+      openDataSourcePicker(overrideMessage ?? null);
+      return;
+    }
+
+    if (!hasDataSource) {
+      toast({
+        description: "请至少选择一个数据库数据源，或先上传一个数据文件后再开始分析。",
+        variant: "destructive",
+      });
+      setSystemSettingsTab("database");
+      setShowSystemSettings(true);
+      return;
+    }
+
+    if (options?.sourceSelectionConfirmed) {
+      setSourceSelectionExplicit(true);
+    }
+
+    const databaseSourcesForRequest = selectedSourcesForRequest;
+
     setIsAnalyzing(true);
+  setRuntimeAnalysisRun(null);
+  setRuntimeAnalysisEvents([]);
     const baseMessageIndex = messages.length;
     const aiMessageIndex = baseMessageIndex + 1;
 
@@ -4085,6 +5110,10 @@ ${analysisContent}
           analysis_mode: analysisMode,
           analysis_language: analysisLanguage,
           report_types: effectiveReportTypes,
+          selected_database_sources: databaseSourcesForRequest,
+          source_selection_explicit:
+            Boolean(options?.sourceSelectionConfirmed) ||
+            sourceSelectionExplicit,
           model_provider: modelProviderConfig,
           ...(temperature !== null && { temperature }),
         }),
@@ -4116,6 +5145,8 @@ ${analysisContent}
           await loadWorkspaceTree();
           await loadWorkspaceFiles();
         }
+        void loadAnalysisHistory({ silent: true });
+        void loadRuntimeAnalysisTrace({ silent: true });
         setIsTyping(false);
         setIsAnalyzing(false);
         return;
@@ -4274,15 +5305,36 @@ ${analysisContent}
         }
       }
 
+      // 检测 <DataDictionary> 并自动写入知识库，不再弹出确认对话框
+      if (/<datadictionary>/i.test(accumulatedMessage)) {
+        const dictionaryMatch = accumulatedMessage.match(/<datadictionary>([\s\S]*?)<\/datadictionary>/i);
+        if (dictionaryMatch) {
+          const parsed = parseDataDictionaryContent(dictionaryMatch[1]);
+          if (parsed) {
+            try {
+              await persistAiDataDictionaryEntries(parsed.items, { silent: true });
+            } catch (error) {
+              console.warn("[DataDictionary] 自动写入知识库失败:", error);
+            }
+          } else {
+            console.warn("[DataDictionary] JSON 解析失败, 原始内容:", dictionaryMatch[1].slice(0, 200));
+          }
+        }
+      }
+
       // 结束后刷新一次文件列表确保无遗漏
       await loadWorkspaceFiles();
       await loadWorkspaceTree();
+      void loadAnalysisHistory({ silent: true });
+      void loadRuntimeAnalysisTrace({ silent: true });
       setIsTyping(false); // 结束加载状态
       setIsAnalyzing(false);
       setStreamingMessageId(null);
 
     } catch (error) {
       console.error("Error sending message:", error);
+      void loadAnalysisHistory({ silent: true });
+      void loadRuntimeAnalysisTrace({ silent: true });
       setIsTyping(false);
       setIsAnalyzing(false);
       setStreamingMessageId(null);
@@ -4351,15 +5403,151 @@ ${analysisContent}
         className="h-screen bg-white dark:bg-black text-black dark:text-white"
         suppressHydrationWarning
       >
-        <ResizablePanelGroup direction="horizontal" className="h-full">
+        <ResizablePanelGroup
+          key={isLeftPanelDocked ? "layout-docked" : "layout-expanded"}
+          direction="horizontal"
+          className="h-full min-h-0"
+        >
           {/* Left Panel - Workspace Tree */}
-          <ResizablePanel defaultSize={25} minSize={10}>
+          <ResizablePanel
+            defaultSize={isLeftPanelDocked ? LEFT_PANEL_DOCKED_DEFAULT_SIZE : 25}
+            minSize={isLeftPanelDocked ? LEFT_PANEL_DOCKED_MIN_SIZE : 10}
+            className="min-h-0 min-w-0"
+          >
+            {isLeftPanelDocked ? (
+              <div className="flex h-full flex-col items-center justify-between border-r border-gray-200 bg-white py-2 dark:border-gray-800 dark:bg-black">
+                <div className="flex flex-col items-center gap-2">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    onChange={handleFileUpload}
+                    className="hidden"
+                    accept="*"
+                    aria-label="上传文件"
+                    title="上传文件"
+                  />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="展开左侧面板"
+                    onClick={() => setIsLeftPanelDocked(false)}
+                  >
+                    <PanelLeftOpen className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="文件区（点击展开）"
+                    onClick={() => setIsLeftPanelDocked(false)}
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="上传文件"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <Upload className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="风调雨顺"
+                    onClick={() => setSideGuidanceOpen(true)}
+                    disabled={messages.length <= 1}
+                  >
+                    <BookOpen className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="系统设置"
+                    onClick={() => {
+                      setSystemSettingsTab("model");
+                      setShowSystemSettings(true);
+                    }}
+                  >
+                    <Database className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title="了解观雨"
+                    onClick={() => setShowAgentIntro(true)}
+                  >
+                    <Sparkles className="h-4 w-4 text-blue-500" />
+                  </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 w-8 p-0 text-gray-500"
+                        title="清空 workspace"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>清空 workspace？</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          将删除 workspace 根目录下的所有文件与文件夹，此操作不可撤销。
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>取消</AlertDialogCancel>
+                        <AlertDialogAction
+                          className="bg-red-600 hover:bg-red-700"
+                          onClick={clearWorkspace}
+                        >
+                          确认清空
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
+
+                <div className="flex flex-col items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 p-2 dark:border-gray-700 dark:bg-gray-900/60">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 w-8 p-0"
+                    title={hasSelectedDataSource ? "已选择数据源，点击调整" : "数据源未选择，点击配置"}
+                    onClick={() => openDataSourcePicker(null)}
+                  >
+                    <Database className="h-4 w-4" />
+                  </Button>
+                  <span
+                    className={`h-2 w-2 rounded-full ${hasSelectedDataSource ? "bg-emerald-500" : "bg-amber-500"}`}
+                    title={hasSelectedDataSource ? "数据源已就绪" : "请先选择数据源"}
+                  />
+                </div>
+              </div>
+            ) : (
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12">
                 <div className="flex items-center gap-2">
                   <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
                     Files
                   </h2>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-5 w-5 p-0 text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300"
+                    title="收起为工具栏"
+                    onClick={() => setIsLeftPanelDocked(true)}
+                  >
+                    <PanelLeftClose className="h-3.5 w-3.5" />
+                  </Button>
                   <Button
                     variant="ghost"
                     size="sm"
@@ -4424,6 +5612,8 @@ ${analysisContent}
                     onChange={handleFileUpload}
                     className="hidden"
                     accept="*"
+                    aria-label="上传文件"
+                    title="上传文件"
                   />
                   {/* <Button
                     variant="ghost"
@@ -4468,91 +5658,390 @@ ${analysisContent}
 
               <div
                 ref={treeContainerRef}
-                className="flex-1 w-full min-h-0 overflow-hidden pl-3 pr-1 py-2"
+                className="flex-1 w-full min-h-0 overflow-y-auto overflow-x-hidden scrollbar-auto pl-3 pr-2 py-2"
               >
-                <div
-                  className={`mb-2 rounded border border-dashed flex items-center justify-center h-20 text-xs select-none ${dropActive
-                    ? "bg-blue-50 border-blue-300 text-blue-600"
-                    : "bg-gray-50 dark:bg-gray-900/40 border-gray-300 dark:border-gray-700 text-gray-500"
-                    }`}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    setDropActive(true);
-                  }}
-                  onDragLeave={() => setDropActive(false)}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    setDropActive(false);
-                    const files = e.dataTransfer.files;
-                    if (files && files.length) uploadToDir("", files);
-                  }}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  {/* 独立隐藏 input 兼容点击上传 */}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    onChange={handleFileUpload}
-                    className="hidden"
-                    accept="*"
-                  />
-                  <div className="flex items-center gap-2">
-                    <Upload className="h-4 w-4" />
-                    <span>拖拽或点击此处上传（workspace 根目录）</span>
+                <div className="mb-5 rounded-xl border border-slate-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.96))] p-2.5 shadow-[0_12px_32px_rgba(15,23,42,0.08)] dark:border-slate-800 dark:bg-[linear-gradient(180deg,rgba(2,6,23,0.96),rgba(15,23,42,0.92))]">
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={handleGenerateDataProfileReport}
+                      disabled={isGeneratingDataProfileReport}
+                      className="group relative h-20 w-full overflow-hidden rounded-lg border border-amber-300/60 bg-[linear-gradient(135deg,rgba(41,28,16,1),rgba(88,52,19,0.94)_52%,rgba(17,24,39,1))] text-left text-amber-50 shadow-[0_10px_26px_rgba(120,53,15,0.18)] transition-all duration-200 hover:-translate-y-0.5 hover:border-amber-200 hover:shadow-[0_18px_34px_rgba(245,158,11,0.18)] active:translate-y-[1px] active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-200/70 disabled:cursor-not-allowed disabled:opacity-70"
+                      title="生成数据探查 SKILL 文档"
+                    >
+                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(251,191,36,0.18),transparent_40%),linear-gradient(90deg,rgba(245,158,11,0.14)_1px,transparent_1px),linear-gradient(0deg,rgba(245,158,11,0.08)_1px,transparent_1px)] bg-[size:auto,18px_18px,18px_18px]" />
+                      <div className="absolute inset-0 opacity-0 transition-opacity duration-200 group-hover:opacity-100 bg-[radial-gradient(circle_at_center,rgba(251,191,36,0.12),transparent_52%)]" />
+                      <div className="absolute left-0 top-0 h-full w-24 bg-[linear-gradient(90deg,rgba(251,191,36,0.18),transparent)] opacity-90" />
+                      <div className="absolute right-4 top-3 hidden gap-1.5 sm:flex transition-transform duration-200 group-hover:translate-x-0.5">
+                        <span className="h-1.5 w-10 rounded-full bg-amber-100/60" />
+                        <span className="h-1.5 w-4 rounded-full bg-amber-200/40" />
+                      </div>
+                      <div className="absolute right-4 bottom-3 hidden gap-1 sm:flex">
+                        <span className="h-6 w-1 rounded-full bg-amber-100/30" />
+                        <span className="h-6 w-1 rounded-full bg-amber-200/20" />
+                        <span className="h-6 w-1 rounded-full bg-amber-100/30" />
+                      </div>
+                      <div className="absolute inset-x-3 bottom-2 h-px bg-gradient-to-r from-transparent via-amber-100/60 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+                      <div className="relative z-10 flex h-full items-center gap-3 px-4">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-amber-200/50 bg-amber-100/10 shadow-inner shadow-amber-50/10 transition-transform duration-200 group-hover:scale-105">
+                          {isGeneratingDataProfileReport ? (
+                            <RefreshCw className="h-5 w-5 animate-spin text-amber-100" />
+                          ) : (
+                            <FileText className="h-5 w-5 text-amber-100" />
+                          )}
+                        </div>
+                        <div className="min-w-0 transition-transform duration-200 group-hover:translate-x-0.5">
+                          <div className="text-[10px] font-medium uppercase tracking-[0.24em] text-amber-200/70">Archive</div>
+                          <div className="mt-1 text-sm font-semibold tracking-[0.02em] text-amber-50">沉淀数据探查</div>
+                        </div>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowDatabaseRelationshipDialog(true);
+                        void handleLoadSchemaGraph();
+                      }}
+                      disabled={isLoadingSchemaGraph || !isDbTested}
+                      className="group relative h-20 w-full overflow-hidden rounded-lg border border-emerald-300/60 bg-[linear-gradient(135deg,rgba(8,27,30,1),rgba(5,88,91,0.92)_52%,rgba(15,23,42,1))] text-left text-emerald-50 shadow-[0_10px_26px_rgba(5,150,105,0.16)] transition-all duration-200 hover:-translate-y-0.5 hover:border-emerald-200 hover:shadow-[0_18px_34px_rgba(16,185,129,0.18)] active:translate-y-[1px] active:scale-[0.985] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-200/70 disabled:cursor-not-allowed disabled:opacity-70"
+                      title={isDbTested ? "展示数据库表关系与数据脉络" : "请先在系统设置中测试数据库连接"}
+                    >
+                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(52,211,153,0.18),transparent_38%),linear-gradient(90deg,rgba(16,185,129,0.14)_1px,transparent_1px),linear-gradient(0deg,rgba(52,211,153,0.08)_1px,transparent_1px)] bg-[size:auto,18px_18px,18px_18px]" />
+                      <div className="absolute inset-0 opacity-0 transition-opacity duration-200 group-hover:opacity-100 bg-[radial-gradient(circle_at_center,rgba(52,211,153,0.12),transparent_52%)]" />
+                      <div className="absolute inset-y-0 right-0 w-28 bg-[linear-gradient(270deg,rgba(34,197,94,0.14),transparent)]" />
+                      <div className="absolute right-6 top-4 hidden h-12 w-16 sm:block transition-transform duration-200 group-hover:translate-x-0.5">
+                        <span className="absolute left-1 top-1 h-2.5 w-2.5 rounded-full border border-emerald-100/60 bg-emerald-200/20" />
+                        <span className="absolute right-1 top-5 h-2.5 w-2.5 rounded-full border border-emerald-100/60 bg-emerald-200/20" />
+                        <span className="absolute left-5 bottom-1 h-2.5 w-2.5 rounded-full border border-emerald-100/60 bg-emerald-200/20" />
+                        <span className="absolute left-3 top-3 h-px w-8 rotate-[18deg] bg-emerald-100/50" />
+                        <span className="absolute left-4 top-5 h-px w-7 -rotate-[24deg] bg-emerald-100/50" />
+                      </div>
+                      <div className="absolute inset-x-3 bottom-2 h-px bg-gradient-to-r from-transparent via-emerald-100/60 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100" />
+                      <div className="relative z-10 flex h-full items-center gap-3 px-4">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-emerald-200/50 bg-emerald-100/10 shadow-inner shadow-emerald-50/10 transition-transform duration-200 group-hover:scale-105">
+                          {isLoadingSchemaGraph ? (
+                            <RefreshCw className="h-5 w-5 animate-spin text-emerald-100" />
+                          ) : (
+                            <GitBranch className="h-5 w-5 text-emerald-100" />
+                          )}
+                        </div>
+                        <div className="min-w-0 transition-transform duration-200 group-hover:translate-x-0.5">
+                          <div className="text-[10px] font-medium uppercase tracking-[0.24em] text-emerald-200/70">Topology</div>
+                          <div className="mt-1 text-sm font-semibold tracking-[0.02em] text-emerald-50">展示数据脉络</div>
+                        </div>
+                      </div>
+                    </button>
+                  </div>
+
+                  <div
+                    className={cn(
+                      "group relative mt-2.5 flex h-20 cursor-pointer items-center overflow-hidden rounded-lg border text-xs select-none transition-all duration-200",
+                      dropActive
+                        ? "border-sky-300 bg-[linear-gradient(135deg,rgba(224,242,254,0.98),rgba(240,249,255,0.95))] text-sky-700 shadow-[0_16px_34px_rgba(14,165,233,0.16)] dark:border-sky-500/70 dark:bg-[linear-gradient(135deg,rgba(8,47,73,0.9),rgba(12,74,110,0.84))] dark:text-sky-100"
+                        : "border-slate-300/80 bg-[linear-gradient(135deg,rgba(248,250,252,0.98),rgba(241,245,249,0.95))] text-slate-600 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] hover:border-slate-400 hover:shadow-[0_14px_30px_rgba(15,23,42,0.08)] dark:border-slate-700 dark:bg-[linear-gradient(135deg,rgba(15,23,42,0.92),rgba(30,41,59,0.88))] dark:text-slate-300",
+                      isUploading ? "border-violet-300/70 text-violet-700 dark:border-violet-500/60 dark:text-violet-100" : "",
+                    )}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      setDropActive(true);
+                    }}
+                    onDragLeave={() => setDropActive(false)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setDropActive(false);
+                      const files = e.dataTransfer.files;
+                      if (files && files.length) uploadToDir("", files);
+                    }}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(148,163,184,0.12)_1px,transparent_1px),linear-gradient(0deg,rgba(148,163,184,0.08)_1px,transparent_1px)] bg-[size:18px_18px] opacity-70" />
+                    <div className="absolute inset-y-0 left-0 w-28 bg-[linear-gradient(90deg,rgba(255,255,255,0.35),transparent)] dark:bg-[linear-gradient(90deg,rgba(255,255,255,0.06),transparent)]" />
+                    <div className="absolute right-4 top-3 hidden sm:flex items-center gap-1.5 text-[10px] uppercase tracking-[0.2em] opacity-60">
+                      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+                      <span>{isUploading ? "Transfer" : dropActive ? "Drop" : "Ingress"}</span>
+                    </div>
+                    {/* 独立隐藏 input 兼容点击上传 */}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      onChange={handleFileUpload}
+                      className="hidden"
+                      accept="*"
+                      aria-label="上传文件"
+                      title="上传文件"
+                    />
+                    <div className="relative z-10 flex w-full items-center justify-between gap-3 px-4">
+                      <div className="flex min-w-0 items-center gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-current/20 bg-white/35 dark:bg-white/6 transition-transform duration-200 group-hover:scale-105">
+                          {isUploading ? (
+                            <RefreshCw className="h-5 w-5 animate-spin" />
+                          ) : (
+                            <Upload className="h-5 w-5" />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-medium uppercase tracking-[0.24em] opacity-70">Ingress Bay</div>
+                          <div className="mt-1 truncate text-sm font-semibold">拖拽或点击上传数据文件</div>
+                        </div>
+                      </div>
+                      <div className="hidden shrink-0 sm:flex flex-col items-end gap-1">
+                        <span className="rounded-full border border-current/20 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] opacity-80">
+                          {isUploading ? "上传中" : "Workspace Root"}
+                        </span>
+                        <span className="text-[10px] opacity-65">支持拖拽批量投递</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {uploadMsg && (
+                    <div className="px-1 pt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                      {uploadMsg}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    {OUTPUT_CATEGORY_ORDER.map((category) => {
+                      const meta = OUTPUT_CATEGORY_META[category];
+                      const Icon = meta.icon;
+                      const count = workspaceOutputFilesByCategory[category].length;
+                      const isActive = activeWorkspaceOutputCategory === category;
+
+                      return (
+                        <button
+                          key={category}
+                          type="button"
+                          onClick={() => setActiveWorkspaceOutputCategory(category)}
+                          className={cn(
+                            "group rounded-xl border px-3 py-3 text-left transition-all duration-200",
+                            isActive
+                              ? meta.tone
+                              : "border-slate-200/80 bg-white/85 text-slate-600 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-[0_12px_24px_rgba(15,23,42,0.08)] dark:border-slate-800 dark:bg-slate-950/60 dark:text-slate-200"
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-[10px] font-semibold uppercase tracking-[0.22em] opacity-70">
+                                {meta.hint}
+                              </div>
+                              <div className="mt-1 text-sm font-semibold tracking-[0.01em]">
+                                {meta.label}
+                              </div>
+                            </div>
+                            <div
+                              className={cn(
+                                "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-current/10 bg-white/50 dark:bg-white/5",
+                                meta.accent
+                              )}
+                            >
+                              <Icon className="h-4 w-4" />
+                            </div>
+                          </div>
+                          <div className="mt-3 flex items-end justify-between">
+                            <span className="text-2xl font-semibold leading-none">
+                              {count}
+                            </span>
+                            <span className="text-[10px] opacity-70">
+                              {isActive ? "当前展开" : "点击查看列表"}
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200/80 bg-white/90 p-3 shadow-[0_12px_28px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-950/70">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
+                          Workspace Files
+                        </div>
+                        <div className="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {OUTPUT_CATEGORY_META[activeWorkspaceOutputCategory].label}
+                        </div>
+                      </div>
+                      <span className="rounded-full border border-slate-200 px-2.5 py-1 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-300">
+                        {activeWorkspaceOutputFiles.length} 个文件
+                      </span>
+                    </div>
+
+                    {activeWorkspaceOutputFiles.length ? (
+                      <div className="space-y-2">
+                        {activeWorkspaceOutputFiles.map((file) => {
+                          const ext = normalizeWorkspaceExtension(
+                            file.name,
+                            file.extension
+                          );
+
+                          return (
+                            <div
+                              key={file.path}
+                              className="flex items-center gap-2 rounded-xl border border-slate-200/80 bg-slate-50/80 p-2.5 transition-colors hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/70 dark:hover:border-slate-700"
+                            >
+                              <button
+                                type="button"
+                                className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                                onClick={() => openPreview(file)}
+                                onContextMenu={(event) =>
+                                  onContextMenu(
+                                    event,
+                                    toWorkspaceNodeFromOutput(file)
+                                  )
+                                }
+                              >
+                                <div className="h-9 w-9 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-white p-2 dark:border-slate-700 dark:bg-slate-950">
+                                  <FileIcon
+                                    extension={ext}
+                                    {...((defaultStyles as any)[ext] ||
+                                      (defaultStyles as any).txt)}
+                                  />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
+                                      {file.name}
+                                    </span>
+                                    {file.isGenerated && (
+                                      <span className="inline-flex items-center gap-1 rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-200">
+                                        <Sparkles className="h-3 w-3" />
+                                        生成
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
+                                    <span>{formatFileSize(file.size || 0)}</span>
+                                    <span className="truncate">{file.path}</span>
+                                  </div>
+                                </div>
+                              </button>
+
+                              <div className="flex shrink-0 items-center gap-1">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2 text-[11px] text-slate-600 hover:bg-slate-200/70 dark:text-slate-200 dark:hover:bg-slate-800"
+                                  onClick={() => openPreview(file)}
+                                >
+                                  预览
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2 text-[11px] text-slate-600 hover:bg-slate-200/70 dark:text-slate-200 dark:hover:bg-slate-800"
+                                  onClick={() =>
+                                    downloadFileByUrl(
+                                      file.name,
+                                      ensureGeneratedInUrl(file.download_url)
+                                    )
+                                  }
+                                >
+                                  <Download className="mr-1 h-3.5 w-3.5" />
+                                  下载
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : workspaceOutputFiles.length ? (
+                      <div className="rounded-xl border border-dashed border-slate-300/90 bg-slate-50/70 px-3 py-6 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-400">
+                        {OUTPUT_CATEGORY_META[activeWorkspaceOutputCategory].empty}
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-slate-300/90 bg-slate-50/70 px-3 py-6 text-center text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-400">
+                        暂无可展示文件。系统目录如 converted 已自动隐藏，请先上传数据或运行分析任务。
+                      </div>
+                    )}
                   </div>
                 </div>
-                {uploadMsg && (
-                  <div className="px-2 pb-2 text-[11px] text-gray-500">
-                    {uploadMsg}
-                  </div>
-                )}
+              </div>
 
-                {workspaceTree ? (
-                  <Tree
-                    width={treeSize.w || "100%"}
-                    height={Math.max(600, treeSize.h - 110)}
-                    data={toArbor(workspaceTree).children || []}
-                    initialOpenState={expanded}
-                    indent={14}
-                    rowHeight={28}
-                  >
-                    {Row}
-                  </Tree>
-                ) : (
-                  <div className="flex items-center justify-center h-full text-sm text-gray-500">
-                    Loading...
+              <div className="shrink-0 border-t border-gray-200 bg-slate-50/70 px-3 py-3 dark:border-gray-800 dark:bg-slate-950/30">
+                <div className="flex flex-col gap-3 rounded-2xl border border-slate-200/90 bg-white/90 p-3 shadow-[0_10px_24px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-950/70">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">数据源选择（必选）</span>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0 border-sky-200 px-2 text-[10px] text-sky-700 hover:bg-sky-50 dark:border-sky-900 dark:text-sky-300 dark:hover:bg-sky-950/40"
+                      onClick={() => openDataSourcePicker(null)}
+                    >
+                      选择数据源
+                    </Button>
                   </div>
-                )}
+
+                  <div className="flex min-h-[120px] flex-1 flex-col justify-center rounded-xl border border-dashed border-slate-300/90 bg-slate-50/70 p-2.5 dark:border-slate-700 dark:bg-slate-900/30">
+                    {hasSelectedDataSource ? (
+                      <div className="space-y-2">
+                        {selectedDatabaseSources.length > 0 ? (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {selectedDatabaseSources.map((source) => (
+                              <span
+                                key={source.id}
+                                className="rounded-full border border-cyan-200 bg-cyan-50 px-2 py-0.5 text-[10px] text-cyan-700 dark:border-cyan-900 dark:bg-cyan-950/30 dark:text-cyan-300"
+                                title={`${source.dbType.toUpperCase()} · ${source.label}`}
+                              >
+                                {source.label}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {hasWorkspaceDataSource ? (
+                            <span className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300">
+                              已上传文件 {workspaceDataSourceFiles.length} 个
+                          </span>
+                        ) : null}
+                        {selectedDatabaseSources.length > 0 ? (
+                          <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                            已完成数据源确认，本轮分析将按以上数据范围执行。
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="space-y-1 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
+                        <p>当前尚未选择任何数据源。</p>
+                        <p>发送分析要求时将自动弹出数据源选择窗口。</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
+            )}
           </ResizablePanel>
 
           <ResizableHandle withHandle />
 
           {/* Middle Panel - Chat & Analysis */}
-          <ResizablePanel defaultSize={50} minSize={25}>
+          <ResizablePanel defaultSize={isLeftPanelDocked ? 67 : 50} minSize={25} className="min-h-0 min-w-0">
             <div className="flex flex-col min-h-0 min-w-0 h-full">
               {/* Header */}
-              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0">
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-2">
+              <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-gray-200 dark:border-gray-800 h-12 shrink-0 overflow-hidden">
+                <div className="flex min-w-0 items-center gap-3 overflow-hidden">
+                  <div className="flex min-w-0 items-center gap-2 overflow-hidden">
                     <h1 className="text-sm font-medium">观雨</h1>
                     {isTyping && (
-                      <div className="flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
+                      <div className="flex shrink-0 items-center gap-1 text-xs text-gray-500 dark:text-gray-400">
                         <div className="w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
                         <span>执行中…</span>
                       </div>
                     )}
                     {isLoggedIn && (
-                      <div className="flex items-center gap-2 px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full text-[10px] font-medium">
+                      <div className="flex shrink-0 items-center gap-2 px-2 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full text-[10px] font-medium">
                         <User className="h-2.5 w-2.5" />
                         <span>{currentUser}</span>
                         <button onClick={handleLogout} className="hover:text-red-500 ml-1">退出</button>
                       </div>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
+                  <div className="hidden xl:flex shrink-0 items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
                     <span>自动折叠</span>
                     <Switch
                       className="data-[state=unchecked]:bg-gray-200 data-[state=unchecked]:border data-[state=unchecked]:border-gray-300"
@@ -4573,7 +6062,7 @@ ${analysisContent}
                       }}
                     />
                   </div>
-                  <div className="flex items-center gap-1 ml-2">
+                  <div className="flex min-w-0 items-center gap-1 ml-2 overflow-x-auto scrollbar-none">
                     <Button
                       variant="outline"
                       size="sm"
@@ -4593,116 +6082,130 @@ ${analysisContent}
                       项目中心
                     </Button>
                     {/* 报告类型选择 */}
-                    <div className="relative" data-report-type-picker>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-[11px] px-2 gap-1 border-green-200 text-green-600 hover:bg-green-50 dark:border-green-900 dark:text-green-400"
-                        onClick={() => {
-                          if (showReportTypePicker) {
-                            cancelReportTypePicker();
-                          } else {
-                            openReportTypePicker();
-                          }
-                        }}
+                    <Popover
+                      open={showReportTypePicker}
+                      onOpenChange={(open) => {
+                        if (open) {
+                          openReportTypePicker();
+                        } else {
+                          cancelReportTypePicker();
+                        }
+                      }}
+                    >
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-[11px] px-2 gap-1 border-green-200 text-green-600 hover:bg-green-50 dark:border-green-900 dark:text-green-400"
+                        >
+                          <FileText className="h-3 w-3" />
+                          报告类型
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        align="start"
+                        side="bottom"
+                        sideOffset={8}
+                        className="w-[240px] p-3 space-y-3"
                       >
-                        <FileText className="h-3 w-3" />
-                        报告类型
-                      </Button>
-                      {showReportTypePicker && (
-                        <div className="absolute top-8 left-0 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 min-w-[220px] space-y-3">
-                          <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择报告输出格式</div>
-                          {["pdf", "docx", "pptx"].map((type) => (
-                            <label key={type} className="flex items-center gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={pendingReportTypes.includes(type)}
-                                onChange={(e) => {
-                                  if (e.target.checked) {
-                                    setPendingReportTypes((prev) =>
-                                      prev.includes(type) ? prev : [...prev, type]
-                                    );
-                                  } else {
-                                    setPendingReportTypes((prev) =>
-                                      prev.filter((item) => item !== type)
-                                    );
-                                  }
-                                }}
-                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                              />
-                              <span className="text-xs text-gray-700 dark:text-gray-300 uppercase font-mono">{type}</span>
-                            </label>
-                          ))}
-                          <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
-                            当前: {pendingReportTypes.map(t => t.toUpperCase()).join(", ") || "未选择"}
-                          </div>
-                          <div className="flex justify-end gap-2">
-                            <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelReportTypePicker}>
-                              取消
-                            </Button>
-                            <Button size="sm" className="h-7 text-[11px]" onClick={confirmReportTypePicker}>
-                              确定
-                            </Button>
-                          </div>
+                        <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择报告输出格式</div>
+                        {["pdf", "docx", "pptx"].map((type) => (
+                          <label key={type} className="flex items-center gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={pendingReportTypes.includes(type)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setPendingReportTypes((prev) =>
+                                    prev.includes(type) ? prev : [...prev, type]
+                                  );
+                                } else {
+                                  setPendingReportTypes((prev) =>
+                                    prev.filter((item) => item !== type)
+                                  );
+                                }
+                              }}
+                              className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <span className="text-xs text-gray-700 dark:text-gray-300 uppercase font-mono">{type}</span>
+                          </label>
+                        ))}
+                        <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
+                          当前: {pendingReportTypes.map((type) => type.toUpperCase()).join(", ") || "未选择"}
                         </div>
-                      )}
-                    </div>
+                        <div className="flex justify-end gap-2">
+                          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelReportTypePicker}>
+                            取消
+                          </Button>
+                          <Button size="sm" className="h-7 text-[11px]" onClick={confirmReportTypePicker}>
+                            确定
+                          </Button>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
 
                     {/* 分析语言选择 */}
-                    <div className="relative" data-language-picker>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-[11px] px-2 gap-1 border-sky-200 text-sky-600 hover:bg-sky-50 dark:border-sky-900 dark:text-sky-400"
-                        onClick={() => {
-                          if (showLanguagePicker) {
-                            cancelLanguagePicker();
-                          } else {
-                            openLanguagePicker();
-                          }
-                        }}
+                    <Popover
+                      open={showLanguagePicker}
+                      onOpenChange={(open) => {
+                        if (open) {
+                          openLanguagePicker();
+                        } else {
+                          cancelLanguagePicker();
+                        }
+                      }}
+                    >
+                      <PopoverTrigger asChild>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-[11px] px-2 gap-1 border-sky-200 text-sky-600 hover:bg-sky-50 dark:border-sky-900 dark:text-sky-400"
+                        >
+                          <Languages className="h-3 w-3" />
+                          语言
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent
+                        align="start"
+                        side="bottom"
+                        sideOffset={8}
+                        className="w-[280px] p-3 space-y-3"
                       >
-                        <Languages className="h-3 w-3" />
-                        语言
-                      </Button>
-                      {showLanguagePicker && (
-                        <div className="absolute top-8 left-0 z-50 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-3 min-w-[260px] space-y-3">
-                          <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择分析与报告语言</div>
-                          {ANALYSIS_LANGUAGE_OPTIONS.map((option) => (
-                            <label
-                              key={option.value}
-                              className="flex items-start gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer"
-                            >
-                              <input
-                                type="radio"
-                                name="analysis-language"
-                                checked={pendingAnalysisLanguage === option.value}
-                                onChange={() => setPendingAnalysisLanguage(option.value)}
-                                className="mt-0.5 border-gray-300 text-blue-600 focus:ring-blue-500"
-                              />
-                              <span className="flex-1">
-                                <span className="block text-xs text-gray-700 dark:text-gray-300 font-medium">{option.label}</span>
-                                <span className="block text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{option.description}</span>
-                              </span>
-                            </label>
-                          ))}
-                          <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
-                            当前: {getAnalysisLanguageLabel(pendingAnalysisLanguage)}
-                          </div>
-                          <div className="flex justify-end gap-2">
-                            <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelLanguagePicker}>
-                              取消
-                            </Button>
-                            <Button size="sm" className="h-7 text-[11px]" onClick={confirmLanguagePicker}>
-                              确定
-                            </Button>
-                          </div>
+                        <div className="text-[10px] text-gray-500 dark:text-gray-400 mb-2 font-medium">选择分析与报告语言</div>
+                        {ANALYSIS_LANGUAGE_OPTIONS.map((option) => (
+                          <label
+                            key={option.value}
+                            className="flex items-start gap-2 py-1.5 px-1 hover:bg-gray-50 dark:hover:bg-gray-800 rounded cursor-pointer"
+                          >
+                            <input
+                              type="radio"
+                              name="analysis-language"
+                              checked={pendingAnalysisLanguage === option.value}
+                              onChange={() => setPendingAnalysisLanguage(option.value)}
+                              className="mt-0.5 border-gray-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <span className="flex-1">
+                              <span className="block text-xs text-gray-700 dark:text-gray-300 font-medium">{option.label}</span>
+                              <span className="block text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{option.description}</span>
+                            </span>
+                          </label>
+                        ))}
+                        <div className="text-[9px] text-gray-400 pt-2 border-t border-gray-100 dark:border-gray-800">
+                          当前: {getAnalysisLanguageLabel(pendingAnalysisLanguage)}
                         </div>
-                      )}
-                    </div>
+                        <div className="flex justify-end gap-2">
+                          <Button variant="outline" size="sm" className="h-7 text-[11px]" onClick={cancelLanguagePicker}>
+                            取消
+                          </Button>
+                          <Button size="sm" className="h-7 text-[11px]" onClick={confirmLanguagePicker}>
+                            确定
+                          </Button>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
                   </div>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex shrink-0 items-center gap-1">
                   <AlertDialog>
                     <AlertDialogTrigger asChild>
                       <Button
@@ -4945,18 +6448,12 @@ ${analysisContent}
                                 <div className="absolute inset-0 bg-gray-200 dark:bg-gray-700 rounded-full" />
 
                                 {/* 进度条 */}
-                                <div
-                                  className={`absolute inset-0 rounded-full transition-all duration-700 ${isCompleted || isActive
-                                    ? "bg-gradient-to-r from-green-400 to-green-500 shadow-sm shadow-green-500/30"
-                                    : "bg-transparent"
-                                    }`}
-                                  style={{
-                                    transform: isActive
-                                      ? "scaleX(0.5)"
-                                      : "scaleX(1)",
-                                    transformOrigin: "left",
-                                  }}
-                                />
+                                  <div
+                                    className={`absolute inset-0 rounded-full transition-all duration-700 origin-left transform ${isCompleted || isActive
+                                      ? "bg-gradient-to-r from-green-400 to-green-500 shadow-sm shadow-green-500/30"
+                                      : "bg-transparent"
+                                      } ${isActive ? "scale-x-50" : "scale-x-100"}`}
+                                  />
 
                                 {/* 流动动画 */}
                                 {isActive && (
@@ -5000,358 +6497,272 @@ ${analysisContent}
                 {/* 加载气泡已移除，改为仅按钮态提示 */}
                 <div ref={messagesEndRef} />
               </div>
+
+              <div className="shrink-0 border-t border-gray-200 bg-white dark:border-gray-800 dark:bg-black">
+                <div className="p-4">
+                  <div className="relative">
+                    <Textarea
+                      value={inputValue}
+                      onChange={(e) => setInputValue(e.target.value)}
+                      placeholder="在此输入分析指令或提问..."
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSendMessage();
+                        }
+                      }}
+                      rows={6}
+                      className="min-h-[120px] resize-none border-gray-200 bg-white rounded-lg focus-visible:ring-1 dark:border-gray-700 dark:bg-black"
+                    />
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap items-end justify-between gap-3">
+                    <div className="flex-1 overflow-x-auto scrollbar-none pr-1">
+                      <div className="flex min-w-max items-center gap-1">
+                        {historyInputs.length > 0 ? (
+                          <>
+                            <span className="mr-1 shrink-0 text-[10px] text-gray-400 dark:text-gray-600">历史:</span>
+                            {historyInputs.map((hist, idx) => (
+                              <Button
+                                key={idx}
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setInputValue(hist)}
+                                className="h-6 shrink-0 rounded-full bg-gray-100 px-2 text-[10px] text-gray-600 hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-400 dark:hover:bg-gray-700"
+                              >
+                                {idx + 1}
+                              </Button>
+                            ))}
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                      <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            title="清空聊天"
+                            className="h-9 px-3"
+                            disabled={isTyping}
+                          >
+                            <Eraser className="mr-2 h-4 w-4" />
+                            清空
+                          </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>清空聊天？</AlertDialogTitle>
+                            <AlertDialogDescription>
+                              将删除当前会话内的所有消息，仅保留欢迎提示。
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>取消</AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={clearChat}
+                              className="bg-red-600 hover:bg-red-700"
+                            >
+                              确认清空
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
+
+                      {isTyping ? (
+                        <Button
+                          size="sm"
+                          onClick={stopGeneration}
+                          className="h-9 w-[108px] rounded-md border border-red-200 bg-red-50 px-4 text-red-600 hover:bg-red-100 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-400"
+                        >
+                          <Square className="mr-2 h-4 w-4 fill-current" />
+                          停止
+                        </Button>
+                      ) : (
+                        <Button
+                          onClick={() => handleSendMessage()}
+                          size="sm"
+                          disabled={!inputValue.trim()}
+                          className="h-9 w-[108px] bg-black px-4 text-white hover:bg-gray-800 dark:bg-white dark:text-black dark:hover:bg-gray-200"
+                        >
+                          <Send className="mr-2 h-4 w-4" />
+                          发送
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </ResizablePanel>
 
           <ResizableHandle withHandle />
 
-          {/* Right Panel - Code Editor & Input */}
-          <ResizablePanel defaultSize={25} minSize={20}>
-            <ResizablePanelGroup direction="vertical">
-              {/* Upper: Code/Preview */}
-              <ResizablePanel defaultSize={40} minSize={30}>
-                <div className="flex flex-col bg-gray-50 dark:bg-gray-900 min-h-0 h-full">
-                  <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-gray-800 shrink-0">
-                    <div className="flex items-center gap-3">
-                      <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
-                        Code
-                      </h2>
-                      {/* 热度滑块 - 保留在顶栏 */}
-                      <div className="flex items-center gap-1">
-                        <Slider
-                          value={[temperature ?? (analysisStrategy === "聚焦诉求" ? 0.2 : analysisStrategy === "适度扩展" ? 0.4 : 0.6)]}
-                          min={0.0}
-                          max={1.0}
-                          step={0.05}
-                          onValueChange={(vals) => setTemperature(vals[0])}
-                          className="w-14 h-4"
-                        />
-                        <span className="text-[10px] text-gray-500 dark:text-gray-400 w-7">
-                          {temperature !== null ? temperature.toFixed(2) : "auto"}
-                        </span>
-                        {temperature !== null ? (
-                          <button
-                            onClick={() => setTemperature(null)}
-                            className="text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
-                            title="恢复自动"
-                          >
-                            ↺
-                          </button>
-                        ) : (
-                          <span className="text-[10px] text-gray-300 dark:text-gray-600">↺</span>
-                        )}
-                      </div>
-                      {/* 分析设置齿轮 - 保留在顶栏 */}
-                      <button
-                        onClick={() => setShowSettingsDialog(true)}
-                        className="flex items-center text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-                        title="分析设置"
-                      >
-                        <Settings className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {/* 雨途斩棘录按钮 */}
+          {/* Right Panel - Analysis Process */}
+          <ResizablePanel defaultSize={25} minSize={20} className="min-h-0 min-w-0">
+            <div className="flex h-full min-h-0 flex-col bg-gray-50 dark:bg-gray-900">
+              <div className="flex shrink-0 items-center justify-between border-b border-gray-200 px-4 py-2 dark:border-gray-800">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-sm font-medium text-gray-600 dark:text-gray-400">
+                    {showCodeEditor ? "Code" : "分析过程侧栏"}
+                  </h2>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowSettingsDialog(true)}
+                    className="h-7 px-2 text-[11px]"
+                    title="策略与技能"
+                  >
+                    <Bot className="mr-1 h-3.5 w-3.5" />
+                    策略与技能
+                  </Button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setShowYutuPanel(true);
+                      loadYutuHtml();
+                    }}
+                    className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                    title="雨途斩棘录 - 错误修正记录"
+                  >
+                    <BookOpen className="mr-1 h-3.5 w-3.5" />
+                    <span>雨途斩棘录</span>
+                  </Button>
+                  {showCodeEditor ? (
+                    <div className="flex gap-2">
                       <Button
                         variant="ghost"
                         size="sm"
                         onClick={() => {
-                          setShowYutuPanel(true);
-                          loadYutuHtml();
+                          setShowCodeEditor(false);
+                          setCodeEditorContent("");
+                          setSelectedCodeSection("");
                         }}
                         className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                        title="雨途斩棘录 - 错误修正记录"
                       >
-                        <BookOpen className="h-3.5 w-3.5 mr-1" />
-                        <span>雨途斩棘录</span>
+                        Close
                       </Button>
-                      {showCodeEditor && (
-                        <div className="flex gap-2">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => {
-                              setShowCodeEditor(false);
-                              setCodeEditorContent("");
-                              setSelectedCodeSection("");
-                            }}
-                            className="h-6 px-2 text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-                          >
-                            Close
-                          </Button>
-                          <Button
-                            size="sm"
-                            onClick={executeCode}
-                            disabled={!codeEditorContent || isExecutingCode}
-                            className="h-6 px-3 text-xs bg-black text-white dark:bg-white dark:text-black"
-                          >
-                            {isExecutingCode ? "Running..." : "Run"}
-                          </Button>
+                      <Button
+                        size="sm"
+                        onClick={executeCode}
+                        disabled={!codeEditorContent || isExecutingCode}
+                        className="h-6 bg-black px-3 text-xs text-white dark:bg-white dark:text-black"
+                      >
+                        {isExecutingCode ? "Running..." : "Run"}
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              {!showCodeEditor ? (
+                <AnalysisRuntimeSidebar
+                  run={runtimeAnalysisRun}
+                  events={runtimeAnalysisEvents}
+                  loading={isLoadingRuntimeAnalysisTrace}
+                  isAnalyzing={isAnalyzing}
+                  onOpenFullHistory={() => {
+                    setSystemSettingsTab("history");
+                    setShowSystemSettings(true);
+                  }}
+                />
+              ) : (
+                <div
+                  className="editor-container flex flex-1 min-h-0 flex-col overflow-hidden p-4"
+                  style={{ ["--editor-height" as string]: `${editorHeight}%` }}
+                >
+                  <div className="flex h-[var(--editor-height)] min-h-0 flex-col overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-700 dark:bg-black">
+                    <div className="shrink-0 border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
+                      <span className="font-mono text-xs text-gray-500">python</span>
+                    </div>
+                    <div className="flex-1 min-h-0">
+                      <Editor
+                        height="100%"
+                        defaultLanguage="python"
+                        value={codeEditorContent}
+                        onChange={(value) => setCodeEditorContent(value || "")}
+                        theme={isDarkMode ? "vs-dark" : "light"}
+                        options={{
+                          fontSize: 14,
+                          fontFamily:
+                            "var(--font-mono), 'Courier New', monospace",
+                          lineNumbers: "on",
+                          minimap: { enabled: false },
+                          scrollBeyondLastLine: false,
+                          automaticLayout: true,
+                          tabSize: 4,
+                          insertSpaces: true,
+                          wordWrap: "on",
+                          folding: true,
+                          lineDecorationsWidth: 10,
+                          lineNumbersMinChars: 3,
+                          glyphMargin: false,
+                          selectOnLineNumbers: true,
+                          roundedSelection: false,
+                          readOnly: false,
+                          cursorStyle: "line",
+                          smoothScrolling: true,
+                          formatOnPaste: true,
+                          formatOnType: true,
+                          suggestOnTriggerCharacters: true,
+                          acceptSuggestionOnEnter: "on",
+                          tabCompletion: "on",
+                          scrollbar: {
+                            vertical: "visible",
+                            verticalScrollbarSize: 10,
+                          },
+                        }}
+                        loading={
+                          <div className="flex h-full items-center justify-center">
+                            <div className="text-muted-foreground flex items-center gap-2">
+                              <div className="h-4 w-4 animate-spin rounded-full border-2 border-blue-500 border-t-transparent"></div>
+                              <span className="text-sm">加载编辑器...</span>
+                            </div>
+                          </div>
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div
+                    className="group flex h-2 cursor-row-resize items-center justify-center bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700"
+                    onMouseDown={handleMouseDown}
+                  >
+                    <div className="h-1 w-8 rounded bg-gray-300 group-hover:bg-gray-400 dark:bg-gray-600 dark:group-hover:bg-gray-500"></div>
+                  </div>
+
+                  <div className="flex h-[calc(100%-var(--editor-height))] min-h-0 flex-col overflow-hidden rounded-lg border border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900">
+                    <div className="shrink-0 border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-gray-700 dark:bg-gray-800">
+                      <span className="font-mono text-xs text-gray-500 dark:text-gray-400">Output</span>
+                    </div>
+                    <div className="flex-1 min-h-0 overflow-auto bg-white p-3 font-mono text-sm text-gray-800 dark:bg-black dark:text-gray-200">
+                      {codeExecutionResult ? (
+                        <div>
+                          <div className="mb-1 text-gray-500 dark:text-gray-400">$ python main.py</div>
+                          <pre className="whitespace-pre-wrap text-gray-800 dark:text-gray-200">
+                            {codeExecutionResult}
+                          </pre>
+                          <div className="mt-2 flex items-center">
+                            <span className="text-gray-500 dark:text-gray-400">$</span>
+                            <span className="ml-1 h-4 w-2 animate-pulse bg-gray-400 dark:bg-gray-500"></span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="italic text-gray-400 dark:text-gray-500">
+                          Run code to see output...
                         </div>
                       )}
                     </div>
                   </div>
-
-                  {!showCodeEditor ? (
-                    <div className="flex-1 flex flex-col items-center justify-center text-gray-400 relative">
-                      <div className="text-center select-none relative z-10">
-                        <p className="text-sm">Click a code block to edit</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex-1 min-h-0 flex flex-col p-4 editor-container overflow-hidden">
-                      {/* Code Editor */}
-                      <div
-                        className="min-h-0 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-black flex flex-col"
-                        style={{ height: `${editorHeight}%` }}
-                      >
-                        <div className="bg-gray-50 dark:bg-gray-800 px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
-                          <span className="text-xs text-gray-500 font-mono">
-                            python
-                          </span>
-                        </div>
-                        <div className="flex-1 min-h-0">
-                          <Editor
-                            height="100%"
-                            defaultLanguage="python"
-                            value={codeEditorContent}
-                            onChange={(value) => setCodeEditorContent(value || "")}
-                            theme={isDarkMode ? "vs-dark" : "light"}
-                            options={{
-                              fontSize: 14,
-                              fontFamily:
-                                "var(--font-mono), 'Courier New', monospace",
-                              lineNumbers: "on",
-                              minimap: { enabled: false },
-                              scrollBeyondLastLine: false,
-                              automaticLayout: true,
-                              tabSize: 4,
-                              insertSpaces: true,
-                              wordWrap: "on",
-                              folding: true,
-                              lineDecorationsWidth: 10,
-                              lineNumbersMinChars: 3,
-                              glyphMargin: false,
-                              selectOnLineNumbers: true,
-                              roundedSelection: false,
-                              readOnly: false,
-                              cursorStyle: "line",
-                              smoothScrolling: true,
-                              formatOnPaste: true,
-                              formatOnType: true,
-                              suggestOnTriggerCharacters: true,
-                              acceptSuggestionOnEnter: "on",
-                              tabCompletion: "on",
-                              scrollbar: {
-                                vertical: "visible",
-                                verticalScrollbarSize: 10,
-                              },
-                            }}
-                            loading={
-                              <div className="flex items-center justify-center h-full">
-                                <div className="flex items-center gap-2 text-muted-foreground">
-                                  <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-                                  <span className="text-sm">加载编辑器...</span>
-                                </div>
-                              </div>
-                            }
-                          />
-                        </div>
-                      </div>
-
-                      {/* Resizer */}
-                      <div
-                        className="h-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 cursor-row-resize flex items-center justify-center group"
-                        onMouseDown={handleMouseDown}
-                      >
-                        <div className="w-8 h-1 bg-gray-300 dark:bg-gray-600 rounded group-hover:bg-gray-400 dark:group-hover:bg-gray-500"></div>
-                      </div>
-
-                      {/* Terminal Output */}
-                      <div
-                        className="min-h-0 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-900 flex flex-col"
-                        style={{ height: `${100 - editorHeight}%` }}
-                      >
-                        <div className="bg-gray-50 dark:bg-gray-800 px-3 py-2 border-b border-gray-200 dark:border-gray-700 shrink-0">
-                          <span className="text-xs text-gray-500 dark:text-gray-400 font-mono">
-                            Output
-                          </span>
-                        </div>
-                        <div className="flex-1 min-h-0 p-3 overflow-auto font-mono text-sm bg-white dark:bg-black text-gray-800 dark:text-gray-200">
-                          {codeExecutionResult ? (
-                            <div>
-                              <div className="text-gray-500 dark:text-gray-400 mb-1">
-                                $ python main.py
-                              </div>
-                              <pre className="whitespace-pre-wrap text-gray-800 dark:text-gray-200">
-                                {codeExecutionResult}
-                              </pre>
-                              <div className="flex items-center mt-2">
-                                <span className="text-gray-500 dark:text-gray-400">
-                                  $
-                                </span>
-                                <span className="w-2 h-4 bg-gray-400 dark:bg-gray-500 ml-1 animate-pulse"></span>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="text-gray-400 dark:text-gray-500 italic">
-                              Run code to see output...
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
-              </ResizablePanel>
-
-              <ResizableHandle withHandle />
-
-              {/* Lower: Chat Input */}
-              <ResizablePanel defaultSize={60} minSize={20}>
-                <div className="flex flex-col h-full bg-white dark:bg-black border-t border-gray-200 dark:border-gray-800">
-                  <div className="py-2 px-4 flex flex-col gap-1 border-b border-gray-100 dark:border-gray-900 bg-gray-50/50 dark:bg-gray-900/30">
-                    <div className="flex justify-center items-center gap-3">
-                      {/* 分析模式 - 左侧 */}
-                      <div className="flex items-center gap-1">
-                        <Select value={analysisMode} onValueChange={(val) => {
-                          setAnalysisMode(val);
-                          if (typeof window !== "undefined") {
-                            localStorage.setItem("analysisMode", val);
-                          }
-                        }}>
-                          <SelectTrigger className="h-7 w-[90px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
-                            <SelectValue placeholder="模式" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="full_agent" className="text-xs">全程代理</SelectItem>
-                            <SelectItem value="interactive" className="text-xs">交互模式</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <span className="text-blue-600 dark:text-blue-400 font-bold text-base">分析要求</span>
-                      {/* 分析策略 - 右侧 */}
-                      <div className="flex items-center gap-1">
-                        <Select value={analysisStrategy} onValueChange={(val) => {
-                          setAnalysisStrategy(val);
-                        }}>
-                          <SelectTrigger className="h-7 w-[90px] text-[10px] bg-white dark:bg-black border-gray-200 dark:border-gray-800 focus:ring-0">
-                            <SelectValue placeholder="策略" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="聚焦诉求" className="text-xs">聚焦诉求</SelectItem>
-                            <SelectItem value="适度扩展" className="text-xs">适度扩展</SelectItem>
-                            <SelectItem value="广泛延展" className="text-xs">广泛延展</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="p-4 flex-1 flex flex-col min-h-0 pt-2">
-                    <div className="flex gap-3 items-start flex-1">
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        multiple
-                        onChange={handleFileUpload}
-                        className="hidden"
-                        accept="*"
-                      />
-                      <div className="flex-1 relative flex flex-col h-full min-h-0">
-                        <Textarea
-                          value={inputValue}
-                          onChange={(e) => setInputValue(e.target.value)}
-                          placeholder="在此输入分析指令或提问..."
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter" && !e.shiftKey) {
-                              e.preventDefault();
-                              handleSendMessage();
-                            }
-                          }}
-                          rows={8}
-                          className="flex-1 resize-none border-gray-200 dark:border-gray-700 bg-white dark:bg-black rounded-lg focus-visible:ring-1"
-                        />
-                      </div>
-                    </div>
-                    <div className="flex justify-between items-center mt-3">
-                      <div className="flex-1 overflow-x-auto scrollbar-none mr-2">
-                        <div className="flex gap-1 items-center min-w-max">
-                          {historyInputs.length > 0 && (
-                            <>
-                              <span className="text-[10px] text-gray-400 dark:text-gray-600 mr-1 shrink-0">历史:</span>
-                              {historyInputs.map((hist, idx) => (
-                                <Button
-                                  key={idx}
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => setInputValue(hist)}
-                                  className="h-6 px-2 text-[10px] bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-full shrink-0"
-                                >
-                                  {idx + 1}
-                                </Button>
-                              ))}
-                            </>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex justify-end gap-2 shrink-0">
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              title="清空聊天"
-                              className="h-9 px-3"
-                              disabled={isTyping}
-                            >
-                              <Eraser className="h-4 w-4 mr-2" />
-                              清空
-                            </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>清空聊天？</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                将删除当前会话内的所有消息，仅保留欢迎提示。
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>取消</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={clearChat}
-                                className="bg-red-600 hover:bg-red-700"
-                              >
-                                确认清空
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                        {isTyping ? (
-                          <Button
-                            size="sm"
-                            onClick={stopGeneration}
-                            className="h-9 px-4 rounded-md bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/50"
-                          >
-                            <Square className="h-4 w-4 mr-2 fill-current" />
-                            停止
-                          </Button>
-                        ) : (
-                          <Button
-                            onClick={() => handleSendMessage()}
-                            size="sm"
-                            disabled={!inputValue.trim()}
-                            className="h-9 px-4 bg-black text-white dark:bg-white dark:text-black hover:bg-gray-800 dark:hover:bg-gray-200"
-                          >
-                            <Send className="h-4 w-4 mr-2" />
-                            发送
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </ResizablePanel>
-            </ResizablePanelGroup>
+              )}
+            </div>
           </ResizablePanel>
         </ResizablePanelGroup>
       </div>
@@ -5388,7 +6799,7 @@ ${analysisContent}
           {!contextTarget.is_dir && contextTarget.download_url && (
             <a
               className="block px-3 py-2 hover:bg-gray-50 dark:hover:bg-gray-800"
-              href={contextTarget.download_url}
+              href={ensureGeneratedInUrl(contextTarget.download_url)}
               download={contextTarget.name}
               onClick={closeContext}
             >
@@ -5514,7 +6925,11 @@ ${analysisContent}
                 />
               </div>
             ) : previewType === "pdf" ? (
-              <iframe src={previewContent} className="w-full h-full" />
+              <iframe
+                src={previewContent}
+                title={previewTitle || "文件预览"}
+                className="w-full h-full"
+              />
             ) : previewType === "text" ? (
               <div className="h-full min-h-0 p-2">
                 <div className="h-full min-h-0 border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden">
@@ -5582,6 +6997,94 @@ ${analysisContent}
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* 多数据源选择弹窗 */}
+      <Dialog
+        open={showDataSourceDialog}
+        onOpenChange={(open) => {
+          if (!open) {
+            cancelDataSourcePicker();
+          } else {
+            setShowDataSourceDialog(true);
+          }
+        }}
+      >
+        <DialogContent className="max-w-[620px]">
+          <DialogHeader>
+            <DialogTitle>选择本轮分析数据源</DialogTitle>
+            <DialogDescription>
+              检测到你已配置多个数据库连接。请为本轮分析选择一个或多个数据库数据源。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 max-h-[320px] overflow-auto pr-1">
+            {savedDbConnections.map((connection) => {
+              const checked = pendingDataSourceSelection.selectedDbSourceIds.includes(connection.id);
+              return (
+                <label
+                  key={connection.id}
+                  className="flex items-start gap-3 rounded-md border border-gray-200 dark:border-gray-700 p-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-900/40"
+                >
+                  <Checkbox
+                    checked={checked}
+                    onCheckedChange={(nextChecked) => {
+                      setPendingDataSourceSelection((prev) => {
+                        const ids = new Set(prev.selectedDbSourceIds);
+                        if (nextChecked) {
+                          ids.add(connection.id);
+                        } else {
+                          ids.delete(connection.id);
+                        }
+                        return {
+                          ...prev,
+                          selectedDbSourceIds: Array.from(ids),
+                        };
+                      });
+                    }}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-800 dark:text-gray-100 break-all">
+                      {connection.label}
+                    </div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 break-all">
+                      类型: {connection.dbType.toUpperCase()} | 用户: {connection.config.user || "(未填写)"}
+                    </div>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+          <div className="rounded-md border border-dashed border-gray-300 dark:border-gray-700 p-3 text-xs text-gray-600 dark:text-gray-300">
+            文件数据源状态: {hasWorkspaceDataSource ? "已检测到已上传文件，可与数据库联合分析或单独分析。" : "当前未检测到已上传文件。"}
+          </div>
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" onClick={cancelDataSourcePicker}>取消</Button>
+            <Button onClick={confirmDataSourcePicker}>开始分析</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={showModelConfigAlert} onOpenChange={setShowModelConfigAlert}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>请先配置 AI 模型</AlertDialogTitle>
+            <AlertDialogDescription>
+              当前模型配置不完整，暂时无法开始分析任务。请先在系统设置中补全模型地址、模型名称，以及需要时的 API Key。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>稍后再说</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setShowModelConfigAlert(false);
+                setSystemSettingsTab("model");
+                setShowSystemSettings(true);
+              }}
+            >
+              去配置模型
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
 
       {/* 交互式任务选择对话框 */}
@@ -5753,13 +7256,20 @@ ${analysisContent}
         handleSaveModelConfig={handleSaveModelConfig}
         modelTestStatus={modelTestStatus}
         availableModels={availableModels}
-        analysisStrategy={analysisStrategy}
-        temperature={temperature}
         dbType={dbType}
         handleDbTypeChange={handleDbTypeChange}
         dbConfig={dbConfig}
         setDbConfig={setDbConfig}
         getDefaultPort={getDefaultPortForDbType}
+        availableDatabaseNames={availableDatabaseNames}
+        isLoadingDatabaseNames={isLoadingDatabaseNames}
+        databaseListError={databaseListError}
+        dbContextSummary={dbContextSummary}
+        dbKnowledgeSummary={dbKnowledgeSummary}
+        dbKnowledgeUpdatedAt={dbKnowledgeUpdatedAt}
+        isLoadingDbContext={isLoadingDbContext}
+        handleLoadDbContext={handleLoadDbContext}
+        handleFetchDatabaseNames={handleFetchDatabaseNames}
         handleTestConnection={handleTestConnection}
         isTestingDb={isTestingDb}
         isDbTested={isDbTested}
@@ -5776,6 +7286,33 @@ ${analysisContent}
         handleExecuteDbSql={handleExecuteDbSql}
         isExecutingDbSql={isExecutingDbSql}
         handleSaveDatabaseConfig={handleSaveDatabaseConfig}
+        savedDbConnections={savedDbConnections}
+        selectedDbSourceIds={selectedDbSourceIds}
+        handleToggleSavedDbSourceSelection={handleToggleSavedDbSourceSelection}
+        handleApplySavedDbConnection={handleApplySavedDbConnection}
+        handleDeleteSavedDbConnection={handleDeleteSavedDbConnection}
+        deletingDbConnectionId={deletingDbConnectionId}
+        analysisHistorySettings={analysisHistorySettings}
+        setAnalysisHistorySettings={setAnalysisHistorySettings}
+        analysisHistoryRuns={analysisHistoryRuns}
+        analysisHistoryStats={analysisHistoryStats}
+        selectedAnalysisHistoryRun={selectedAnalysisHistoryRun}
+        analysisHistoryEvents={analysisHistoryEvents}
+        isLoadingAnalysisHistory={isLoadingAnalysisHistory}
+        isLoadingAnalysisHistoryDetail={isLoadingAnalysisHistoryDetail}
+        isSavingAnalysisHistorySettings={isSavingAnalysisHistorySettings}
+        handleRefreshAnalysisHistory={() => void loadAnalysisHistory()}
+        handleSelectAnalysisHistoryRun={handleSelectAnalysisHistoryRun}
+        handleSaveAnalysisHistorySettings={handleSaveAnalysisHistorySettings}
+        dataDictionaryEntries={dataDictionaryEntries}
+        dataDictionaryTotal={dataDictionaryTotal}
+        isLoadingDataDictionary={isLoadingDataDictionary}
+        isDeletingDataDictionary={isDeletingDataDictionary}
+        isImportingDataDictionary={isImportingDataDictionary}
+        handleRefreshDataDictionary={() => void loadDataDictionary()}
+        handleDeleteDataDictionaryEntries={handleDeleteDataDictionaryEntries}
+        handleSaveDataDictionaryEntry={handleSaveDataDictionaryEntry}
+        handleImportDataDictionaryFile={handleImportDataDictionaryFile}
         isLoadingKnowledgeConfig={isLoadingKnowledgeConfig}
         loadKnowledgeConfig={loadKnowledgeConfig}
         knowledgeBaseEnabled={knowledgeBaseEnabled}
@@ -5803,6 +7340,14 @@ ${analysisContent}
         knowledgeSettingsLoaded={knowledgeSettingsLoaded}
       />
 
+      <DatabaseRelationshipDialog
+        open={showDatabaseRelationshipDialog}
+        onOpenChange={setShowDatabaseRelationshipDialog}
+        graph={dbSchemaGraph}
+        loading={isLoadingSchemaGraph}
+        onRefresh={handleLoadSchemaGraph}
+      />
+
       {/* 数据库连接对话框 */}
       <DatabaseDialog
         open={showDatabaseDialog}
@@ -5812,6 +7357,13 @@ ${analysisContent}
         dbConfig={dbConfig}
         setDbConfig={setDbConfig}
         getDefaultPort={getDefaultPortForDbType}
+        availableDatabaseNames={availableDatabaseNames}
+        isLoadingDatabaseNames={isLoadingDatabaseNames}
+        databaseListError={databaseListError}
+        dbContextSummary={dbContextSummary}
+        isLoadingDbContext={isLoadingDbContext}
+        onLoadDbContext={handleLoadDbContext}
+        onFetchDatabaseNames={handleFetchDatabaseNames}
         onTestConnection={handleTestConnection}
         isTestingDb={isTestingDb}
         isDbTested={isDbTested}

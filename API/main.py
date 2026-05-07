@@ -18,6 +18,7 @@ from config import (
     API_TITLE,
     API_VERSION,
     HTTP_SERVER_PORT,
+    CLEANUP_TIMEOUT_HOURS,
     CLEANUP_INTERVAL_MINUTES,
     CORS_ALLOW_ORIGINS,
     CORS_ALLOW_CREDENTIALS,
@@ -29,11 +30,38 @@ from utils import start_http_server
 from storage import storage
 from middleware import create_security_middleware
 from logging_config import log, request_id_var
+from maintenance_state import mark_cleanup_disabled, mark_cleanup_failure, mark_cleanup_started, mark_cleanup_success
 
 # Safety constants
 # MAX_CLEANUP_ERRORS = 10
 # MAX_ITERATIONS = 1000
 # CLEANUP_BACKOFF_SECONDS = 30
+
+
+def start_periodic_thread_cleanup() -> None:
+    """Start a daemon cleanup loop for expired API threads/workspaces."""
+    if CLEANUP_INTERVAL_MINUTES <= 0:
+        mark_cleanup_disabled(CLEANUP_INTERVAL_MINUTES, CLEANUP_TIMEOUT_HOURS)
+        log.info("Periodic thread cleanup disabled")
+        return
+
+    interval_seconds = max(int(CLEANUP_INTERVAL_MINUTES), 1) * 60
+    mark_cleanup_started(CLEANUP_INTERVAL_MINUTES, CLEANUP_TIMEOUT_HOURS)
+
+    def cleanup_loop():
+        while True:
+            time.sleep(interval_seconds)
+            try:
+                cleaned_count = storage.cleanup_expired_threads(timeout_hours=CLEANUP_TIMEOUT_HOURS)
+                mark_cleanup_success(cleaned_count)
+                if cleaned_count:
+                    log.info(f"Periodic cleanup removed {cleaned_count} expired threads")
+            except Exception as exc:
+                mark_cleanup_failure(exc)
+                log.warning(f"Periodic thread cleanup failed: {exc}")
+
+    cleanup_thread = threading.Thread(target=cleanup_loop, name="thread-cleanup", daemon=True)
+    cleanup_thread.start()
 
 
 def create_app() -> FastAPI:
@@ -117,6 +145,8 @@ def main():
     # Start HTTP file server in a separate thread
     http_thread = threading.Thread(target=start_http_server, daemon=True)
     http_thread.start()
+
+    start_periodic_thread_cleanup()
 
     # Create and start the FastAPI application
     app = create_app()

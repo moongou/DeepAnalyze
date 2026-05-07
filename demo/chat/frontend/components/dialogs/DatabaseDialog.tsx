@@ -30,6 +30,13 @@ interface DatabaseDialogProps {
   dbConfig: DbConfig;
   setDbConfig: (config: DbConfig) => void;
   getDefaultPort: (type: string) => string;
+  availableDatabaseNames: string[];
+  isLoadingDatabaseNames: boolean;
+  databaseListError: string;
+  dbContextSummary: string;
+  isLoadingDbContext: boolean;
+  onLoadDbContext: () => void;
+  onFetchDatabaseNames: () => void;
   onTestConnection: () => void;
   isTestingDb: boolean;
   isDbTested: boolean;
@@ -57,7 +64,9 @@ const DB_TYPES = [
 
 export function DatabaseDialog({
   open, onOpenChange, dbType, onDbTypeChange, dbConfig, setDbConfig,
-  getDefaultPort, onTestConnection, isTestingDb, isDbTested,
+  getDefaultPort, availableDatabaseNames, isLoadingDatabaseNames, databaseListError,
+  dbContextSummary, isLoadingDbContext, onLoadDbContext, onFetchDatabaseNames,
+  onTestConnection, isTestingDb, isDbTested,
   dbPrompt, setDbPrompt, onGenerateSql, isGeneratingSql,
   dbGeneratedSql, setDbGeneratedSql, dbDatasetName, setDbDatasetName,
   dbExecuteMode, setDbExecuteMode, onExecuteSql, isExecutingDbSql,
@@ -123,15 +132,50 @@ export function DatabaseDialog({
                       </div>
                       <div className="col-span-2 space-y-1.5">
                         <Label htmlFor="db-name">{dbType === "sqlite" ? "SQLite 文件绝对路径" : "数据库名称"}</Label>
-                        <Input id="db-name" value={dbConfig.database} onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })} />
+                        {dbType !== "sqlite" && availableDatabaseNames.length > 0 ? (
+                          <Select
+                            value={dbConfig.database || undefined}
+                            onValueChange={(value) => setDbConfig({ ...dbConfig, database: value })}
+                          >
+                            <SelectTrigger id="db-name">
+                              <SelectValue placeholder="请选择数据库名称" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {availableDatabaseNames.map((name) => (
+                                <SelectItem key={name} value={name}>
+                                  {name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <Input id="db-name" value={dbConfig.database} onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })} />
+                        )}
+                        {databaseListError ? <div className="text-xs text-amber-600">数据库列表加载失败：{databaseListError}</div> : null}
                       </div>
                     </div>
                     <div className="flex gap-2 justify-end">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={onLoadDbContext}
+                        disabled={isLoadingDbContext}
+                      >
+                        {isLoadingDbContext ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                        将当前数据库所有信息作为上下文
+                      </Button>
+                      <Button variant="outline" size="sm" onClick={onFetchDatabaseNames} disabled={isLoadingDatabaseNames || dbType === "sqlite"}>
+                        {isLoadingDatabaseNames ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                        刷新数据库列表
+                      </Button>
                       <Button variant="outline" size="sm" onClick={onTestConnection} disabled={isTestingDb}>
                         {isTestingDb ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
                         测试连接
                       </Button>
                     </div>
+                    {dbContextSummary ? (
+                      <div className="text-xs text-emerald-600 dark:text-emerald-400 text-right">{dbContextSummary}</div>
+                    ) : null}
                   </section>
 
                   {/* 2. 自然语言生成 SQL */}

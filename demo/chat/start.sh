@@ -8,8 +8,39 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LOG_DIR="$SCRIPT_DIR/logs"
 VENV_PYTHON="$SCRIPT_DIR/../jupyter/.venv/bin/python"
 
+preferred_mlx_model_dir() {
+    local candidate
+    candidate="${DEEPANALYZE_MLX_MODEL_DIR:-$PROJECT_ROOT/DeepAnalyze-8B-MLX-FP16}"
+    if [ -d "$candidate" ]; then
+        echo "$candidate"
+        return 0
+    fi
+
+    if [ -d "$PROJECT_ROOT/DeepAnalyze-8B-MLX-4bit" ]; then
+        echo "$PROJECT_ROOT/DeepAnalyze-8B-MLX-4bit"
+        return 0
+    fi
+
+    echo "$candidate"
+}
+
+resolve_compute_backend() {
+    local backend
+    backend="$(printf '%s' "${1:-auto}" | tr '[:upper:]' '[:lower:]')"
+    if [ -z "$backend" ] || [ "$backend" = "auto" ]; then
+        if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
+            echo "mlx"
+        else
+            echo "gpu"
+        fi
+        return 0
+    fi
+
+    echo "$backend"
+}
+
 # Compute profile defaults (can be injected by root start.sh)
-DEEPANALYZE_COMPUTE_BACKEND="${DEEPANALYZE_COMPUTE_BACKEND:-auto}"
+DEEPANALYZE_COMPUTE_BACKEND="$(resolve_compute_backend "${DEEPANALYZE_COMPUTE_BACKEND:-auto}")"
 DEEPANALYZE_DEFAULT_PROVIDER_TYPE="${DEEPANALYZE_DEFAULT_PROVIDER_TYPE:-deepanalyze}"
 DEEPANALYZE_DEFAULT_PROVIDER_LABEL="${DEEPANALYZE_DEFAULT_PROVIDER_LABEL:-DeepAnalyze 默认}"
 DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION="${DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION:-项目默认本地 vLLM 服务}"
@@ -17,6 +48,22 @@ DEEPANALYZE_DEFAULT_MODEL_BASE_URL="${DEEPANALYZE_DEFAULT_MODEL_BASE_URL:-http:/
 DEEPANALYZE_DEFAULT_MODEL_NAME="${DEEPANALYZE_DEFAULT_MODEL_NAME:-DeepAnalyze-8B}"
 DEEPANALYZE_MODEL_AUTOSTART="${DEEPANALYZE_MODEL_AUTOSTART:-auto}"
 DEEPANALYZE_MODEL_READY_TIMEOUT_SECONDS="${DEEPANALYZE_MODEL_READY_TIMEOUT_SECONDS:-90}"
+DEEPANALYZE_FRONTEND_CLEAN_CACHE="${DEEPANALYZE_FRONTEND_CLEAN_CACHE:-1}"
+
+if [ "$DEEPANALYZE_COMPUTE_BACKEND" = "mlx" ]; then
+    if [ "$DEEPANALYZE_DEFAULT_PROVIDER_TYPE" = "deepanalyze" ]; then
+        DEEPANALYZE_DEFAULT_PROVIDER_TYPE="openai_compatible"
+    fi
+    if [ "$DEEPANALYZE_DEFAULT_PROVIDER_LABEL" = "DeepAnalyze 默认" ]; then
+        DEEPANALYZE_DEFAULT_PROVIDER_LABEL="DeepAnalyze MLX"
+    fi
+    if [ "$DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION" = "项目默认本地 vLLM 服务" ]; then
+        DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION="项目默认本地 MLX 服务"
+    fi
+    if [ "$DEEPANALYZE_DEFAULT_MODEL_NAME" = "DeepAnalyze-8B" ]; then
+        DEEPANALYZE_DEFAULT_MODEL_NAME="$(preferred_mlx_model_dir)"
+    fi
+fi
 
 export DEEPANALYZE_COMPUTE_BACKEND
 export DEEPANALYZE_DEFAULT_PROVIDER_TYPE
@@ -26,6 +73,7 @@ export DEEPANALYZE_DEFAULT_MODEL_BASE_URL
 export DEEPANALYZE_DEFAULT_MODEL_NAME
 export DEEPANALYZE_MODEL_AUTOSTART
 export DEEPANALYZE_MODEL_READY_TIMEOUT_SECONDS
+export DEEPANALYZE_FRONTEND_CLEAN_CACHE
 
 # Make frontend defaults follow selected compute profile
 export NEXT_PUBLIC_AI_API_URL="${NEXT_PUBLIC_AI_API_URL:-$DEEPANALYZE_DEFAULT_MODEL_BASE_URL}"
@@ -88,6 +136,19 @@ should_autostart_model() {
     is_local_model_endpoint
 }
 
+should_clean_frontend_cache() {
+    local mode
+    mode="$(printf '%s' "$DEEPANALYZE_FRONTEND_CLEAN_CACHE" | tr '[:upper:]' '[:lower:]')"
+    case "$mode" in
+        0|false|off|no)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
 model_health_url() {
     echo "$MODEL_BASE_URL_NO_TRAIL/models"
 }
@@ -119,10 +180,7 @@ start_model_server_if_needed() {
     backend="$(printf '%s' "$DEEPANALYZE_COMPUTE_BACKEND" | tr '[:upper:]' '[:lower:]')"
 
     if [ "$backend" = "mlx" ]; then
-        mlx_model_dir="${DEEPANALYZE_MLX_MODEL_DIR:-$PROJECT_ROOT/DeepAnalyze-8B-MLX-4bit}"
-        if [ ! -d "$mlx_model_dir" ] && [ -d "$PROJECT_ROOT/DeepAnalyze-8B-MLX-FP16" ]; then
-            mlx_model_dir="$PROJECT_ROOT/DeepAnalyze-8B-MLX-FP16"
-        fi
+        mlx_model_dir="$(preferred_mlx_model_dir)"
 
         if [ -d "$mlx_model_dir" ]; then
             export DEEPANALYZE_MLX_MODEL_DIR="$mlx_model_dir"
@@ -161,7 +219,7 @@ start_model_server_if_needed() {
     if [ "$backend" = "mlx" ]; then
         if [ ! -d "$mlx_model_dir" ]; then
             echo "Error: MLX model directory not found."
-            echo "Checked: $PROJECT_ROOT/DeepAnalyze-8B-MLX-4bit and $PROJECT_ROOT/DeepAnalyze-8B-MLX-FP16"
+            echo "Checked: $PROJECT_ROOT/DeepAnalyze-8B-MLX-FP16 and $PROJECT_ROOT/DeepAnalyze-8B-MLX-4bit"
             return 1
         fi
 
@@ -283,6 +341,16 @@ sleep 3
 echo ""
 echo "Starting React frontend..."
 cd "$SCRIPT_DIR/frontend" || exit
+if should_clean_frontend_cache; then
+    if [ -d ".next" ]; then
+        echo "Cleaning frontend .next cache..."
+        rm -rf .next
+    else
+        echo "Frontend .next cache not found, skipping cleanup."
+    fi
+else
+    echo "Frontend cache cleanup skipped (DEEPANALYZE_FRONTEND_CLEAN_CACHE=$DEEPANALYZE_FRONTEND_CLEAN_CACHE)."
+fi
 nohup npm run dev -- -p "$FRONTEND_PORT" > "$LOG_DIR/frontend.log" 2>&1 &
 FRONTEND_PID=$!
 echo "Frontend PID: $FRONTEND_PID"

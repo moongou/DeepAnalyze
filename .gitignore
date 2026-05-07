@@ -19,6 +19,7 @@ wheels/
 .cursor/
 .vscode/
 .trae/
+.hintrc
 
 #other
 DeepAnalyze-8B/

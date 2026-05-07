@@ -54,9 +54,9 @@
             <h1>📖 雨途斩棘录</h1>
             <p>记录已真实跑通、已验证有效的错误修复方法</p>
             <div class="stats">
-                <div class="stat-item"><span class="stat-number">46</span><span class="stat-label">错误记录</span></div>
-                <div class="stat-item"><span class="stat-number">70</span><span class="stat-label">验证成功次数</span></div>
-                <div class="stat-item"><span class="stat-number">31</span><span class="stat-label">失败观测次数</span></div>
+                <div class="stat-item"><span class="stat-number">51</span><span class="stat-label">错误记录</span></div>
+                <div class="stat-item"><span class="stat-number">76</span><span class="stat-label">验证成功次数</span></div>
+                <div class="stat-item"><span class="stat-number">37</span><span class="stat-label">失败观测次数</span></div>
                 <div class="stat-item"><span class="stat-number">0</span><span class="stat-label">环境待办未确认</span></div>
             </div>
         </div>
@@ -67,6 +67,235 @@
                 <div class="entry-header">
                     <div class="entry-left">
                         <span class="serial">1</span>
+                        <span class="error-type default">AttributeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">98e2ce63b97d8288</span>
+                </div>
+                <div class="error-message">Can only use .dt accessor with datetimelike values</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1778033436586_w24w0eg48
+代码长度: 11495 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查对象是否有该属性，确保使用正确的属性名。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-05-06 06:46:19</span>
+                    <span>🕒 更新时间: 2026-05-06 06:46:19</span>
+                    <span>✅ 最近验证: 2026-05-06 14:46:19</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 1</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">2</span>
+                        <span class="error-type TypeError">TypeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">e5516b6980415ad6</span>
+                </div>
+                <div class="error-message">generate_report_pdf() got an unexpected keyword argument 'report_content'</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_real_validation_1778032483387
+代码长度: 8103 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查函数/方法定义与调用签名是否一致，确认位置参数数量、关键字参数名称、默认值以及所用库版本下的 API 写法完全匹配。对于自定义函数，先统一定义再调用；对于 pandas / matplotlib / report 相关方法，务必按当前版本文档传参。</p>
+
+                    <pre><code># 解决方案：先统一函数定义与调用签名，再执行
+def build_summary(df, metrics, top_n=10):
+    # 函数定义里的参数名、顺序、默认值要与调用处保持一致
+    return {&quot;rows&quot;: len(df), &quot;metrics&quot;: metrics[:top_n]}
+
+# 正确调用：参数数量与名称必须完全匹配
+summary = build_summary(df, metrics, top_n=5)
+
+# 如果是第三方库方法报错，请先确认当前版本文档中的参数签名
+# 例如：不要给不支持的参数名，不要遗漏必填位置参数
+</code></pre>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-05-06 01:57:11</span>
+                    <span>🕒 更新时间: 2026-05-06 01:57:11</span>
+                    <span>✅ 最近验证: 2026-05-06 09:57:11</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 1</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">3</span>
+                        <span class="error-type default">FileNotFoundError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">4d02fb9f6251941d</span>
+                </div>
+                <div class="error-message">[Errno 2] No such file or directory: 'workspace/generated/sql_result_postgresql_postgres_localhost_5432_cus_20260506_095500.csv'</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_real_validation_1778032483387
+代码长度: 1780 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查文件路径是否正确，确保文件存在于指定位置。</p>
+
+                    <pre><code># 解决方案：检查文件是否存在，或使用绝对路径
+import os
+
+file_path = &quot;your_file.csv&quot;
+if os.path.exists(file_path):
+    # 读取文件
+    pass
+else:
+    print(f&quot;文件不存在: {file_path}&quot;)
+    # 列出工作区文件帮助调试
+    print(&quot;工作区文件:&quot;, os.listdir(&quot;.&quot;))
+</code></pre>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-05-06 01:55:09</span>
+                    <span>🕒 更新时间: 2026-05-06 01:55:09</span>
+                    <span>✅ 最近验证: 2026-05-06 09:55:09</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 1</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">4</span>
+                        <span class="error-type RuntimeError">RuntimeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">7084898c030d00e3</span>
+                </div>
+                <div class="error-message">]: 当前 SQL Runner 仅允许单条只读 SQL 语句</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_real_validation_1778032483387
+代码长度: 390 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-05-06 01:54:54</span>
+                    <span>🕒 更新时间: 2026-05-06 01:54:54</span>
+                    <span>✅ 最近验证: 2026-05-06 09:54:54</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 1</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">5</span>
+                        <span class="error-type RuntimeError">RuntimeError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">104120d229059b89</span>
+                </div>
+                <div class="error-message">: name 'df' is not defined</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_real_validation_1777999084980
+代码长度: 3834 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>遇到 RuntimeError 错误，请检查代码逻辑并参考错误消息进行修复。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-05-05 16:42:14</span>
+                    <span>🕒 更新时间: 2026-05-05 16:42:14</span>
+                    <span>✅ 最近验证: 2026-05-06 00:42:14</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 1</span>
+                    <span>🧪 失败观测: 1</span>
+                    <span>📊 使用次数: 1</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">6</span>
+                        <span class="error-type default">SyntaxError</span>
+                        <span class="status">已验证</span>
+                    </div>
+                    <span class="error-hash">f75a6b207720b851</span>
+                </div>
+                <div class="error-message">invalid syntax</div>
+
+                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_real_validation_1777996073355
+代码长度: 2525 字符</div>
+
+                <div class="solution">
+                    <h4>✅ 已验证解决方案</h4>
+                    <p>检查代码语法，确保Python语法正确。</p>
+</div>
+                <div class="meta">
+                    <span>📅 创建时间: 2026-04-02 14:26:49</span>
+                    <span>🕒 更新时间: 2026-05-05 15:48:58</span>
+                    <span>✅ 最近验证: 2026-05-05 15:48:58</span>
+                    <span>👤 创建者: system_auto</span>
+                    <span>🗂️ 分类: runtime_code_generation</span>
+                    <span>🔁 验证成功: 5</span>
+                    <span>🧪 失败观测: 2</span>
+                    <span>📊 使用次数: 5</span>
+                    <span>🎯 置信度: 70%</span>
+                </div>
+                <div class="confidence-bar">
+                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
+                </div>
+            </div>
+
+            <div class="entry">
+                <div class="entry-header">
+                    <div class="entry-left">
+                        <span class="serial">7</span>
                         <span class="error-type default">KeyError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -100,7 +329,7 @@
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">2</span>
+                        <span class="serial">8</span>
                         <span class="error-type TypeError">TypeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -134,7 +363,7 @@
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">3</span>
+                        <span class="serial">9</span>
                         <span class="error-type RuntimeError">RuntimeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -168,7 +397,7 @@
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">4</span>
+                        <span class="serial">10</span>
                         <span class="error-type ValueError">ValueError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -256,7 +485,7 @@ dtype: object
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">5</span>
+                        <span class="serial">11</span>
                         <span class="error-type TypeError">TypeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -290,7 +519,7 @@ dtype: object
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">6</span>
+                        <span class="serial">12</span>
                         <span class="error-type default">KeyError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -324,7 +553,7 @@ dtype: object
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">7</span>
+                        <span class="serial">13</span>
                         <span class="error-type default">KeyError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -358,7 +587,7 @@ dtype: object
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">8</span>
+                        <span class="serial">14</span>
                         <span class="error-type TypeError">TypeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -392,7 +621,7 @@ dtype: object
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">9</span>
+                        <span class="serial">15</span>
                         <span class="error-type default">IndexError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -426,7 +655,7 @@ dtype: object
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">10</span>
+                        <span class="serial">16</span>
                         <span class="error-type TypeError">TypeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -460,41 +689,7 @@ dtype: object
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">11</span>
-                        <span class="error-type default">SyntaxError</span>
-                        <span class="status">已验证</span>
-                    </div>
-                    <span class="error-hash">f75a6b207720b851</span>
-                </div>
-                <div class="error-message">invalid syntax</div>
-
-                <div class="error-context"><strong>上下文：</strong>工作区: /Users/m3max/IdeaProjects/DeepAnalyze/demo/chat/workspace/rainforgrain/session_1776253137842_lsg6eeyt4
-代码长度: 3182 字符</div>
-
-                <div class="solution">
-                    <h4>✅ 已验证解决方案</h4>
-                    <p>检查代码语法，确保Python语法正确。</p>
-</div>
-                <div class="meta">
-                    <span>📅 创建时间: 2026-04-02 14:26:49</span>
-                    <span>🕒 更新时间: 2026-04-15 11:48:56</span>
-                    <span>✅ 最近验证: 2026-04-15 11:48:56</span>
-                    <span>👤 创建者: system_auto</span>
-                    <span>🗂️ 分类: runtime_code_generation</span>
-                    <span>🔁 验证成功: 4</span>
-                    <span>🧪 失败观测: 1</span>
-                    <span>📊 使用次数: 4</span>
-                    <span>🎯 置信度: 70%</span>
-                </div>
-                <div class="confidence-bar">
-                    <div class="confidence-fill confidence-high" style="width: 70.0%"></div>
-                </div>
-            </div>
-
-            <div class="entry">
-                <div class="entry-header">
-                    <div class="entry-left">
-                        <span class="serial">12</span>
+                        <span class="serial">17</span>
                         <span class="error-type default">AttributeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -528,7 +723,7 @@ dtype: object
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">13</span>
+                        <span class="serial">18</span>
                         <span class="error-type RuntimeError">RuntimeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -562,7 +757,7 @@ dtype: object
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">14</span>
+                        <span class="serial">19</span>
                         <span class="error-type ImportError">ImportError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -607,7 +802,7 @@ def install_package(package_name):
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">15</span>
+                        <span class="serial">20</span>
                         <span class="error-type RuntimeError">RuntimeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -641,7 +836,7 @@ def install_package(package_name):
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">16</span>
+                        <span class="serial">21</span>
                         <span class="error-type ValueError">ValueError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -675,7 +870,7 @@ def install_package(package_name):
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">17</span>
+                        <span class="serial">22</span>
                         <span class="error-type ValueError">ValueError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -709,7 +904,7 @@ def install_package(package_name):
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">18</span>
+                        <span class="serial">23</span>
                         <span class="error-type default">AttributeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -743,7 +938,7 @@ def install_package(package_name):
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">19</span>
+                        <span class="serial">24</span>
                         <span class="error-type RuntimeError">RuntimeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -831,7 +1026,7 @@ NameError: name 'generate_report_pdf' is not defined
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">20</span>
+                        <span class="serial">25</span>
                         <span class="error-type ValueError">ValueError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -865,7 +1060,7 @@ NameError: name 'generate_report_pdf' is not defined
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">21</span>
+                        <span class="serial">26</span>
                         <span class="error-type RuntimeError">RuntimeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1090,7 +1285,7 @@ analysis_end_confirmation.txt: 可正常访问
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">22</span>
+                        <span class="serial">27</span>
                         <span class="error-type RuntimeError">RuntimeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1329,7 +1524,7 @@ Execution did not start. Fix the Python code before retrying.
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">23</span>
+                        <span class="serial">28</span>
                         <span class="error-type ImportError">ImportError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1590,7 +1785,7 @@ Traceback (most recent call last):
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">24</span>
+                        <span class="serial">29</span>
                         <span class="error-type default">KeyError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1624,7 +1819,7 @@ Traceback (most recent call last):
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">25</span>
+                        <span class="serial">30</span>
                         <span class="error-type default">SyntaxError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1658,7 +1853,7 @@ Traceback (most recent call last):
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">26</span>
+                        <span class="serial">31</span>
                         <span class="error-type default">FileNotFoundError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1705,7 +1900,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">27</span>
+                        <span class="serial">32</span>
                         <span class="error-type default">FileNotFoundError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1752,7 +1947,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">28</span>
+                        <span class="serial">33</span>
                         <span class="error-type default">SyntaxError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1786,7 +1981,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">29</span>
+                        <span class="serial">34</span>
                         <span class="error-type default">SyntaxError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1820,7 +2015,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">30</span>
+                        <span class="serial">35</span>
                         <span class="error-type default">SyntaxError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1854,7 +2049,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">31</span>
+                        <span class="serial">36</span>
                         <span class="error-type default">SyntaxError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1888,7 +2083,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">32</span>
+                        <span class="serial">37</span>
                         <span class="error-type default">SyntaxError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1922,7 +2117,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">33</span>
+                        <span class="serial">38</span>
                         <span class="error-type TypeError">TypeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1956,7 +2151,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">34</span>
+                        <span class="serial">39</span>
                         <span class="error-type default">MemoryError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -1990,7 +2185,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">35</span>
+                        <span class="serial">40</span>
                         <span class="error-type TypeError">TypeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2024,7 +2219,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">36</span>
+                        <span class="serial">41</span>
                         <span class="error-type default">KeyError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2058,7 +2253,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">37</span>
+                        <span class="serial">42</span>
                         <span class="error-type RuntimeError">RuntimeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2092,7 +2287,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">38</span>
+                        <span class="serial">43</span>
                         <span class="error-type ValueError">ValueError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2126,7 +2321,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">39</span>
+                        <span class="serial">44</span>
                         <span class="error-type RuntimeError">RuntimeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2160,7 +2355,7 @@ else:
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">40</span>
+                        <span class="serial">45</span>
                         <span class="error-type default">FPDFException</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2199,7 +2394,7 @@ pdf.cell(0, 10, '标题', ln=True)</code></pre>
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">41</span>
+                        <span class="serial">46</span>
                         <span class="error-type TypeError">TypeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2239,7 +2434,7 @@ new_date = pandas_date_sub(old_date, 30)</code></pre>
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">42</span>
+                        <span class="serial">47</span>
                         <span class="error-type RuntimeError">RuntimeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2273,7 +2468,7 @@ new_date = pandas_date_sub(old_date, 30)</code></pre>
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">43</span>
+                        <span class="serial">48</span>
                         <span class="error-type TypeError">TypeError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2307,7 +2502,7 @@ new_date = pandas_date_sub(old_date, 30)</code></pre>
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">44</span>
+                        <span class="serial">49</span>
                         <span class="error-type ValueError">ValueError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2341,7 +2536,7 @@ new_date = pandas_date_sub(old_date, 30)</code></pre>
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">45</span>
+                        <span class="serial">50</span>
                         <span class="error-type ImportError">ImportError</span>
                         <span class="status">已验证</span>
                     </div>
@@ -2376,7 +2571,7 @@ new_date = pandas_date_sub(old_date, 30)</code></pre>
             <div class="entry">
                 <div class="entry-header">
                     <div class="entry-left">
-                        <span class="serial">46</span>
+                        <span class="serial">51</span>
                         <span class="error-type ValueError">ValueError</span>
                         <span class="status">已验证</span>
                     </div>

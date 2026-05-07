@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import openai
 from typing import Optional, List, Dict, Any, Tuple
 import json
@@ -77,6 +79,7 @@ from datetime import datetime
 from pdf_utils import (
     register_chinese_fonts,
     get_chinese_style,
+    get_chinese_font_name,
     extract_markdown_sections,
     clean_md_text,
     generate_pdf as generate_pdf_module,
@@ -498,6 +501,261 @@ def execute_code_safe(
             pass
 
 
+READONLY_SQL_START_KEYWORDS = {"select", "with", "explain"}
+FORBIDDEN_SQL_KEYWORDS = {
+    "alter",
+    "attach",
+    "call",
+    "copy",
+    "create",
+    "delete",
+    "detach",
+    "drop",
+    "execute",
+    "grant",
+    "insert",
+    "load",
+    "merge",
+    "pragma",
+    "replace",
+    "revoke",
+    "truncate",
+    "unload",
+    "update",
+    "vacuum",
+}
+EXECUTION_LANGUAGE_ALIASES = {
+    "": "python",
+    "py": "python",
+    "python": "python",
+    "python3": "python",
+    "sql": "sql",
+    "postgres": "sql",
+    "postgresql": "sql",
+    "mysql": "sql",
+    "sqlite": "sql",
+    "mssql": "sql",
+    "sqlserver": "sql",
+    "oracle": "sql",
+    "r": "r",
+    "rscript": "r",
+}
+
+
+def _normalize_execution_language(language: str, code: str = "") -> str:
+    normalized = str(language or "").strip().lower()
+    if normalized in EXECUTION_LANGUAGE_ALIASES:
+        return EXECUTION_LANGUAGE_ALIASES[normalized]
+    code_head = str(code or "").strip().lower()
+    if re.match(r"^(with|select|explain)\b", code_head):
+        return "sql"
+    return "python"
+
+
+def _extract_executable_blocks_from_body(search_body: str) -> List[Dict[str, str]]:
+    body = str(search_body or "").strip()
+    if not body:
+        return []
+
+    executable_blocks: List[Dict[str, str]] = []
+    for fence_match in re.finditer(
+        r"```\s*([A-Za-z0-9_+.-]*)\s*\n(.*?)```",
+        body,
+        re.DOTALL,
+    ):
+        raw_language = fence_match.group(1) or ""
+        code = (fence_match.group(2) or "").strip()
+        if not code:
+            continue
+        executable_blocks.append(
+            {
+                "language": _normalize_execution_language(raw_language, code),
+                "raw_language": raw_language,
+                "code": code,
+            }
+        )
+    if executable_blocks:
+        return executable_blocks
+
+    leading_fence_match = re.match(
+        r"^```\s*([A-Za-z0-9_+.-]*)\s*\n?(.*)$",
+        body,
+        re.DOTALL,
+    )
+    if leading_fence_match:
+        raw_language = leading_fence_match.group(1) or ""
+        code = re.sub(r"\n?```\s*$", "", leading_fence_match.group(2) or "", flags=re.DOTALL).strip()
+        if not code:
+            return []
+        return [
+            {
+                "language": _normalize_execution_language(raw_language, code),
+                "raw_language": raw_language,
+                "code": code,
+            }
+        ]
+
+    return [
+        {
+            "language": _normalize_execution_language("", body),
+            "raw_language": "",
+            "code": body,
+        }
+    ]
+
+
+def _extract_executable_blocks(response_text: str) -> List[Dict[str, str]]:
+    text_body = str(response_text or "")
+    code_matches = list(re.finditer(r"<code>(.*?)</code>", text_body, re.DOTALL | re.IGNORECASE))
+    if code_matches:
+        executable_blocks: List[Dict[str, str]] = []
+        for code_match in code_matches:
+            executable_blocks.extend(_extract_executable_blocks_from_body(code_match.group(1)))
+        return executable_blocks
+    return _extract_executable_blocks_from_body(text_body)
+
+
+def _extract_executable_block(response_text: str) -> Dict[str, str]:
+    """Extract the first executable Code/fenced block and normalize its language."""
+    executable_blocks = _extract_executable_blocks(response_text)
+    if executable_blocks:
+        return executable_blocks[0]
+    return {
+        "language": _normalize_execution_language("", ""),
+        "raw_language": "",
+        "code": "",
+    }
+
+
+def _strip_sql_comments(sql: str) -> str:
+    sql = re.sub(r"/\*.*?\*/", " ", str(sql or ""), flags=re.DOTALL)
+    sql = re.sub(r"--.*?$", " ", sql, flags=re.MULTILINE)
+    return sql.strip()
+
+
+def _validate_readonly_sql(sql: str) -> str:
+    cleaned = _strip_sql_comments(sql).strip()
+    if not cleaned:
+        raise ValueError("SQL 不能为空")
+    cleaned = cleaned.rstrip(";\n\t ")
+    if ";" in cleaned:
+        raise ValueError("当前 SQL Runner 仅允许单条只读 SQL 语句")
+    first_keyword_match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\b", cleaned)
+    first_keyword = first_keyword_match.group(1).lower() if first_keyword_match else ""
+    if first_keyword not in READONLY_SQL_START_KEYWORDS:
+        raise ValueError("当前 SQL Runner 仅允许 SELECT / WITH / EXPLAIN 等只读查询")
+    tokens = set(re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", cleaned.lower()))
+    blocked = sorted(tokens & FORBIDDEN_SQL_KEYWORDS)
+    if blocked:
+        raise ValueError(f"SQL 包含禁止的写入或管理关键字: {', '.join(blocked)}")
+    return cleaned
+
+
+def execute_sql_safe(
+    sql: str,
+    workspace_dir: str,
+    db_source: Optional[Dict[str, Any]],
+    max_rows: int = 50000,
+    timeout_sec: int = 120,
+) -> str:
+    """Execute a single read-only SQL statement and materialize returned rows."""
+    if not db_source or not isinstance(db_source, dict):
+        return "[SQL Error]: 当前分析未选择可执行 SQL 的数据库数据源"
+
+    try:
+        safe_sql = _validate_readonly_sql(sql)
+        db_type = normalize_db_type(db_source.get("db_type") or db_source.get("dbType"))
+        config = db_source.get("config") if isinstance(db_source.get("config"), dict) else {}
+        source_label = str(db_source.get("label") or db_source.get("id") or db_type)
+        engine = build_db_engine(db_type, config)
+        started_at = time_module.time()
+        rows = []
+        columns: List[str] = []
+        truncated = False
+
+        with engine.connect() as conn:
+            try:
+                if db_type == "postgresql":
+                    conn.execute(text(f"SET statement_timeout = {int(timeout_sec * 1000)}"))
+                elif db_type == "mysql":
+                    conn.execute(text(f"SET SESSION MAX_EXECUTION_TIME={int(timeout_sec * 1000)}"))
+            except Exception:
+                pass
+
+            result = conn.execute(text(safe_sql))
+            if result.returns_rows:
+                columns = list(result.keys())
+                fetched = result.fetchmany(max_rows + 1)
+                if len(fetched) > max_rows:
+                    truncated = True
+                    fetched = fetched[:max_rows]
+                rows = [tuple(row) for row in fetched]
+
+        engine.dispose()
+
+        generated_dir = Path(workspace_dir) / "generated"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+        safe_source = re.sub(r"[^A-Za-z0-9_.-]+", "_", source_label).strip("_") or "database"
+        output_path = uniquify_path(generated_dir / f"sql_result_{safe_source}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        dataframe = pd.DataFrame(rows, columns=columns)
+        dataframe.to_csv(output_path, index=False, encoding="utf-8-sig")
+
+        elapsed_ms = int((time_module.time() - started_at) * 1000)
+        preview_lines: List[str] = []
+        if columns:
+            preview_lines.append(" | ".join(map(str, columns[:12])))
+            for row in rows[:8]:
+                preview_lines.append(" | ".join(_truncate_history_text(str(item), 80) for item in row[:12]))
+        preview_text = "\n".join(preview_lines) if preview_lines else "(query returned no rows)"
+        return (
+            f"[SQL OK] source={source_label}, dialect={db_type}, rows={len(rows)}, "
+            f"columns={len(columns)}, truncated={str(truncated).lower()}, duration_ms={elapsed_ms}\n"
+            f"[SQL Output] {output_path.name}\n"
+            f"[SQL Preview]\n{preview_text}"
+        )
+    except Exception as exc:
+        return f"[SQL Error]: {str(exc)}"
+
+
+def execute_r_code_safe(code_str: str, workspace_dir: str = None, timeout_sec: int = 120) -> str:
+    """Execute R code through Rscript in the session workspace."""
+    if shutil.which("Rscript") is None:
+        return "[R Error]: Rscript 未安装或不在 PATH 中，无法执行 R 代码"
+    if workspace_dir is None:
+        workspace_dir = WORKSPACE_BASE_DIR
+    exec_cwd = os.path.abspath(workspace_dir)
+    os.makedirs(exec_cwd, exist_ok=True)
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".R", dir=exec_cwd)
+        os.close(fd)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(code_str)
+        child_env = os.environ.copy()
+        child_env.setdefault("R_DEFAULT_DEVICE", "pdf")
+        completed = subprocess.run(
+            ["Rscript", tmp_path],
+            cwd=exec_cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_sec,
+            env=child_env,
+        )
+        return (completed.stdout or "") + (completed.stderr or "")
+    except subprocess.TimeoutExpired:
+        return f"[R Timeout]: execution exceeded {timeout_sec} seconds"
+    except Exception as exc:
+        return f"[R Error]: {str(exc)}"
+    finally:
+        try:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
 # API endpoint and model path
 DEFAULT_COMPUTE_BACKEND = (os.getenv("DEEPANALYZE_COMPUTE_BACKEND", "auto") or "auto").strip().lower()
 API_BASE = os.getenv("DEEPANALYZE_DEFAULT_MODEL_BASE_URL", "http://localhost:8000/v1")
@@ -507,9 +765,18 @@ DEFAULT_PROVIDER_LABEL = (os.getenv("DEEPANALYZE_DEFAULT_PROVIDER_LABEL", "DeepA
 DEFAULT_PROVIDER_DESCRIPTION = (os.getenv("DEEPANALYZE_DEFAULT_PROVIDER_DESCRIPTION", "项目默认本地 vLLM 服务") or "项目默认本地 vLLM 服务").strip()
 DEFAULT_PROVIDER_API_KEY = (os.getenv("DEEPANALYZE_DEFAULT_MODEL_API_KEY", "") or "").strip()
 MAX_AGENT_ROUNDS = 30
+MAX_EMPTY_LLM_ROUNDS = 3
+ANALYSIS_HISTORY_STALE_RUNNING_MS = 120000
 LLM_RETRY_MAX_ATTEMPTS = 3
 LLM_RETRY_BACKOFF_SECONDS = [0.4, 0.8]
 LLM_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+EXECUTE_CONTEXT_MAX_CHARS = 7000
+INTERACTIVE_TASK_SELECTION_MARKERS = (
+    "用户选择了以下分析任务",
+    "the user selected the following analysis tasks",
+)
+RUNTIME_NOISE_DIR_PARTS = {".lib", "__pycache__", ".pytest_cache"}
+RUNTIME_NOISE_SUFFIXES = {".dylib", ".so", ".dll", ".a", ".o"}
 
 
 # Initialize OpenAI client
@@ -551,6 +818,33 @@ def verify_builtin_superuser_password(password: str) -> bool:
     if BUILTIN_SUPERUSER_PASSWORD_HASH:
         return hash_password(password or "") == BUILTIN_SUPERUSER_PASSWORD_HASH
     return (password or "") == ""
+
+
+def _is_runtime_noise_relative_path(relative_path: Path) -> bool:
+    path_parts = {part.lower() for part in relative_path.parts}
+    if path_parts.intersection(RUNTIME_NOISE_DIR_PARTS):
+        return True
+    suffix = relative_path.suffix.lower()
+    if suffix in RUNTIME_NOISE_SUFFIXES:
+        return True
+    return False
+
+
+def _collect_workspace_file_state(workspace_dir: str) -> Dict[Path, Tuple[int, int]]:
+    workspace_root = Path(workspace_dir).resolve()
+    state: Dict[Path, Tuple[int, int]] = {}
+    for candidate in workspace_root.rglob("*"):
+        try:
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            relative_path = candidate.relative_to(workspace_root)
+            if _is_runtime_noise_relative_path(relative_path):
+                continue
+            candidate_stat = candidate.stat()
+            state[candidate.resolve()] = (candidate_stat.st_size, candidate_stat.st_mtime_ns)
+        except OSError:
+            continue
+    return state
 
 
 def ensure_builtin_superuser(cursor: sqlite3.Cursor) -> None:
@@ -596,6 +890,299 @@ def _save_user_config(username: str, filename: str, data) -> str:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     return path
+
+
+ANALYSIS_HISTORY_DEFAULT_SETTINGS = {
+    "enabled": True,
+    "capture_stream_progress": True,
+    "capture_prompt_preview": True,
+    "max_runs": 120,
+    "stream_progress_chunk_interval": 40,
+    "stream_progress_char_interval": 1600,
+}
+
+
+def _get_analysis_history_dir(username: str) -> str:
+    path = os.path.join(_get_user_config_dir(username), "analysis_history")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _get_analysis_history_index_path(username: str) -> str:
+    return os.path.join(_get_analysis_history_dir(username), "index.json")
+
+
+def _get_analysis_history_run_path(username: str, run_id: str) -> str:
+    safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(run_id or "run")).strip("_") or f"run_{int(time_module.time())}"
+    return os.path.join(_get_analysis_history_dir(username), f"{safe_run_id}.jsonl")
+
+
+def _load_analysis_history_settings(username: str) -> Dict[str, Any]:
+    saved = _load_user_config(username, "analysis_history_settings.json", {})
+    merged = dict(ANALYSIS_HISTORY_DEFAULT_SETTINGS)
+    if isinstance(saved, dict):
+        for key, default_value in ANALYSIS_HISTORY_DEFAULT_SETTINGS.items():
+            value = saved.get(key, default_value)
+            if isinstance(default_value, bool):
+                merged[key] = bool(value)
+            elif isinstance(default_value, int):
+                try:
+                    merged[key] = max(1, int(value))
+                except Exception:
+                    merged[key] = default_value
+            else:
+                merged[key] = value
+    return merged
+
+
+def _sanitize_analysis_history_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    incoming = settings if isinstance(settings, dict) else {}
+    sanitized = dict(ANALYSIS_HISTORY_DEFAULT_SETTINGS)
+    for key, default_value in ANALYSIS_HISTORY_DEFAULT_SETTINGS.items():
+        value = incoming.get(key, default_value)
+        if isinstance(default_value, bool):
+            sanitized[key] = bool(value)
+        elif isinstance(default_value, int):
+            try:
+                sanitized[key] = max(1, int(value))
+            except Exception:
+                sanitized[key] = default_value
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
+def _load_analysis_history_index(username: str) -> Dict[str, Any]:
+    path = _get_analysis_history_index_path(username)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("runs"), list):
+                return data
+        except Exception:
+            pass
+    return {"runs": []}
+
+
+def _parse_analysis_history_timestamp(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def _normalize_analysis_history_run_summary(summary: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    if not isinstance(summary, dict):
+        return {}, False
+
+    normalized = dict(summary)
+    if str(normalized.get("status") or "") != "running":
+        return normalized, False
+
+    latest_ts = _parse_analysis_history_timestamp(normalized.get("updated_at") or normalized.get("started_at"))
+    if latest_ts is None:
+        return normalized, False
+
+    idle_ms = max(0, int((datetime.now() - latest_ts).total_seconds() * 1000))
+    if idle_ms < ANALYSIS_HISTORY_STALE_RUNNING_MS:
+        return normalized, False
+
+    stale_message = normalized.get("last_problem") or (
+        f"分析 run 已超过 {ANALYSIS_HISTORY_STALE_RUNNING_MS // 1000} 秒未写入新事件，系统已标记为异常结束。"
+    )
+    normalized["status"] = "warning"
+    normalized["last_problem"] = stale_message
+    normalized["last_message"] = stale_message
+    normalized["stale_idle_ms"] = idle_ms
+    return normalized, True
+
+
+def _normalize_analysis_history_index(username: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = data if isinstance(data, dict) else _load_analysis_history_index(username)
+    runs = payload.get("runs", []) if isinstance(payload.get("runs"), list) else []
+    changed = False
+    normalized_runs: List[Dict[str, Any]] = []
+
+    for item in runs:
+        if not isinstance(item, dict):
+            continue
+        normalized_item, item_changed = _normalize_analysis_history_run_summary(item)
+        normalized_runs.append(normalized_item)
+        changed = changed or item_changed
+
+    if changed:
+        payload = dict(payload)
+        payload["runs"] = normalized_runs
+        _save_analysis_history_index(username, payload)
+        return payload
+
+    payload = dict(payload)
+    payload["runs"] = normalized_runs
+    return payload
+
+
+def _save_analysis_history_index(username: str, data: Dict[str, Any]) -> str:
+    path = _get_analysis_history_index_path(username)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def _upsert_analysis_history_summary(username: str, summary: Dict[str, Any], max_runs: int = 120) -> None:
+    if not isinstance(summary, dict) or not summary.get("run_id"):
+        return
+    data = _load_analysis_history_index(username)
+    runs = [item for item in data.get("runs", []) if isinstance(item, dict) and item.get("run_id") != summary.get("run_id")]
+    runs.append(summary)
+    runs.sort(key=lambda item: str(item.get("started_at") or item.get("updated_at") or ""), reverse=True)
+    data["runs"] = runs[:max(1, int(max_runs or 120))]
+    _save_analysis_history_index(username, data)
+
+
+def _truncate_history_text(text: Any, max_chars: int = 600) -> str:
+    raw = str(text or "")
+    if len(raw) <= max_chars:
+        return raw
+    return raw[:max_chars] + "..."
+
+
+def _sanitize_runtime_db_source_for_history(source: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(source, dict):
+        return {}
+    config = source.get("config") if isinstance(source.get("config"), dict) else {}
+    return {
+        "id": str(source.get("id", "") or ""),
+        "label": str(source.get("label", "") or ""),
+        "db_type": str(source.get("db_type") or source.get("dbType") or ""),
+        "config": {
+            "host": str(config.get("host", "") or ""),
+            "port": str(config.get("port", "") or ""),
+            "user": str(config.get("user", "") or ""),
+            "database": str(config.get("database", "") or ""),
+        },
+    }
+
+
+def _sanitize_model_provider_for_history(model_provider: Any) -> Dict[str, Any]:
+    if not isinstance(model_provider, dict):
+        return {}
+    return {
+        "id": str(model_provider.get("id", "") or ""),
+        "label": str(model_provider.get("label", "") or ""),
+        "providerType": str(model_provider.get("providerType", "") or ""),
+        "model": str(model_provider.get("model", "") or ""),
+        "baseUrl": str(model_provider.get("baseUrl", "") or ""),
+    }
+
+
+class AnalysisHistoryRecorder:
+    def __init__(
+        self,
+        username: str,
+        session_id: str,
+        settings: Dict[str, Any],
+        request_summary: Dict[str, Any],
+    ):
+        self.username = str(username or "default")
+        self.session_id = str(session_id or "default")
+        self.settings = _sanitize_analysis_history_settings(settings)
+        self.enabled = bool(self.settings.get("enabled", True))
+        self.started_at_ts = time_module.time()
+        self.started_at = datetime.now().isoformat(timespec="seconds")
+        self.run_id = f"{self.session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(4)}"
+        self.path = _get_analysis_history_run_path(self.username, self.run_id)
+        self.event_count = 0
+        self.last_stage = "session"
+        self.last_event = "created"
+        self.current_status = "running"
+        self.summary = {
+            "run_id": self.run_id,
+            "session_id": self.session_id,
+            "username": self.username,
+            "status": "running",
+            "started_at": self.started_at,
+            "updated_at": self.started_at,
+            "duration_ms": 0,
+            "event_count": 0,
+            "last_stage": "session",
+            "last_event": "created",
+            "last_message": "analysis run created",
+            "request_summary": request_summary if isinstance(request_summary, dict) else {},
+        }
+        if self.enabled:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            self.log(
+                stage="session",
+                event="session_started",
+                status="running",
+                message="analysis session started",
+                details=request_summary,
+            )
+
+    def _persist_summary(self) -> None:
+        if not self.enabled:
+            return
+        self.summary["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        self.summary["duration_ms"] = int((time_module.time() - self.started_at_ts) * 1000)
+        self.summary["event_count"] = self.event_count
+        self.summary["last_stage"] = self.last_stage
+        self.summary["last_event"] = self.last_event
+        self.summary["status"] = self.current_status
+        _upsert_analysis_history_summary(
+            self.username,
+            dict(self.summary),
+            max_runs=self.settings.get("max_runs", ANALYSIS_HISTORY_DEFAULT_SETTINGS["max_runs"]),
+        )
+
+    def log(
+        self,
+        stage: str,
+        event: str,
+        status: str = "info",
+        message: str = "",
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        self.event_count += 1
+        self.last_stage = str(stage or "session")
+        self.last_event = str(event or "event")
+        self.current_status = status if status in {"running", "info", "completed", "failed", "warning"} else self.current_status
+        payload = {
+            "run_id": self.run_id,
+            "sequence": self.event_count,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "elapsed_ms": int((time_module.time() - self.started_at_ts) * 1000),
+            "stage": self.last_stage,
+            "event": self.last_event,
+            "status": status,
+            "message": message,
+            "details": details or {},
+        }
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        if message:
+            self.summary["last_message"] = _truncate_history_text(message, max_chars=220)
+        if status in {"warning", "failed"}:
+            self.summary["last_problem"] = _truncate_history_text(message or json.dumps(details or {}, ensure_ascii=False), max_chars=320)
+        self._persist_summary()
+
+    def finalize(self, status: str, message: str = "", details: Optional[Dict[str, Any]] = None) -> None:
+        if not self.enabled:
+            return
+        normalized_status = status if status in {"completed", "failed", "warning"} else "completed"
+        self.current_status = normalized_status
+        self.log(
+            stage="session",
+            event="session_completed" if normalized_status == "completed" else "session_finished_with_issues",
+            status=normalized_status,
+            message=message,
+            details=details or {},
+        )
 KB_MASK = "••••••••"
 KB_DEFAULT_SETTINGS = {
     "knowledge_base_enabled": True,
@@ -715,6 +1302,48 @@ def _is_local_model_endpoint(base_url: str) -> bool:
     return "localhost:" in lowered or "127.0.0.1:" in lowered
 
 
+def _preferred_local_mlx_model_dir() -> str:
+    configured_mlx_dir = (os.getenv("DEEPANALYZE_MLX_MODEL_DIR", "") or "").strip()
+    if configured_mlx_dir and os.path.isdir(configured_mlx_dir):
+        return configured_mlx_dir
+
+    fp16_candidate = os.path.join(REPO_ROOT_DIR, "DeepAnalyze-8B-MLX-FP16")
+    if os.path.isdir(fp16_candidate):
+        return fp16_candidate
+
+    quantized_candidate = os.path.join(REPO_ROOT_DIR, "DeepAnalyze-8B-MLX-4bit")
+    if os.path.isdir(quantized_candidate):
+        return quantized_candidate
+
+    return configured_mlx_dir or ""
+
+
+def _upgrade_legacy_default_local_mlx_model_name(model_name: str, base_url: str) -> str:
+    text = (model_name or "").strip()
+    if not text:
+        return text
+
+    if DEFAULT_COMPUTE_BACKEND not in {"mlx", "apple", "apple_silicon"}:
+        return text
+
+    if not _is_local_model_endpoint(base_url):
+        return text
+
+    preferred_dir = _preferred_local_mlx_model_dir()
+    if not preferred_dir or not os.path.isdir(preferred_dir):
+        return text
+
+    legacy_dir = os.path.join(REPO_ROOT_DIR, "DeepAnalyze-8B-MLX-4bit")
+    legacy_names = {
+        "DeepAnalyze-8B-MLX-4bit",
+        os.path.abspath(legacy_dir),
+    }
+    if text in legacy_names:
+        return preferred_dir
+
+    return text
+
+
 def _resolve_local_mlx_model_name(model_name: str, base_url: str) -> str:
     text = (model_name or "").strip()
     if not text:
@@ -738,6 +1367,87 @@ def _resolve_local_mlx_model_name(model_name: str, base_url: str) -> str:
         configured_name = os.path.basename(configured_mlx_dir.rstrip(os.sep))
         if configured_name == text:
             return configured_mlx_dir
+
+    return text
+
+
+def _normalize_provider_headers(raw_headers: Any) -> Dict[str, str]:
+    normalized_headers: Dict[str, str] = {}
+    if isinstance(raw_headers, dict):
+        for key, value in raw_headers.items():
+            if key is None or value is None:
+                continue
+            key_text = str(key).strip()
+            value_text = str(value).strip()
+            if key_text and value_text:
+                normalized_headers[key_text] = value_text
+    return normalized_headers
+
+
+def _fetch_served_model_entries(base_url: str, headers: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    if not _is_local_model_endpoint(base_url):
+        return []
+
+    try:
+        response = httpx.get(
+            f"{base_url}/models",
+            headers=headers or None,
+            timeout=5.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return []
+
+    if not isinstance(payload, dict):
+        return []
+
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        return []
+
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _resolve_local_served_model_name(model_name: str, base_url: str, headers: Optional[Dict[str, str]] = None) -> str:
+    text = (model_name or "").strip()
+    if not text or not _is_local_model_endpoint(base_url):
+        return text
+
+    served_models = _fetch_served_model_entries(base_url, headers=headers)
+    if not served_models:
+        return text
+
+    served_ids: List[str] = []
+    requested_abs_path = os.path.abspath(text) if os.path.isabs(text) else ""
+    requested_basename = os.path.basename((requested_abs_path or text).rstrip(os.sep)) if (requested_abs_path or text) else ""
+
+    for item in served_models:
+        served_id = str(item.get("id") or item.get("name") or "").strip()
+        if not served_id:
+            continue
+        served_ids.append(served_id)
+        if text == served_id:
+            return served_id
+
+        served_root = str(item.get("root") or "").strip()
+        if served_root:
+            served_root_abs = os.path.abspath(served_root)
+            served_root_basename = os.path.basename(served_root_abs.rstrip(os.sep))
+            if requested_abs_path and requested_abs_path == served_root_abs:
+                return served_id
+            if requested_basename and requested_basename in {served_root_basename, served_id}:
+                return served_id
+
+    deduped_ids: List[str] = []
+    seen_ids = set()
+    for served_id in served_ids:
+        if served_id not in seen_ids:
+            seen_ids.add(served_id)
+            deduped_ids.append(served_id)
+
+    if len(deduped_ids) == 1 and (os.path.isabs(text) or os.sep in text):
+        return deduped_ids[0]
 
     return text
 
@@ -768,20 +1478,11 @@ def normalize_model_provider_config(payload: Optional[Dict[str, Any]]) -> Dict[s
     merged = deep_merge_dict(DEFAULT_MODEL_PROVIDER_CONFIG, incoming)
     merged["providerType"] = (merged.get("providerType") or DEFAULT_PROVIDER_TYPE).strip() or DEFAULT_PROVIDER_TYPE
     merged["baseUrl"] = normalize_base_url(merged.get("baseUrl") or API_BASE)
-    raw_model = (merged.get("model") or MODEL_PATH).strip() or MODEL_PATH
-    merged["model"] = _resolve_local_mlx_model_name(raw_model, merged["baseUrl"])
+    merged["headers"] = _normalize_provider_headers(merged.get("headers") or {})
+    raw_model = _upgrade_legacy_default_local_mlx_model_name((merged.get("model") or MODEL_PATH).strip() or MODEL_PATH, merged["baseUrl"])
+    resolved_model = _resolve_local_mlx_model_name(raw_model, merged["baseUrl"])
+    merged["model"] = _resolve_local_served_model_name(resolved_model, merged["baseUrl"], merged["headers"])
     merged["apiKey"] = (merged.get("apiKey") or "").strip()
-    raw_headers = merged.get("headers") or {}
-    normalized_headers: Dict[str, str] = {}
-    if isinstance(raw_headers, dict):
-        for key, value in raw_headers.items():
-            if key is None or value is None:
-                continue
-            key_text = str(key).strip()
-            value_text = str(value).strip()
-            if key_text and value_text:
-                normalized_headers[key_text] = value_text
-    merged["headers"] = normalized_headers
     return merged
 
 
@@ -829,6 +1530,32 @@ def _build_streaming_answer_error(message: str) -> str:
         "1. 检查模型服务是否正常（例如本地 vLLM 端口 8000）。\n"
         "2. 若使用第三方模型，请检查 baseUrl、模型名与 API Key。\n"
         "3. 修复后重新发送同一问题继续分析。\n"
+        "</Answer>\n"
+    )
+
+
+def _build_missing_conclusion_answer(reason: str, analysis_language: str = "zh-CN") -> str:
+    safe_reason = (str(reason or "分析过程未能产出完整结论").strip() or "分析过程未能产出完整结论")[:1200]
+    if normalize_analysis_language(analysis_language) == "en":
+        return (
+            "<Answer>\n"
+            "A complete analytical conclusion is not yet supportable under the current execution state and available evidence.\n"
+            f"Current status note: {safe_reason}\n"
+            "Recommended next actions:\n"
+            "1. Narrow the analytical objective and key validation scope.\n"
+            "2. Verify provider availability, data-source connectivity, and query feasibility.\n"
+            "3. Resume the task after the blocking condition is cleared and the evidence chain is supplemented.\n"
+            "</Answer>\n"
+        )
+
+    return (
+        "<Answer>\n"
+        "根据当前执行状态与已取得材料，现阶段尚不具备形成完整分析结论的条件。\n"
+        f"情况说明：{safe_reason}\n"
+        "建议后续按以下方向继续推进：\n"
+        "1. 进一步聚焦分析对象、关键指标、时间范围与核查口径。\n"
+        "2. 核验模型服务、数据源连接状态及查询条件是否满足执行要求。\n"
+        "3. 补齐关键证据材料后，再行发起针对性复核分析。\n"
         "</Answer>\n"
     )
 
@@ -903,6 +1630,84 @@ def _create_chat_completion_with_retry(llm_client: openai.OpenAI, request_kwargs
             time_module.sleep(delay)
 
     raise RuntimeError("LLM request failed after retries")
+
+
+def _summarize_execution_output_for_prompt(execution_output: str) -> str:
+    text = str(execution_output or "").strip()
+    if not text:
+        return "(no execution output)"
+
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 180:
+        lines = lines[:130] + ["...(中间输出已省略)..."] + lines[-35:]
+    condensed = "\n".join(lines)
+    if len(condensed) <= EXECUTE_CONTEXT_MAX_CHARS:
+        return condensed
+
+    head_len = max(2000, EXECUTE_CONTEXT_MAX_CHARS // 2)
+    tail_len = max(1200, EXECUTE_CONTEXT_MAX_CHARS - head_len)
+    return (
+        condensed[:head_len]
+        + "\n...(执行输出已截断)...\n"
+        + condensed[-tail_len:]
+    )
+
+
+def _normalize_messages_for_llm_request(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    normalized: List[Dict[str, str]] = []
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user").strip().lower()
+        content_obj = item.get("content", "")
+        if isinstance(content_obj, str):
+            content = content_obj
+        else:
+            content = json.dumps(content_obj, ensure_ascii=False)
+
+        if role == "execute":
+            execution_summary = _summarize_execution_output_for_prompt(content)
+            normalized.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "上一轮代码执行结果如下，请继续推进分析并给出下一步动作：\n"
+                        "<Execute>\n"
+                        "```text\n"
+                        f"{execution_summary}\n"
+                        "```\n"
+                        "</Execute>"
+                    ),
+                }
+            )
+            continue
+
+        if role not in {"system", "user", "assistant"}:
+            role = "user"
+
+        normalized.append(
+            {
+                "role": role,
+                "content": content,
+            }
+        )
+
+    return normalized
+
+
+def _has_user_task_selection(messages: List[Dict[str, Any]]) -> bool:
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role != "user":
+            continue
+        content = str(item.get("content") or "")
+        lowered = content.lower()
+        for marker in INTERACTIVE_TASK_SELECTION_MARKERS:
+            if marker.lower() in lowered:
+                return True
+    return False
 
 
 def fetch_model_names(model_provider: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -1186,7 +1991,7 @@ def build_analysis_language_prompt(analysis_language: str) -> str:
             "\n\n**Output language override (highest priority): English**"
             "\n- This preference overrides default language rules in the base prompt."
             "\n- All user-facing narrative text must be in English, including `<Analyze>`, `<Understand>`, `<Answer>`, and report body text."
-            "\n- In interactive mode, task names/descriptions in `<TaskTree>` and all follow-up user guidance text must also be in English."
+            "\n- In interactive mode, task names/descriptions in `<TaskTree>` and any data-dictionary explanations must also be in English."
             "\n- Keep structural tags unchanged (`<Analyze>`, `<Code>`, `<TaskTree>`, etc.); only change natural-language content."
             "\n- Do not output Chinese characters in user-facing text. If any Chinese appears, rewrite it in English before continuing."
         )
@@ -1195,7 +2000,7 @@ def build_analysis_language_prompt(analysis_language: str) -> str:
         "\n\n**输出语言覆盖规则（最高优先级）：中文（简体）**"
         "\n- 本规则覆盖基础提示词中的默认语言描述。"
         "\n- 所有面向用户的自然语言内容必须使用简体中文，包括 `<Analyze>`、`<Understand>`、`<Answer>` 和最终报告正文。"
-        "\n- 在交互模式下，`<TaskTree>` 中任务名称/描述与后续引导文案也必须使用简体中文。"
+        "\n- 在交互模式下，`<TaskTree>` 任务名称/描述与数据字典相关说明也必须使用简体中文。"
         "\n- 结构化标签保持不变（如 `<Analyze>`、`<Code>`、`<TaskTree>` 等），仅改变自然语言内容。"
     )
 
@@ -1247,6 +2052,9 @@ _V1_REWRITE = {
     "/v1/config/models":          "/api/config/models",
     "/v1/config/databases":       "/api/config/databases",
     "/v1/config/knowledge":       "/api/config/knowledge",
+    "/v1/config/data-dictionary": "/api/config/data-dictionary",
+    "/v1/config/data-dictionary/import": "/api/config/data-dictionary/import",
+    "/v1/config/analysis-history": "/api/config/analysis-history",
     "/v1/config/export":          "/api/config/export",
     "/v1/knowledge/settings":     "/api/kb/settings",
     "/v1/knowledge/test":         "/api/kb/test",
@@ -1266,9 +2074,14 @@ _V1_REWRITE = {
     "/v1/projects/restore-files": "/api/projects/restore-files",
     "/v1/projects/restore-to-workspace": "/api/projects/restore-to-workspace",
     "/v1/database/test":          "/api/db/test",
+    "/v1/database/list":          "/api/db/list-databases",
+    "/v1/database/context/load":  "/api/db/context/load",
+    "/v1/database/schema/graph":  "/api/db/schema/graph",
     "/v1/database/generate-sql":  "/api/db/generate-sql",
     "/v1/database/execute":       "/api/db/execute",
+    "/v1/data/profile-report":     "/api/data/profile-report",
     "/v1/export/report":          "/export/report",
+    "/v1/analysis/history":       "/api/analysis/history",
     "/v1/chat/guidance":          "/api/chat/guidance",
     "/v1/code/execute":           "/execute",
 }
@@ -1276,6 +2089,7 @@ _V1_PREFIX_REWRITE = {
     "/v1/knowledge/yutu/":  "/api/yutu/",
     "/v1/projects/":        "/api/projects/",
     "/v1/files/":           "/workspace/",
+    "/v1/analysis/history/": "/api/analysis/history/",
 }
 
 
@@ -1444,6 +2258,9 @@ async def list_model_names(body: dict = Body(...)):
 # ---------- Side Guidance Storage ----------
 # session_id -> guidance_text
 SESSION_GUIDANCE = {}
+
+# session_id -> imported database context payload
+SESSION_DB_CONTEXT: Dict[str, Dict[str, Any]] = {}
 
 @app.post("/api/chat/guidance")
 async def set_guidance(session_id: str = Query(...), guidance: dict = Body(...)):
@@ -1973,6 +2790,94 @@ def build_tree(path: Path, root: Optional[Path] = None) -> dict:
     return node
 
 
+def _load_encoding_map_summary(workspace_dir: str) -> Dict[str, Any]:
+    """读取编码映射摘要文件，失败时返回空结构。"""
+    map_path = Path(workspace_dir) / ".encoding_map.json"
+    if not map_path.exists() or not map_path.is_file():
+        return {"files": []}
+
+    try:
+        with open(map_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            return {"files": []}
+        files = payload.get("files")
+        if not isinstance(files, list):
+            payload["files"] = []
+        return payload
+    except Exception:
+        return {"files": []}
+
+
+def _persist_encoding_map_entries(workspace_dir: str, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """持久化编码映射，并自动清理已不存在的原始文件映射。"""
+    workspace_root = Path(workspace_dir).resolve()
+    map_path = workspace_root / ".encoding_map.json"
+
+    normalized: Dict[str, Dict[str, Any]] = {}
+    for raw in entries:
+        if not isinstance(raw, dict):
+            continue
+
+        original_name = str(raw.get("original_name") or "").strip()
+        if not original_name:
+            continue
+
+        rel_path = str(raw.get("path") or original_name).strip().replace("\\", "/")
+        if not rel_path:
+            continue
+
+        try:
+            original_abs = (workspace_root / rel_path).resolve()
+        except Exception:
+            continue
+
+        if workspace_root not in original_abs.parents and original_abs != workspace_root:
+            continue
+        if not original_abs.exists() or not original_abs.is_file():
+            continue
+
+        converted_name = str(raw.get("converted_name") or original_name).strip() or original_name
+        original_encoding = str(raw.get("original_encoding") or "unknown").strip() or "unknown"
+        is_converted = bool(raw.get("is_converted"))
+
+        normalized[rel_path] = {
+            "original_name": original_name,
+            "converted_name": converted_name,
+            "original_encoding": original_encoding,
+            "is_converted": is_converted,
+            "path": rel_path,
+        }
+
+    final_entries = sorted(normalized.values(), key=lambda item: item.get("path", ""))
+    if not final_entries:
+        try:
+            map_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return {
+            "all_files_utf8": True,
+            "converted_count": 0,
+            "total_files": 0,
+            "files": [],
+        }
+
+    encoding_summary = {
+        "all_files_utf8": all(
+            str(item.get("original_encoding") or "").lower() in {"utf-8", "binary"}
+            for item in final_entries
+        ),
+        "converted_count": sum(1 for item in final_entries if bool(item.get("is_converted"))),
+        "total_files": len(final_entries),
+        "files": final_entries,
+    }
+
+    with open(map_path, "w", encoding="utf-8") as handle:
+        json.dump(encoding_summary, handle, indent=2, ensure_ascii=False)
+
+    return encoding_summary
+
+
 @app.get("/workspace/tree")
 async def workspace_tree(session_id: str = Query("default"), username: str = Query("default")):
     workspace_dir = get_session_workspace(session_id, username)
@@ -2008,9 +2913,73 @@ async def delete_workspace_file(
         raise HTTPException(status_code=404, detail="Not found")
     if target.is_dir():
         raise HTTPException(status_code=400, detail="Folder deletion not allowed")
+
+    rel_target = target.relative_to(abs_workspace).as_posix()
+    encoding_summary = _load_encoding_map_summary(workspace_dir)
+    encoding_entries = encoding_summary.get("files") if isinstance(encoding_summary, dict) else []
+    if not isinstance(encoding_entries, list):
+        encoding_entries = []
+
+    removed_converted_files: List[str] = []
+    should_sync_converted = (
+        target.parent == abs_workspace
+        and not rel_target.startswith("converted/")
+        and not target.name.startswith(".")
+    )
+
     try:
+        if should_sync_converted:
+            related_candidates = {(abs_workspace / "converted" / target.name).resolve()}
+            for entry in encoding_entries:
+                if not isinstance(entry, dict):
+                    continue
+                entry_original_name = str(entry.get("original_name") or "").strip()
+                entry_path = str(entry.get("path") or entry_original_name).strip().replace("\\", "/")
+                if entry_original_name == target.name or entry_path == rel_target:
+                    converted_name = str(entry.get("converted_name") or "").strip()
+                    if converted_name:
+                        related_candidates.add((abs_workspace / "converted" / converted_name).resolve())
+
+            for candidate in related_candidates:
+                if abs_workspace not in candidate.parents and candidate != abs_workspace:
+                    continue
+                if candidate.exists() and candidate.is_file():
+                    candidate.unlink()
+                    removed_converted_files.append(candidate.relative_to(abs_workspace).as_posix())
+
         target.unlink()
-        return {"message": "deleted"}
+
+        filtered_entries: List[Dict[str, Any]] = []
+        removed_converted_set = set(removed_converted_files)
+        removed_converted_names = {Path(path).name for path in removed_converted_files}
+        for entry in encoding_entries:
+            if not isinstance(entry, dict):
+                continue
+
+            entry_original_name = str(entry.get("original_name") or "").strip()
+            entry_path = str(entry.get("path") or entry_original_name).strip().replace("\\", "/")
+            entry_converted_name = str(entry.get("converted_name") or "").strip()
+
+            if entry_original_name == target.name or entry_path == rel_target:
+                continue
+            if rel_target.startswith("converted/") and entry_converted_name == Path(rel_target).name:
+                continue
+            if entry_converted_name and f"converted/{entry_converted_name}" in removed_converted_set:
+                continue
+            if entry_converted_name and entry_converted_name in removed_converted_names:
+                continue
+
+            filtered_entries.append(entry)
+
+        try:
+            _persist_encoding_map_entries(workspace_dir, filtered_entries)
+        except Exception as encoding_error:
+            print(f"[workspace/file] failed to update encoding map: {encoding_error}")
+
+        return {
+            "message": "deleted",
+            "removed_converted_files": removed_converted_files,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2190,21 +3159,10 @@ async def upload_files(
                 }
             )
 
-    # 生成编码状态汇总
-    all_utf8 = all(item["original_encoding"] == "utf-8" or item["original_encoding"] == "binary" for item in encoding_report)
-    converted_count = sum(1 for item in encoding_report if item["is_converted"])
-
-    encoding_summary = {
-        "all_files_utf8": all_utf8,
-        "converted_count": converted_count,
-        "total_files": len(encoding_report),
-        "files": encoding_report
-    }
-
-    # 保存编码映射文件，供智能体后续分析时读取
-    encoding_map_path = Path(workspace_dir) / ".encoding_map.json"
-    with open(encoding_map_path, "w", encoding="utf-8") as f:
-        json.dump(encoding_summary, f, indent=2, ensure_ascii=False)
+    existing_entries = _load_encoding_map_summary(workspace_dir).get("files", [])
+    if not isinstance(existing_entries, list):
+        existing_entries = []
+    encoding_summary = _persist_encoding_map_entries(workspace_dir, [*existing_entries, *encoding_report])
 
     return {
         "message": f"Successfully uploaded {len(uploaded_files)} files",
@@ -2255,6 +3213,7 @@ async def upload_to_dir(
                 "converted_name": utf8_dst.name if utf8_dst else dst.name,
                 "original_encoding": original_encoding,
                 "is_converted": (utf8_dst != dst) if utf8_dst else False,
+                "path": str(dst.relative_to(abs_workspace)),
             })
 
             saved.append(
@@ -2275,20 +3234,10 @@ async def upload_to_dir(
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Save failed: {e}")
 
-    all_utf8 = all(item["original_encoding"] == "utf-8" or item["original_encoding"] == "binary" for item in encoding_report)
-    converted_count = sum(1 for item in encoding_report if item["is_converted"])
-
-    encoding_summary = {
-        "all_files_utf8": all_utf8,
-        "converted_count": converted_count,
-        "total_files": len(encoding_report),
-        "files": encoding_report
-    }
-
-    # 保存编码映射文件，供智能体后续分析时读取
-    encoding_map_path = Path(workspace_dir) / ".encoding_map.json"
-    with open(encoding_map_path, "w", encoding="utf-8") as f:
-        json.dump(encoding_summary, f, indent=2, ensure_ascii=False)
+    existing_entries = _load_encoding_map_summary(workspace_dir).get("files", [])
+    if not isinstance(existing_entries, list):
+        existing_entries = []
+    encoding_summary = _persist_encoding_map_entries(workspace_dir, [*existing_entries, *encoding_report])
 
     return {"message": f"uploaded {len(saved)} files", "files": saved, "encoding_info": encoding_summary}
 
@@ -2359,7 +3308,7 @@ def fix_tags_and_codeblock(s: str) -> str:
     修复未闭合的tags，并确保</Code>后代码块闭合。
     """
     pattern = re.compile(
-        r"<(Analyze|Understand|Code|Execute|Answer|TaskTree)>(.*?)(?:</\1>|(?=$))", re.DOTALL
+        r"<(Analyze|Understand|Code|Execute|Answer|TaskTree|DataDictionary)>(.*?)(?:</\1>|(?=$))", re.DOTALL
     )
 
     # 找所有匹配
@@ -2425,6 +3374,7 @@ def get_system_prompt_with_fonts() -> str:
 - **避免重复**：禁止在分析过程中反复生成阶段性报告，确保用户在文件列表中只看到最终的、高质量的分析成果。
 - **上下文积累（极重要）**：在整个分析过程中，你必须在内存中持续积累所有已完成的分析成果、关键发现、数据统计结果和图表文件路径。每完成一个分析维度后，必须在 <Answer> 标签中完整记录该维度的**全部详细内容**（包括具体数据数值、百分比、排名、图表引用路径等），而非仅写标题或占位符。
 - **禁止空壳报告（极重要）**：生成最终报告时，报告内容**必须包含完整的分析结论、具体数据、推理过程和图表引用**。严禁生成仅包含报告结构框架而缺少实质内容的报告（如"[详细方法描述...]"、"[详细结果描述...]"这类占位文本）。如果某个章节的分析尚未完成，应明确标注"此部分尚未完成分析"而非使用占位符。
+- **结论强制原则（极重要）**：任何分析任务都必须以明确结论结束。即使用户需求暂时无法实现、条件不足、证据不足、目标不合理或执行失败，也必须在 `<Answer>` 中明确写出无法完整完成的原因、当前能确认的边界结论以及下一步建议。严禁无结论结束。
 - **报告不得包含水印、版权声明或数据安全说明**：生成的报告中不需要添加任何水印、版权声明、免责声明或数据安全说明文字。报告不需要以压缩包方式打包输出。
 
 **============================================
@@ -3090,6 +4040,79 @@ def get_system_prompt_with_fonts() -> str:
     return system_prompt_template.replace("{FONTS_DIR_PLACEHOLDER}", fonts_dir)
 
 
+def get_compact_system_prompt_with_fonts() -> str:
+    """更轻量的系统提示词，避免触发上下文长度上限。"""
+    try:
+        fonts_dir = str(get_fonts_dir())
+    except (NameError, ImportError):
+        fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/fonts")
+
+    return (
+        "你是 DeepAnalyze，负责中国海关风险分析与数据研判。"
+        "你的结论必须数据驱动、可解释、可复现，不得臆造字段或结论。\n\n"
+        "【输出协议】\n"
+        "1) 按需使用 <Analyze>/<Understand>/<Code>/<Execute>/<Answer>/<TaskTree> 标签。\n"
+        "2) 每轮应先说明思路，再执行可运行代码，再给结论。\n"
+        "3) 无论任务成功、证据不足、需求不合理、条件缺失或执行失败，最终都必须输出一个 <Answer> 结论块，说明可得结论或明确写出无法完成的理由。\n"
+        "4) 代码必须包含必要 import、异常处理，并打印关键中间结果。\n\n"
+        "【数据分析硬约束】\n"
+        "1) 首次代码必须先做数据探测：数据规模、字段名、字段类型、样例值。\n"
+        "2) 仅可使用真实字段；字段缺失时要明确说明并给替代分析方案。\n"
+        "3) 图表需有中文标题/坐标轴/图例，保存后给出文件路径。\n"
+        "4) 产出文件统一放在 generated 目录，并避免重复生成同类文件。\n\n"
+        "【报告交付】\n"
+        "1) 结果要体现 数据事实→推理→结论。\n"
+        "2) 最终报告按用户勾选格式交付（PDF/DOCX/PPTX）。\n"
+        "3) 禁止空壳报告；若某章节证据不足必须显式标注。\n"
+        "4) 即使本轮分析无法完整交付，也必须在最终 <Answer> 中明确写出失败或不可实现的理由。\n\n"
+        "【数据库知识使用】\n"
+        "1) 优先使用数据库知识库检索上下文，不要重复粘贴整库结构。\n"
+        "2) 若用户要求全库视角，先给摘要，再分层展开关键表字段。\n\n"
+        "【工具提示】\n"
+        "- 可优先使用 agent_utils.generate_report_pdf/docx/pptx。\n"
+        f"- 中文字体目录: {fonts_dir}"
+    )
+
+
+def build_brief_yutu_context(max_items: int = 3, max_chars: int = 1000) -> str:
+    """构建精简版雨途斩棘录上下文，避免无上限扩张。"""
+    try:
+        yutu_data = search_errors(page_size=max_items)
+    except Exception as e:
+        print(f"[雨途斩棘录] 启动注入失败: {e}")
+        return ""
+
+    items = yutu_data.get("items") or []
+    if not items:
+        return ""
+
+    lines = ["\n\n【雨途斩棘录摘要（近期可复用修复经验）】"]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        err_type = _shorten_text(item.get("error_type", "未知"), 40)
+        err_msg = _shorten_text(item.get("error_message", ""), 80)
+        solution = _shorten_text(item.get("solution", ""), 120)
+        lines.append(f"- {err_type}: {err_msg} -> {solution}")
+
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[: max_chars - 1] + "…"
+    return text
+
+
+def trim_text_for_budget(text: str, max_chars: int, tail_marker: str = "\n...(已按预算截断)") -> str:
+    if len(text) <= max_chars:
+        return text
+    safe_max = max(0, max_chars - len(tail_marker))
+    return text[:safe_max] + tail_marker
+
+
+def assemble_system_prompt(modules: List[str], max_chars: int = 5600) -> str:
+    prompt = "\n\n".join(part.strip() for part in modules if str(part or "").strip())
+    return trim_text_for_budget(prompt, max_chars=max_chars)
+
+
 def bot_stream(
     messages,
     workspace,
@@ -3101,6 +4124,8 @@ def bot_stream(
     report_types=None,
     model_provider=None,
     analysis_language="zh-CN",
+    selected_database_sources=None,
+    source_selection_explicit=False,
 ):
     analysis_language = normalize_analysis_language(analysis_language)
 
@@ -3145,7 +4170,8 @@ def bot_stream(
 **第一步：数据探索与数据字典建立**
 - 首先执行数据探测代码，获取所有数据文件的字段名、类型、缺失值、基本统计信息。
 - 建立「用户语义 → 数据字段」映射表。
-- 将数据探索结果整理为「数据字典」，向用户展示。
+- 将数据探索结果整理为「数据字典理解」，优先对齐知识库中已有的数据字典与字段定义。
+- 若关键表/字段语义存在歧义，先结合知识库定义给出当前假设并继续规划；将新增或修正的语义理解记录为后续知识库更新候选，不要中断等待确认。
 
 **第二步：分析规划与用户确认（强制步骤 - 不得跳过）**
 - 基于数据字典和用户的分析目标，设计有层次的分析计划。
@@ -3197,6 +4223,7 @@ def bot_stream(
                 "\n\n**Current mode: Interactive analysis (strictly required)**"
                 "\nYou must follow this workflow and do not skip steps:"
                 "\n1) Data exploration and data dictionary."
+                "\n- Align key table/field semantics with the knowledge-base data dictionary first. If uncertainty remains, state your current assumption and continue; record the new understanding for later knowledge-base update instead of waiting for confirmation."
                 "\n2) Planning and user confirmation. You MUST output the plan using `<TaskTree>`."
                 "\n- Inside `<TaskTree>`, output only one valid JSON object."
                 "\n- Do not repeat the task tree JSON outside `<TaskTree>`."
@@ -3235,70 +4262,322 @@ def bot_stream(
             "\n- 如果进入报告生成阶段，必须输出以上全部选定格式，不得只生成其中一部分。"
             "\n- 生成报告前请记住该要求，并在完成分析后产出对应成果文件。"
         )
+
+    def _normalize_runtime_db_source(item: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(item, dict):
+            return None
+        raw_type = item.get("dbType") or item.get("db_type")
+        try:
+            normalized_type = normalize_db_type(raw_type)
+        except Exception:
+            return None
+        raw_config = item.get("config")
+        if not isinstance(raw_config, dict):
+            return None
+        normalized_config = {
+            "host": str(raw_config.get("host", "")).strip(),
+            "port": str(raw_config.get("port", "")).strip(),
+            "user": str(raw_config.get("user", "")).strip(),
+            "password": str(raw_config.get("password", "")),
+            "database": str(raw_config.get("database", "")).strip(),
+        }
+        if not normalized_config["database"]:
+            return None
+        return {
+            "id": str(item.get("id", "")).strip(),
+            "label": str(item.get("label", "")).strip(),
+            "db_type": normalized_type,
+            "config": normalized_config,
+        }
+
+    normalized_selected_sources: List[Dict[str, Any]] = []
+    if isinstance(selected_database_sources, list):
+        for source_item in selected_database_sources:
+            normalized_item = _normalize_runtime_db_source(source_item)
+            if normalized_item:
+                normalized_selected_sources.append(normalized_item)
+
+    configured_sources: List[Dict[str, Any]] = []
+    try:
+        saved_db_config = _load_user_config(username, "database_connections.json", {"connections": []})
+        for conn_item in saved_db_config.get("connections", []):
+            normalized_item = _normalize_runtime_db_source(conn_item)
+            if normalized_item:
+                configured_sources.append(normalized_item)
+    except Exception:
+        configured_sources = []
+
+    active_sources = normalized_selected_sources
+
+    database_source_prompt = ""
+    database_data_context = ""
+    if active_sources:
+        source_lines = []
+        for idx, source in enumerate(active_sources, start=1):
+            cfg = source["config"]
+            if source["db_type"] == "sqlite":
+                source_lines.append(
+                    f"{idx}. type={source['db_type']}, database={cfg['database']}"
+                )
+            else:
+                source_lines.append(
+                    f"{idx}. type={source['db_type']}, host={cfg['host'] or 'localhost'}, "
+                    f"port={cfg['port'] or DB_DEFAULT_PORTS.get(source['db_type'], '')}, "
+                    f"database={cfg['database']}, user={cfg['user']}, password={cfg['password']}"
+                )
+
+        if analysis_language == "en":
+            database_source_prompt = (
+                "\n\n**Connected database sources (use as primary analysis data source)**:"
+                f"\n{chr(10).join(source_lines)}"
+                "\n- Start from these connected databases directly. Do not wait for file uploads when they are available."
+                "\n- Use these credentials exactly as provided by the user configuration; do not fabricate or hardcode credentials."
+            )
+            database_data_context = (
+                "Connected database sources for this run:\n"
+                f"{chr(10).join(source_lines)}\n"
+                "Use these sources as the default analysis target."
+            )
+        else:
+            database_source_prompt = (
+                "\n\n**已连接数据库数据源（请优先作为本轮分析对象）**："
+                f"\n{chr(10).join(source_lines)}"
+                "\n- 当存在上述连接时，直接从数据库开始分析，不必等待用户上传文件。"
+                "\n- 连接参数必须严格使用用户配置值，不得臆造或硬编码。"
+            )
+            database_data_context = (
+                "本轮已选择数据库数据源：\n"
+                f"{chr(10).join(source_lines)}\n"
+                "请以这些数据库作为默认分析对象。"
+            )
+    elif configured_sources and len(configured_sources) > 1 and not source_selection_explicit:
+        if analysis_language == "en":
+            database_source_prompt = (
+                "\n\nUser has configured multiple database sources, but no explicit selection was provided in this round. "
+                "If no files are available, ask for source selection before deep analysis."
+            )
+        else:
+            database_source_prompt = (
+                "\n\n用户已配置多个数据库数据源，但本轮尚未明确选择。"
+                "若当前无文件数据，请先要求用户选择至少一个数据库数据源后再深入分析。"
+            )
+
+    loaded_db_context = SESSION_DB_CONTEXT.get(session_id, {})
+    loaded_db_source = str(loaded_db_context.get("source_label", "") or "").strip()
+    loaded_db_table_count = int(loaded_db_context.get("table_count", 0) or 0)
+    loaded_db_column_count = int(loaded_db_context.get("column_count", 0) or 0)
+    loaded_db_snapshot_file = str(loaded_db_context.get("snapshot_file", "") or "").strip()
+
+    preferred_source_labels: List[str] = [
+        str(item.get("label", "") or "").strip()
+        for item in active_sources
+        if str(item.get("label", "") or "").strip()
+    ]
+
+    analysis_history_settings = _load_analysis_history_settings(username)
+    history_recorder = AnalysisHistoryRecorder(
+        username=username,
+        session_id=session_id,
+        settings=analysis_history_settings,
+        request_summary={
+            "strategy": strategy,
+            "analysis_mode": analysis_mode,
+            "analysis_language": analysis_language,
+            "report_types": requested_report_types,
+            "incoming_message_count": len(messages or []),
+            "workspace_reference_count": len(workspace or []),
+            "active_database_sources": [
+                _sanitize_runtime_db_source_for_history(item)
+                for item in active_sources
+            ],
+            "source_selection_explicit": bool(source_selection_explicit),
+            "loaded_db_context": {
+                "source_label": loaded_db_source,
+                "table_count": loaded_db_table_count,
+                "column_count": loaded_db_column_count,
+                "snapshot_file": loaded_db_snapshot_file,
+            },
+            "model_provider": _sanitize_model_provider_for_history(model_provider),
+        },
+    )
+
+    if active_sources and loaded_db_source:
+        if analysis_language == "en":
+            database_source_prompt += (
+                "\n\n**Session DB context loaded**: "
+                f"{loaded_db_source} (tables={loaded_db_table_count}, columns={loaded_db_column_count})."
+                f" Snapshot file: {loaded_db_snapshot_file or 'N/A'}."
+            )
+        else:
+            database_source_prompt += (
+                "\n\n**已加载会话数据库上下文**："
+                f"{loaded_db_source}（表{loaded_db_table_count}张，字段{loaded_db_column_count}个）。"
+                f" 快照文件：{loaded_db_snapshot_file or '无'}。"
+            )
+
+    latest_user_query = ""
+    for msg in reversed(messages or []):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            latest_user_query = str(msg.get("content", "") or "")
+            break
+
+    database_context_started_ts = None
+    if active_sources:
+        database_context_started_ts = time_module.time()
+        history_recorder.log(
+            stage="database",
+            event="database_context_started",
+            status="running",
+            message="database runtime context assembly started",
+            details={
+                "selected_source_count": len(active_sources),
+                "loaded_context_source": loaded_db_source,
+                "loaded_table_count": loaded_db_table_count,
+                "loaded_column_count": loaded_db_column_count,
+                "snapshot_file": loaded_db_snapshot_file,
+            },
+        )
+
+    db_kb_context = ""
+    data_dictionary_context = ""
+    if active_sources:
+        db_kb_context = build_database_knowledge_context(
+            username=username,
+            user_query=latest_user_query,
+            preferred_source_labels=preferred_source_labels,
+            analysis_language=analysis_language,
+        )
+        if db_kb_context:
+            database_data_context = (
+                f"{database_data_context}\n\n" if database_data_context else ""
+            ) + db_kb_context
+        data_dictionary_context = build_confirmed_data_dictionary_context(
+            username=username,
+            user_query=latest_user_query,
+            preferred_source_labels=preferred_source_labels,
+            analysis_language=analysis_language,
+        )
+        if data_dictionary_context:
+            database_data_context = (
+                f"{database_data_context}\n\n" if database_data_context else ""
+            ) + data_dictionary_context
+    if database_data_context:
+        database_data_context = trim_text_for_budget(database_data_context, max_chars=2800)
+    if database_context_started_ts is not None:
+        history_recorder.log(
+            stage="database",
+            event="database_context_prepared",
+            status="running",
+            message="database runtime context prepared",
+            details={
+                "selected_source_count": len(active_sources),
+                "loaded_context_source": loaded_db_source,
+                "loaded_table_count": loaded_db_table_count,
+                "loaded_column_count": loaded_db_column_count,
+                "context_chars": len(database_data_context or ""),
+                "has_knowledge_context": bool(db_kb_context),
+                "has_data_dictionary_context": bool(data_dictionary_context),
+                "duration_ms": int((time_module.time() - database_context_started_ts) * 1000),
+            },
+        )
+
     language_prompt = build_analysis_language_prompt(analysis_language)
+    runtime_language_prompt = (
+        "\n\n**Executable runtime capabilities**:"
+        "\n- Python: use `<Code>```python ...```</Code>` for local data processing, modeling, visualization, and report generation."
+        "\n- SQL: use `<Code>```sql ...```</Code>` for read-only database extraction. Only SELECT/WITH/EXPLAIN statements are allowed; results are materialized automatically under `workspace/generated/` for later Python/R analysis."
+        "\n- R: use `<Code>```r ...```</Code>` for statistical tests, time series, and modeling when R packages are suitable."
+        if analysis_language == "en"
+        else "\n\n**可执行运行时能力**："
+        "\n- Python：使用 `<Code>```python ...```</Code>` 做本地数据处理、建模、可视化和报告生成。"
+        "\n- SQL：使用 `<Code>```sql ...```</Code>` 做只读数据库取数；仅允许 SELECT/WITH/EXPLAIN，查询结果会自动物化到 `workspace/generated/` 供后续 Python/R 分析读取。"
+        "\n- R：使用 `<Code>```r ...```</Code>` 做统计检验、时间序列和适合 R 包的建模任务。"
+    )
+    sql_first_prompt = ""
+    if active_sources:
+        sql_first_prompt = (
+            "\n\n**SQL-first extraction rule for connected databases**:"
+            "\n- For non-trivial database analysis, do not start by scanning large tables from Python/R. Start with an extraction plan."
+            "\n- First identify required entities, grains, metrics, filters, join paths, and expected output tables/files."
+            "\n- Then execute one or more read-only SQL blocks to build smaller materialized extracts, cubes, samples, object lists, or candidate-risk sets."
+            "\n- Use Python/R only after SQL has reduced the data to a manageable analytical dataset."
+            "\n- Prefer multiple targeted SQL blocks over one huge query; each block should state its purpose in `<Analyze>` before execution."
+            if analysis_language == "en"
+            else "\n\n**已连接数据库的 SQL-first 取数规则**："
+            "\n- 面对非平凡数据库分析任务时，不要一开始就用 Python/R 扫描大表；必须先制定取数计划。"
+            "\n- 先识别分析所需主体、粒度、指标、过滤条件、Join 路径和预期输出数据集。"
+            "\n- 然后用一段或多段只读 SQL 构建更小的物化取数结果、汇总立方体、样本、对象清单或风险候选集。"
+            "\n- 只有在 SQL 已经把数据压缩为可承载的分析数据集之后，再使用 Python/R 做深度分析、统计建模和可视化。"
+            "\n- 优先使用多段有明确目的的小 SQL，而不是一条巨大 SQL；每段 SQL 执行前应在 `<Analyze>` 中说明目的。"
+        )
+    data_dictionary_prompt = (
+        "\n\n**Use knowledge-base data dictionary understanding before deep analysis**:"
+        "\n- Before large-scale extraction/modeling, infer business meaning of key tables/fields from schema names, sample values, join relationships, and any pre-uploaded data dictionary definitions in the knowledge base."
+        "\n- Treat user-reviewed `ai_understanding` definitions in the knowledge base as the current source of truth."
+        "\n- If you infer a better semantic explanation during analysis, continue with that assumption and phrase it explicitly in `<Analyze>` or `<Answer>` when relevant; do not stop for confirmation."
+        "\n- Do not output `<DataDictionary>` blocks, do not ask the user to confirm field semantics in a popup, and do not interrupt analysis for dictionary confirmation."
+        if analysis_language == "en"
+        else "\n\n**深度分析前优先使用知识库中的数据字典理解**："
+        "\n- 在大规模取数或建模前，先结合表名、字段名、样例值、表间关联路径，以及知识库中预上传的数据字典定义来判断关键字段的业务含义。"
+        "\n- 对于知识库中用户已审阅保存的 `ai_understanding` 字段定义，默认视为当前语义真值。"
+        "\n- 若分析过程中推断出更好的语义解释，可在 `<Analyze>` 或 `<Answer>` 中明确说明当前采用的假设，并继续分析；不要中断等待确认。"
+        "\n- 不要输出 `<DataDictionary>` 标签块，不要要求用户通过弹窗确认字段语义，也不要因为数据字典确认而打断分析流程。"
+    )
     signature_safety_prompt = (
-        "\n\n**函数与方法调用安全规则（必须遵守）**："
-        "\n- 定义自定义函数后，调用时必须逐一核对参数数量、参数名称、默认值和返回值。"
-        "\n- 遇到 pandas、matplotlib、reportlab、docx、pptx 等库方法时，必须按当前版本支持的签名调用，不得臆造参数。"
-        "\n- 执行前先自查一遍：是否存在 missing positional argument、unexpected keyword argument、takes N positional arguments 等风险。"
-        "\n- 如需复用辅助函数，先统一函数定义，再统一所有调用点，避免同名函数签名不一致。"
+        "\n\n**函数调用安全（必须遵守）**："
+        "\n- 先核对函数签名与参数，再执行。"
+        "\n- 对第三方库仅使用已支持参数，避免臆造 keyword。"
+        "\n- 复用函数时确保定义与调用一致。"
     )
     methodology_integration_prompt = (
-        "\n\n**AI数据分析师方法论增强层（新增注入，不替代你已有的方法与规则）**："
-        "\n你必须将以下方法论与现有分析流程高度融合、贯穿执行全过程："
-        "\n1) CRISP-DM 改进框架：业务理解→数据理解→数据准备→建模分析→评估验证→部署应用。"
-        "\n2) 迭代循环：探索→假设→验证→优化→报告，并根据反馈进入下一轮循环。"
-        "\n3) 分析哲学：数据驱动决策、假设驱动探索、多维交叉验证、可解释性优先、实用价值导向。"
-        "\n4) 质量原则：完整性、一致性、准确性、时效性检查为刚性步骤。"
-        "\n5) 分析视角：时间、空间/区域、用户/对象、业务指标四类视角应按需组合使用。"
-        "\n6) 分析深度：浅层（快速洞察）→中层（交叉探索）→深层（预测/归因/优化）渐进推进。"
-        "\n7) 工具策略：SQL优先、可视化驱动、分析过程文档化与可复现。"
-        "\n\n**每一轮输出的执行约束（必须遵守）**："
-        "\n- 每个 `<Analyze>` 必须明确写出：当前CRISP-DM阶段、当前迭代环节、核心假设、验证与交叉验证计划、质量检查点、业务价值。"
-        "\n- 每个 `<Code>` 必须对应可验证的分析动作，不得跳过关键质量检查与验证环节。"
-        "\n- 在 `<Answer>` 中必须包含：关键洞察、可解释依据、业务建议优先级、后续行动计划。"
-        "\n- 若因数据限制无法执行某阶段，必须显式说明影响、替代方案与风险。"
-        "\n\n**工作流程融合要求**："
-        "\n- 标准作业流程按 准备(20%)→执行(50%)→交付(30%) 推进。"
-        "\n- 使用敏捷模式：快速原型→反馈调整→深度扩展→最终交付。"
-        "\n- 每次分析结束后进行简短复盘，说明方法是否有效、下一轮如何优化。"
+        "\n\n**方法执行要求（简版）**："
+        "\n- 遵循 数据理解→假设→验证→结论→交付 的闭环。"
+        "\n- `<Analyze>` 说明当前假设与验证计划；`<Code>` 执行可验证动作；`<Answer>` 给出可解释结论。"
+        "\n- 证据不足时必须明确标注并提出补充数据建议。"
+    )
+    report_architect_skill_prompt = (
+        "\n\n**Report architect skill (must apply before delivering files)**:"
+        "\n- Before generating PDF/DOCX/PPTX, first organize the report into a clear Markdown hierarchy with headings and subheadings."
+        "\n- Use a stable narrative flow: overview and scope -> core findings -> evidence and charts -> risk interpretation -> recommendations and next steps."
+        "\n- Every major section must begin with one summary sentence, then present evidence, then explain impact; avoid dumping long unstructured paragraphs."
+        "\n- Charts must appear immediately after the paragraph they support rather than being grouped at the end."
+        "\n- If the current analysis output is fragmented, rewrite it into a polished report structure before calling report export helpers."
+        if analysis_language == "en"
+        else "\n\n**高级报告编排技能（生成报告前必须应用）**："
+        "\n- 在生成 PDF、DOCX、PPTX 前，先把报告整理成具有明确标题层级的 Markdown 结构。"
+        "\n- 报告叙事顺序固定为：分析概览与范围 → 核心发现 → 证据与图表 → 风险研判 → 建议与下一步。"
+        "\n- 每个主要章节先给一句总述，再展开证据，再解释影响；禁止堆砌没有层次的大段文字。"
+        "\n- 图表必须紧跟其所支撑的结论段落，不得集中堆在报告末尾。"
+        "\n- 如果当前分析输出零散，必须先整理成成稿式报告结构，再调用报告导出工具。"
     )
 
-    # 使用动态生成的 system prompt（已包含完整内容）
-    system_prompt = get_system_prompt_with_fonts()
-
-    # 获取雨途斩棘录最近的错误记录并注入
-    try:
-        yutu_data = search_errors(page_size=20)
-        if yutu_data.get("items"):
-            yutu_context = "\n\n**雨途斩棘录 - 历史错误及解决方案知识库（启动必读）**：\n"
-            for item in yutu_data["items"]:
-                yutu_context += f"- 错误类型: {item['error_type']}\n"
-                yutu_context += f"  错误消息: {item['error_message']}\n"
-                yutu_context += f"  解决方案: {item['solution']}\n"
-                if item.get('solution_code'):
-                    yutu_context += f"  参考代码: {item['solution_code']}\n"
-                yutu_context += "---\n"
-            system_prompt += yutu_context
-    except Exception as e:
-        print(f"[雨途斩棘录] 启动注入失败: {e}")
-
-    # Append strategy, mode, temperature, and report type prompts
-    system_prompt += selected_strategy_prompt
-    system_prompt += selected_mode_prompt
-    system_prompt += temp_hint
-    system_prompt += report_types_prompt
-    system_prompt += signature_safety_prompt
-    system_prompt += methodology_integration_prompt
-    system_prompt += report_prompt
-    system_prompt += language_prompt
+    system_prompt = assemble_system_prompt(
+        modules=[
+            get_compact_system_prompt_with_fonts(),
+            build_brief_yutu_context(max_items=3, max_chars=900),
+            selected_strategy_prompt,
+            selected_mode_prompt,
+            temp_hint,
+            report_types_prompt,
+            signature_safety_prompt,
+            methodology_integration_prompt,
+            report_architect_skill_prompt,
+            report_prompt,
+            database_source_prompt,
+            runtime_language_prompt,
+            sql_first_prompt,
+            data_dictionary_prompt,
+            language_prompt,
+        ],
+        max_chars=5600,
+    )
 
     language_enforcer_prompt = (
         "CRITICAL OUTPUT RULE: Respond in English only for all user-facing narrative text. "
-        "Do not output Chinese characters in Analyze/Understand/Answer/TaskTree/report text. "
+        "Do not output Chinese characters in Analyze/Understand/Answer/TaskTree/DataDictionary/report text. "
         "Keep structural tags unchanged."
         if analysis_language == "en"
-        else "关键输出规则：所有面向用户的自然语言文本必须使用简体中文（包括 Analyze/Understand/Answer/TaskTree/报告正文）。结构化标签保持不变。"
+        else "关键输出规则：所有面向用户的自然语言文本必须使用简体中文（包括 Analyze/Understand/Answer/TaskTree/DataDictionary/报告正文）。结构化标签保持不变。"
     )
 
     # Check if system prompt is already there, if not, insert it
@@ -3314,9 +4593,40 @@ def bot_stream(
     # 创建 generated 子文件夹用于存放代码生成的文件
     GENERATED_DIR = os.path.join(WORKSPACE_DIR, "generated")
     os.makedirs(GENERATED_DIR, exist_ok=True)
+    # 记录本轮开始前已有的报告文件，便于判断当前轮是否真正产出新报告
+    preexisting_report_files: Dict[str, set[str]] = {
+        "pdf": set(),
+        "docx": set(),
+        "pptx": set(),
+    }
+    try:
+        generated_dir_path = Path(GENERATED_DIR)
+        for existing in generated_dir_path.iterdir():
+            if not existing.is_file():
+                continue
+            ext = existing.suffix.lower().lstrip(".")
+            if ext in preexisting_report_files:
+                preexisting_report_files[ext].add(existing.name)
+    except Exception:
+        pass
     # 创建 converted 子文件夹用于存放 UTF-8 转换后的文件
     CONVERTED_DIR = os.path.join(WORKSPACE_DIR, "converted")
     os.makedirs(CONVERTED_DIR, exist_ok=True)
+    history_recorder.log(
+        stage="prompt",
+        event="prompt_prepared",
+        status="running",
+        message="system prompt assembled",
+        details={
+            "system_prompt_chars": len(system_prompt or ""),
+            "language_enforcer_chars": len(language_enforcer_prompt or ""),
+            "database_context_chars": len(database_data_context or ""),
+            "database_source_prompt_chars": len(database_source_prompt or ""),
+            "system_prompt_preview": _truncate_history_text(system_prompt, 1200)
+            if analysis_history_settings.get("capture_prompt_preview", True)
+            else "",
+        },
+    )
     # print(messages)
     if messages and messages[0]["role"] == "assistant":
         messages = messages[1:]
@@ -3329,11 +4639,32 @@ def bot_stream(
         # 总是使用当前 session 的 WORKSPACE_DIR 获取文件信息
         file_info = collect_file_info(WORKSPACE_DIR)
         if file_info:
+            file_info = trim_text_for_budget(file_info, max_chars=2200)
+        data_sections: List[str] = []
+        if file_info:
+            data_sections.append(file_info)
+        if database_data_context:
+            data_sections.append(database_data_context)
+
+        if data_sections:
+            merged_data_sections = trim_text_for_budget("\n\n".join(data_sections), max_chars=3800)
             messages[-1][
                 "content"
-            ] = f"# Instruction\n{user_message}\n\n# Data\n{file_info}"
+            ] = f"# Instruction\n{user_message}\n\n# Data\n{merged_data_sections}"
         else:
             messages[-1]["content"] = f"# Instruction\n{user_message}"
+        history_recorder.log(
+            stage="prompt",
+            event="user_message_prepared",
+            status="running",
+            message="user instruction merged with runtime data context",
+            details={
+                "user_message_preview": _truncate_history_text(user_message, 600),
+                "file_info_chars": len(file_info or ""),
+                "merged_data_chars": len((messages[-1].get("content") or "")),
+                "has_database_context": bool(database_data_context),
+            },
+        )
     # print("111",messages)
     initial_workspace = set(workspace)
     assistant_reply = ""
@@ -3341,8 +4672,22 @@ def bot_stream(
     exe_output = None
     llm_client, llm_model, runtime_provider = get_runtime_llm(model_provider)
     round_count = 0
+    consecutive_empty_llm_rounds = 0
+    history_final_status = "completed"
+    history_final_message = "analysis session finished"
     while not finished and round_count < MAX_AGENT_ROUNDS:
         round_count += 1
+        history_recorder.log(
+            stage="round",
+            event="round_started",
+            status="running",
+            message=f"analysis round {round_count} started",
+            details={
+                "round": round_count,
+                "message_count": len(messages),
+                "workspace_dir": WORKSPACE_DIR,
+            },
+        )
         # 在每次 LLM 生成前，检查是否有用户提交的“过程指导/Side Task”
         guidance = SESSION_GUIDANCE.pop(session_id, None)
         if guidance:
@@ -3352,21 +4697,39 @@ def bot_stream(
             }
             messages.append(guidance_msg)
             print(f"[Side Guidance] Injecting guidance into session {session_id}")
+            history_recorder.log(
+                stage="guidance",
+                event="guidance_injected",
+                status="running",
+                message="side guidance injected into current round",
+                details={
+                    "round": round_count,
+                    "guidance_preview": _truncate_history_text(guidance, 500),
+                },
+            )
 
-        request_kwargs: Dict[str, Any] = {
-            "model": llm_model,
-            "messages": messages,
-            "temperature": effective_temperature,
-            "stream": True,
-            "stop": [
-                "</Code>",
-                "</code>",
-                "</TaskTree>",
-                "</tasktree>",
+        request_messages = _normalize_messages_for_llm_request(messages)
+        stop_sequences = [
+            "</Code>",
+            "</code>",
+            "</TaskTree>",
+            "</tasktree>",
+            "</DataDictionary>",
+            "</datadictionary>",
+        ]
+        if _provider_supports_vllm_controls(runtime_provider):
+            stop_sequences.extend([
                 "</s>",
                 "<|endoftext|>",
                 "<|im_end|>",
-            ],
+            ])
+
+        request_kwargs: Dict[str, Any] = {
+            "model": llm_model,
+            "messages": request_messages,
+            "temperature": effective_temperature,
+            "stream": True,
+            "stop": stop_sequences,
         }
         if _provider_supports_vllm_controls(runtime_provider):
             request_kwargs["extra_body"] = {
@@ -3374,9 +4737,34 @@ def bot_stream(
                 "max_new_tokens": 32768,
             }
 
+        history_recorder.log(
+            stage="llm",
+            event="llm_request_started",
+            status="running",
+            message=f"llm request started for round {round_count}",
+            details={
+                "round": round_count,
+                "provider": runtime_provider,
+                "model": llm_model,
+                "message_count": len(request_messages),
+                "raw_message_count": len(messages),
+                "temperature": effective_temperature,
+                "has_extra_body": "extra_body" in request_kwargs,
+            },
+        )
+
         try:
             response = _create_chat_completion_with_retry(llm_client, request_kwargs)
         except Exception as create_exc:
+            history_final_status = "failed"
+            history_final_message = f"llm request failed: {create_exc}"
+            history_recorder.log(
+                stage="llm",
+                event="llm_request_failed",
+                status="failed",
+                message=history_final_message,
+                details={"round": round_count},
+            )
             error_block = _build_streaming_answer_error(str(create_exc))
             assistant_reply += error_block
             yield error_block
@@ -3384,26 +4772,140 @@ def bot_stream(
 
         cur_res = ""
         last_finish_reason = None
+        saw_final_answer_this_round = False
+        stream_chunk_count = 0
+        stream_char_count = 0
+        next_chunk_progress = int(analysis_history_settings.get("stream_progress_chunk_interval", 40))
+        next_char_progress = int(analysis_history_settings.get("stream_progress_char_interval", 1600))
         for chunk in response:
             if chunk.choices:
                 choice = chunk.choices[0]
                 last_finish_reason = choice.finish_reason
                 if choice.delta.content is not None:
                     delta = choice.delta.content
+                    if delta == "":
+                        continue
                     cur_res += delta
                     assistant_reply += delta
+                    stream_chunk_count += 1
+                    stream_char_count += len(delta)
+                    if analysis_history_settings.get("capture_stream_progress", True) and (
+                        stream_chunk_count >= next_chunk_progress or stream_char_count >= next_char_progress
+                    ):
+                        history_recorder.log(
+                            stage="llm",
+                            event="llm_stream_progress",
+                            status="running",
+                            message=f"round {round_count} streamed {stream_char_count} chars",
+                            details={
+                                "round": round_count,
+                                "chunk_count": stream_chunk_count,
+                                "char_count": stream_char_count,
+                            },
+                        )
+                        next_chunk_progress += int(analysis_history_settings.get("stream_progress_chunk_interval", 40))
+                        next_char_progress += int(analysis_history_settings.get("stream_progress_char_interval", 1600))
                     yield delta
 
             if re.search(r"</answer>", cur_res, re.IGNORECASE):
-                finished = True
+                saw_final_answer_this_round = True
                 break
             # ---- TaskTree 检测（流式中途发现完整闭合标签） ----
             if re.search(r"</tasktree>", cur_res, re.IGNORECASE):
                 messages.append({"role": "assistant", "content": cur_res})
                 finished = True
                 break
+            # ---- DataDictionary 检测（流式中途发现完整闭合标签） ----
+            if re.search(r"</datadictionary>", cur_res, re.IGNORECASE):
+                messages.append({"role": "assistant", "content": cur_res})
+                finished = True
+                break
+        llm_has_tasktree = bool(re.search(r"<tasktree>", cur_res, re.IGNORECASE))
+        llm_has_datadictionary = bool(re.search(r"<datadictionary>", cur_res, re.IGNORECASE))
+        llm_has_code = bool(re.search(r"<code>|```", cur_res, re.IGNORECASE))
+        llm_has_visible_output = bool(cur_res.strip())
+        history_recorder.log(
+            stage="llm",
+            event="llm_response_completed",
+            status="running",
+            message=f"llm response completed for round {round_count}",
+            details={
+                "round": round_count,
+                "finish_reason": last_finish_reason,
+                "chunk_count": stream_chunk_count,
+                "char_count": stream_char_count,
+                "saw_final_answer": saw_final_answer_this_round,
+                "has_tasktree": llm_has_tasktree,
+                "has_datadictionary": llm_has_datadictionary,
+                "has_code": llm_has_code,
+                "has_visible_output": llm_has_visible_output,
+            },
+        )
+
+        empty_llm_round = (
+            last_finish_reason == "stop"
+            and not saw_final_answer_this_round
+            and not llm_has_tasktree
+            and not llm_has_datadictionary
+            and not llm_has_code
+            and not llm_has_visible_output
+        )
+        if empty_llm_round:
+            consecutive_empty_llm_rounds += 1
+            abort_due_to_empty_rounds = consecutive_empty_llm_rounds >= MAX_EMPTY_LLM_ROUNDS
+            history_recorder.log(
+                stage="llm",
+                event="llm_empty_round_detected",
+                status="warning" if abort_due_to_empty_rounds else "running",
+                message=(
+                    f"analysis stopped after {consecutive_empty_llm_rounds} consecutive empty llm rounds"
+                    if abort_due_to_empty_rounds
+                    else f"round {round_count} produced no visible llm output"
+                ),
+                details={
+                    "round": round_count,
+                    "consecutive_empty_rounds": consecutive_empty_llm_rounds,
+                    "finish_reason": last_finish_reason,
+                    "chunk_count": stream_chunk_count,
+                },
+            )
+            if abort_due_to_empty_rounds:
+                history_final_status = "warning"
+                history_final_message = f"analysis stopped after {consecutive_empty_llm_rounds} consecutive empty llm rounds"
+                empty_round_block = (
+                    "<Answer>\n"
+                    "模型连续返回空响应，当前分析已自动停止，避免继续空转。\n"
+                    "建议切换模型或 provider、缩小分析范围，或先执行更小粒度的 SQL/数据探查后再继续。\n"
+                    "</Answer>\n"
+                )
+                assistant_reply += empty_round_block
+                yield empty_round_block
+                finished = True
+                continue
+            recovery_prompt = (
+                "上一轮模型返回了空响应。请继续推进分析，不要停在空输出。\n"
+                "要求：\n"
+                "1. 若处于 interactive 模式且尚未给出任务清单，请先输出 <TaskTree>。\n"
+                "2. 若已收到用户任务选择，请继续输出下一步 <Analyze>/<Code> 或直接给出 <Answer>。\n"
+                "3. 禁止返回空内容。"
+            )
+            messages.append({"role": "user", "content": recovery_prompt})
+            history_recorder.log(
+                stage="llm",
+                event="llm_empty_round_recovery_prompt_injected",
+                status="running",
+                message="empty llm round recovery prompt injected",
+                details={
+                    "round": round_count,
+                    "consecutive_empty_rounds": consecutive_empty_llm_rounds,
+                },
+            )
+            continue
+        else:
+            consecutive_empty_llm_rounds = 0
+
         if finished:
-            # 已因 </Answer> 或 </TaskTree> 结束，跳过后续代码执行逻辑
+            # 已因 </Answer> / </TaskTree> / </DataDictionary> 结束，跳过后续代码执行逻辑
             continue
 
         # ---- TaskTree 检测（stop sequence 截断时，LLM 输出了 <TaskTree> 但未闭合） ----
@@ -3416,13 +4918,39 @@ def bot_stream(
             assistant_reply += closing_tag
             yield closing_tag
             messages.append({"role": "assistant", "content": cur_res})
+            history_recorder.log(
+                stage="planner",
+                event="tasktree_completed",
+                status="running",
+                message="task tree output was auto-closed after stop sequence",
+                details={"round": round_count},
+            )
+            finished = True
+            continue
+
+        has_dictionary_open = re.search(r"<datadictionary>", cur_res, re.IGNORECASE) is not None
+        has_dictionary_close = re.search(r"</datadictionary>", cur_res, re.IGNORECASE) is not None
+        if has_dictionary_open and not has_dictionary_close:
+            closing_tag = "</DataDictionary>"
+            cur_res += closing_tag
+            assistant_reply += closing_tag
+            yield closing_tag
+            messages.append({"role": "assistant", "content": cur_res})
+            history_recorder.log(
+                stage="planner",
+                event="data_dictionary_completed",
+                status="running",
+                message="data dictionary output was auto-closed after stop sequence",
+                details={"round": round_count},
+            )
             finished = True
             continue
 
         has_code_open = re.search(r"<code>", cur_res, re.IGNORECASE) is not None
         has_code_close = re.search(r"</code>", cur_res, re.IGNORECASE) is not None
+        has_fenced_code = re.search(r"```\s*(?:python|py|sql|postgresql|mysql|sqlite|mssql|oracle|r|rscript)?\s*\n.*?```", cur_res, re.DOTALL | re.IGNORECASE) is not None
 
-        if last_finish_reason == "stop" and not finished and has_code_open and not has_code_close:
+        if last_finish_reason == "stop" and has_code_open and not has_code_close:
             if not re.search(r"</code>\s*$", cur_res, re.IGNORECASE):
                 missing_tag = "</Code>"
                 cur_res += missing_tag
@@ -3430,146 +4958,252 @@ def bot_stream(
                 yield missing_tag
             has_code_close = True
 
-        if has_code_open and has_code_close and not finished:
-            messages.append({"role": "assistant", "content": cur_res})
-            code_match = re.search(r"<code>(.*?)</code>", cur_res, re.DOTALL | re.IGNORECASE)
-            code_str = None
-            if code_match:
-                code_content = (code_match.group(1) or "").strip()
-                md_match = re.search(r"```(?:python)?(.*?)```", code_content, re.DOTALL | re.IGNORECASE)
-                code_str = md_match.group(1).strip() if md_match else code_content
-            else:
-                # 对通用模型兜底：即使没用 <Code> 标签，也尝试提取 fenced code
-                md_match = re.search(r"```(?:python)?(.*?)```", cur_res, re.DOTALL | re.IGNORECASE)
-                if md_match:
-                    code_str = md_match.group(1).strip()
+        should_execute_code = (has_code_open and has_code_close) or ((not has_code_open) and has_fenced_code)
 
-            if code_str:
-                code_str = Chinese_matplot_str + "\n" + code_str
-                # 自动将用户提及的原始文件名映射为 converted/ 目录下的实际文件
-                code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
-                # 执行前快照（路径 -> (size, mtime)）
-                try:
-                    before_state = {
-                        p.resolve(): (p.stat().st_size, p.stat().st_mtime_ns)
-                        for p in Path(WORKSPACE_DIR).rglob("*")
-                        if p.is_file()
-                    }
-                except Exception:
-                    before_state = {}
-                # 在子进程中以固定工作区执行
-                exe_output = execute_code_safe(code_str, WORKSPACE_DIR)
-
-                # ========== 自动检测并记录错误到雨途斩棘录 ==========
-                try:
-                    error_info = detect_and_record_error(exe_output, code_str, WORKSPACE_DIR)
-                    if error_info.get("has_error"):
-                        print(f"[雨途斩棘录] 检测到错误: {error_info.get('error_type')}")
-                        if error_info.get("recorded"):
-                            print(f"[雨途斩棘录] 已自动记录到知识库")
-                        elif error_info.get("similar_found"):
-                            print(f"[雨途斩棘录] 发现相似错误记录，跳过重复记录")
-                except Exception as e:
-                    print(f"[雨途斩棘录] 错误检测失败: {e}")
-                # ========== 错误检测结束 ==========
-
-                # 执行后快照
-                try:
-                    after_state = {
-                        p.resolve(): (p.stat().st_size, p.stat().st_mtime_ns)
-                        for p in Path(WORKSPACE_DIR).rglob("*")
-                        if p.is_file()
-                    }
-                except Exception:
-                    after_state = {}
-                # 计算新增与修改
-                added_paths = [p for p in after_state.keys() if p not in before_state]
-                modified_paths = [
-                    p
-                    for p in after_state.keys()
-                    if p in before_state and after_state[p] != before_state[p]
-                ]
-
-                # 将新增和修改的文件移动到 generated 文件夹
-                artifact_paths = []
-                for p in added_paths:
-                    try:
-                        # 如果文件不在 generated 文件夹中，移动它
-                        if not str(p).startswith(GENERATED_DIR):
-                            dest_path = Path(GENERATED_DIR) / p.name
-                            dest_path = uniquify_path(dest_path)
-                            shutil.copy2(str(p), str(dest_path))
-                            artifact_paths.append(dest_path.resolve())
-                        else:
-                            artifact_paths.append(p)
-                    except Exception as e:
-                        print(f"Error moving file {p}: {e}")
-                        artifact_paths.append(p)
-
-                # 为修改的文件生成副本并移动到 generated 文件夹
-                for p in modified_paths:
-                    try:
-                        dest_name = f"{Path(p).stem}_modified{Path(p).suffix}"
-                        dest_path = Path(GENERATED_DIR) / dest_name
-                        dest_path = uniquify_path(dest_path)
-                        shutil.copy2(p, dest_path)
-                        artifact_paths.append(dest_path.resolve())
-                    except Exception as e:
-                        print(f"Error copying modified file {p}: {e}")
-
-                # 旧：Execute 内部放控制台输出；新：追加 <File> 段落给前端渲染卡片
-                exe_str = f"\n<Execute>\n```\n{exe_output}\n```\n</Execute>\n"
-                file_block = ""
-                if artifact_paths:
-                    lines = ["<File>"]
-                    for p in artifact_paths:
-                        try:
-                            rel = (
-                                Path(p)
-                                .relative_to(Path(WORKSPACE_DIR).resolve())
-                                .as_posix()
-                            )
-                        except Exception:
-                            rel = Path(p).name
-                        # 在相对路径前加上 username/session_id 前缀
-                        url = build_download_url(f"{username}/{session_id}/{rel}")
-                        name = Path(p).name
-                        lines.append(f"- [{name}]({url})")
-                        if Path(p).suffix.lower() in [
-                            ".png",
-                            ".jpg",
-                            ".jpeg",
-                            ".gif",
-                            ".webp",
-                            ".svg",
-                        ]:
-                            lines.append(f"![{name}]({url})")
-                    lines.append("</File>")
-                    file_block = "\n" + "\n".join(lines) + "\n"
-                full_execution_block = exe_str + file_block
-                assistant_reply += full_execution_block
-                yield full_execution_block
-                messages.append({"role": "execute", "content": f"{exe_output}"})
-                # 刷新工作区快照（路径集合）
-                current_files = set(
-                    [
-                        os.path.join(WORKSPACE_DIR, f)
-                        for f in os.listdir(WORKSPACE_DIR)
-                        if os.path.isfile(os.path.join(WORKSPACE_DIR, f))
-                    ]
+        if should_execute_code:
+            interactive_mode_enabled = str(analysis_mode or "").strip().lower() == "interactive"
+            if interactive_mode_enabled and not _has_user_task_selection(messages):
+                if cur_res.strip():
+                    messages.append({"role": "assistant", "content": cur_res})
+                selection_gate_prompt = (
+                    "当前为 interactive 模式，但尚未检测到用户对任务清单的确认。"
+                    "请先输出 <TaskTree> 任务分解清单并等待用户勾选确认；"
+                    "在收到用户确认前不要执行代码。"
                 )
-                new_files = list(current_files - initial_workspace)
-                if new_files:
-                    workspace.extend(new_files)
-                    initial_workspace.update(new_files)
+                messages.append({"role": "user", "content": selection_gate_prompt})
+                history_recorder.log(
+                    stage="planner",
+                    event="interactive_gate_blocked_code_execution",
+                    status="running",
+                    message="interactive mode blocked code execution before task selection",
+                    details={
+                        "round": round_count,
+                        "has_tasktree": has_tasktree_open,
+                    },
+                )
+                continue
 
+            executable_blocks = _extract_executable_blocks(cur_res)
+            if executable_blocks:
+                messages.append({"role": "assistant", "content": cur_res})
+                total_executable_blocks = len(executable_blocks)
+                for block_index, executable_block in enumerate(executable_blocks, start=1):
+                    code_str = executable_block.get("code") or None
+                    code_language = executable_block.get("language") or "python"
+                    execution_stage = "sql" if code_language == "sql" else "r" if code_language == "r" else "code"
+                    execution_label = "SQL" if code_language == "sql" else "R" if code_language == "r" else "code"
+
+                    if not code_str:
+                        continue
+
+                    execution_started_ts = time_module.time()
+                    if code_language == "python":
+                        code_str = Chinese_matplot_str + "\n" + code_str
+                        # 自动将用户提及的原始文件名映射为 converted/ 目录下的实际文件
+                        code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
+                    elif code_language == "r":
+                        code_str = _rewrite_file_paths(code_str, WORKSPACE_DIR)
+                    history_recorder.log(
+                        stage=execution_stage,
+                        event=f"{execution_stage}_execution_started",
+                        status="running",
+                        message=f"{execution_label} execution started for round {round_count} block {block_index}/{total_executable_blocks}",
+                        details={
+                            "round": round_count,
+                            "language": code_language,
+                            "raw_language": executable_block.get("raw_language") or "",
+                            "code_chars": len(code_str),
+                            "code_preview": _truncate_history_text(code_str, 700),
+                            "block_index": block_index,
+                            "block_count": total_executable_blocks,
+                        },
+                    )
+                    # 执行前快照（路径 -> (size, mtime)），过滤运行时噪声文件
+                    before_state = _collect_workspace_file_state(WORKSPACE_DIR)
+                    # 在固定工作区按语言执行
+                    if code_language == "sql":
+                        sql_source = active_sources[0] if active_sources else None
+                        exe_output = execute_sql_safe(code_str, WORKSPACE_DIR, sql_source)
+                    elif code_language == "r":
+                        exe_output = execute_r_code_safe(code_str, WORKSPACE_DIR)
+                    else:
+                        exe_output = execute_code_safe(code_str, WORKSPACE_DIR)
+                    error_info: Dict[str, Any] = {}
+
+                    # ========== 自动检测并记录错误到雨途斩棘录 ==========
+                    try:
+                        error_info = detect_and_record_error(exe_output, code_str, WORKSPACE_DIR)
+                        if error_info.get("has_error"):
+                            print(f"[雨途斩棘录] 检测到错误: {error_info.get('error_type')}")
+                            if error_info.get("recorded"):
+                                print(f"[雨途斩棘录] 已自动记录到知识库")
+                            elif error_info.get("similar_found"):
+                                print(f"[雨途斩棘录] 发现相似错误记录，跳过重复记录")
+                    except Exception as e:
+                        print(f"[雨途斩棘录] 错误检测失败: {e}")
+                    # ========== 错误检测结束 ==========
+
+                    # 执行后快照，过滤运行时噪声文件
+                    after_state = _collect_workspace_file_state(WORKSPACE_DIR)
+                    # 计算新增与修改
+                    added_paths = [p for p in after_state.keys() if p not in before_state]
+                    modified_paths = [
+                        p
+                        for p in after_state.keys()
+                        if p in before_state and after_state[p] != before_state[p]
+                    ]
+
+                    # 将新增和修改的文件移动到 generated 文件夹
+                    artifact_paths = []
+                    for p in added_paths:
+                        try:
+                            # 如果文件不在 generated 文件夹中，移动它
+                            if not str(p).startswith(GENERATED_DIR):
+                                dest_path = Path(GENERATED_DIR) / p.name
+                                dest_path = uniquify_path(dest_path)
+                                shutil.copy2(str(p), str(dest_path))
+                                artifact_paths.append(dest_path.resolve())
+                            else:
+                                artifact_paths.append(p)
+                        except Exception as e:
+                            print(f"Error moving file {p}: {e}")
+                            artifact_paths.append(p)
+
+                    # 为修改的文件生成副本并移动到 generated 文件夹
+                    for p in modified_paths:
+                        try:
+                            dest_name = f"{Path(p).stem}_modified{Path(p).suffix}"
+                            dest_path = Path(GENERATED_DIR) / dest_name
+                            dest_path = uniquify_path(dest_path)
+                            shutil.copy2(p, dest_path)
+                            artifact_paths.append(dest_path.resolve())
+                        except Exception as e:
+                            print(f"Error copying modified file {p}: {e}")
+
+                    # 旧：Execute 内部放控制台输出；新：追加 <File> 段落给前端渲染卡片
+                    exe_str = f"\n<Execute>\n```\n{exe_output}\n```\n</Execute>\n"
+                    file_block = ""
+                    if artifact_paths:
+                        lines = ["<File>"]
+                        for p in artifact_paths:
+                            try:
+                                rel = (
+                                    Path(p)
+                                    .relative_to(Path(WORKSPACE_DIR).resolve())
+                                    .as_posix()
+                                )
+                            except Exception:
+                                rel = Path(p).name
+                            # 在相对路径前加上 username/session_id 前缀
+                            url = build_download_url(f"{username}/{session_id}/{rel}")
+                            name = Path(p).name
+                            lines.append(f"- [{name}]({url})")
+                            if Path(p).suffix.lower() in [
+                                ".png",
+                                ".jpg",
+                                ".jpeg",
+                                ".gif",
+                                ".webp",
+                                ".svg",
+                            ]:
+                                lines.append(f"![{name}]({url})")
+                        lines.append("</File>")
+                        file_block = "\n" + "\n".join(lines) + "\n"
+                    full_execution_block = exe_str + file_block
+                    history_recorder.log(
+                        stage=execution_stage,
+                        event=f"{execution_stage}_execution_completed",
+                        status="warning" if error_info.get("has_error") else "running",
+                        message=(
+                            f"{execution_label} execution finished with detected error: {error_info.get('error_type', 'unknown')}"
+                            if error_info.get("has_error")
+                            else f"{execution_label} execution finished for round {round_count} block {block_index}/{total_executable_blocks}"
+                        ),
+                        details={
+                            "round": round_count,
+                            "language": code_language,
+                            "duration_ms": int((time_module.time() - execution_started_ts) * 1000),
+                            "output_chars": len(exe_output or ""),
+                            "has_error": bool(error_info.get("has_error")),
+                            "error_type": str(error_info.get("error_type", "") or ""),
+                            "artifact_count": len(artifact_paths),
+                            "artifacts": [Path(path).name for path in artifact_paths[:20]],
+                            "added_file_count": len(added_paths),
+                            "modified_file_count": len(modified_paths),
+                            "block_index": block_index,
+                            "block_count": total_executable_blocks,
+                        },
+                    )
+                    assistant_reply += full_execution_block
+                    yield full_execution_block
+                    messages.append(
+                        {
+                            "role": "execute",
+                            "content": trim_text_for_budget(
+                                str(exe_output or ""),
+                                max_chars=14000,
+                                tail_marker="\n...(execute 输出已截断)",
+                            ),
+                        }
+                    )
+                    # 刷新工作区快照（路径集合）
+                    current_files = set(
+                        [
+                            os.path.join(WORKSPACE_DIR, f)
+                            for f in os.listdir(WORKSPACE_DIR)
+                            if os.path.isfile(os.path.join(WORKSPACE_DIR, f))
+                        ]
+                    )
+                    new_files = list(current_files - initial_workspace)
+                    if new_files:
+                        workspace.extend(new_files)
+                        initial_workspace.update(new_files)
+
+                if saw_final_answer_this_round:
+                    finished = True
+
+                continue
+
+        if saw_final_answer_this_round:
+            if cur_res.strip():
+                messages.append({"role": "assistant", "content": cur_res})
+                history_recorder.log(
+                    stage="answer",
+                    event="final_answer_recorded",
+                    status="running",
+                    message=f"final answer captured in round {round_count}",
+                    details={
+                        "round": round_count,
+                        "answer_chars": len(cur_res),
+                    },
+                )
+            finished = True
             continue
 
         # 无代码时也要保留本轮输出，允许模型进入下一轮（例如先 Analyze 再 Code）
         if cur_res.strip():
             messages.append({"role": "assistant", "content": cur_res})
+            history_recorder.log(
+                stage="round",
+                event="assistant_round_saved",
+                status="running",
+                message=f"assistant content retained for next round {round_count}",
+                details={
+                    "round": round_count,
+                    "content_chars": len(cur_res),
+                },
+            )
 
     if not finished and round_count >= MAX_AGENT_ROUNDS:
+        history_final_status = "warning"
+        history_final_message = f"analysis stopped after reaching max rounds ({MAX_AGENT_ROUNDS})"
+        history_recorder.log(
+            stage="session",
+            event="max_round_limit_reached",
+            status="warning",
+            message=history_final_message,
+            details={"round_count": round_count},
+        )
         limit_block = (
             "<Answer>\n"
             f"已达到最大分析轮次（{MAX_AGENT_ROUNDS}轮），为避免无限循环已自动停止。\n"
@@ -3579,6 +5213,173 @@ def bot_stream(
         assistant_reply += limit_block
         yield limit_block
 
+    # 兜底：若本轮缺少所需报告产物，则服务端自动导出，确保前端文件输出区可见。
+    try:
+        requested_report_types = [
+            str(item).strip().lower()
+            for item in (report_types or ["pdf"])
+            if str(item).strip().lower() in {"pdf", "docx", "pptx"}
+        ]
+        if not requested_report_types:
+            requested_report_types = ["pdf"]
+
+        has_final_answer = re.search(r"</answer>", assistant_reply, re.IGNORECASE) is not None
+        if has_final_answer:
+            current_report_files: Dict[str, set[str]] = {
+                "pdf": set(),
+                "docx": set(),
+                "pptx": set(),
+            }
+            generated_dir_path = Path(GENERATED_DIR)
+            if generated_dir_path.exists():
+                for current_file in generated_dir_path.iterdir():
+                    if not current_file.is_file():
+                        continue
+                    ext = current_file.suffix.lower().lstrip(".")
+                    if ext in current_report_files:
+                        current_report_files[ext].add(current_file.name)
+
+            report_history = [
+                msg for msg in messages
+                if isinstance(msg, dict) and str(msg.get("role", "")).lower() in {"user", "assistant", "execute"}
+            ]
+            if not report_history or str(report_history[-1].get("role", "")).lower() != "assistant":
+                report_history.append({"role": "assistant", "content": assistant_reply})
+
+            md_text = _extract_sections_from_messages(report_history, analysis_language=analysis_language)
+            if not md_text:
+                md_text = (
+                    "No structured report sections were extracted; fallback to final answer text."
+                    if analysis_language == "en"
+                    else "未提取到结构化报告段落，已回退使用最终回答文本。"
+                )
+                md_text += "\n\n" + (assistant_reply or "")
+
+            generated_image_names = _collect_generated_image_names(GENERATED_DIR)
+            if generated_image_names:
+                md_text = _inject_images_into_report_text(md_text, generated_image_names)
+
+            new_pdf_files = sorted(current_report_files.get("pdf", set()) - preexisting_report_files.get("pdf", set()))
+            if "pdf" in requested_report_types and new_pdf_files and generated_image_names and md_text:
+                new_pdf_paths = [
+                    generated_dir_path / name
+                    for name in new_pdf_files
+                    if (generated_dir_path / name).exists()
+                ]
+                if new_pdf_paths:
+                    latest_pdf_path = max(new_pdf_paths, key=lambda path: path.stat().st_mtime)
+                    if _enhance_pdf_report_in_place(latest_pdf_path, md_text):
+                        history_recorder.log(
+                            stage="report",
+                            event="report_pdf_enhanced_in_place",
+                            status="running",
+                            message="existing pdf report enhanced with in-body chart layout",
+                            details={
+                                "pdf_name": latest_pdf_path.name,
+                                "image_count": len(generated_image_names),
+                            },
+                        )
+
+            missing_types = [
+                ext for ext in requested_report_types
+                if not (current_report_files.get(ext, set()) - preexisting_report_files.get(ext, set()))
+            ]
+
+            if missing_types:
+                history_recorder.log(
+                    stage="report",
+                    event="report_fallback_started",
+                    status="running",
+                    message="report fallback started to ensure requested artifacts exist",
+                    details={
+                        "missing_types": missing_types,
+                        "requested_report_types": requested_report_types,
+                    },
+                )
+
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                base_name = f"Auto_Report_{ts}"
+                auto_generated_paths: List[Path] = []
+
+                md_path = _save_md(md_text, base_name, GENERATED_DIR)
+                if md_path:
+                    auto_generated_paths.append(md_path)
+
+                if "pdf" in missing_types:
+                    try:
+                        pdf_path = _save_pdf(md_text, base_name, GENERATED_DIR)
+                        if pdf_path:
+                            auto_generated_paths.append(pdf_path)
+                    except Exception as pdf_error:
+                        print(f"Auto report fallback pdf generation failed: {pdf_error}")
+                if "docx" in missing_types:
+                    try:
+                        docx_path = _save_docx(md_text, base_name, GENERATED_DIR)
+                        if docx_path:
+                            auto_generated_paths.append(docx_path)
+                    except Exception as docx_error:
+                        print(f"Auto report fallback docx generation failed: {docx_error}")
+                if "pptx" in missing_types:
+                    try:
+                        pptx_path = _save_pptx(md_text, base_name, GENERATED_DIR)
+                        if pptx_path:
+                            auto_generated_paths.append(pptx_path)
+                    except Exception as pptx_error:
+                        print(f"Auto report fallback pptx generation failed: {pptx_error}")
+
+                if auto_generated_paths:
+                    lines = ["<File>"]
+                    for artifact in auto_generated_paths:
+                        name = Path(artifact).name
+                        url = build_download_url(f"{username}/{session_id}/generated/{name}")
+                        lines.append(f"- [{name}]({url})")
+                    lines.append("</File>")
+                    auto_file_block = "\n" + "\n".join(lines) + "\n"
+                    assistant_reply += auto_file_block
+                    yield auto_file_block
+                    history_recorder.log(
+                        stage="report",
+                        event="report_fallback_completed",
+                        status="running",
+                        message="report fallback generated missing artifacts",
+                        details={
+                            "generated_files": [Path(item).name for item in auto_generated_paths],
+                            "missing_types": missing_types,
+                        },
+                    )
+    except Exception as auto_report_error:
+        history_final_status = "warning" if history_final_status == "completed" else history_final_status
+        history_final_message = f"auto report fallback failed: {auto_report_error}"
+        history_recorder.log(
+            stage="report",
+            event="report_fallback_failed",
+            status="warning",
+            message=history_final_message,
+            details={},
+        )
+        print(f"Auto report fallback failed: {auto_report_error}")
+
+    final_has_answer = re.search(r"</answer>", assistant_reply, re.IGNORECASE) is not None
+    if not final_has_answer:
+        fallback_reason = history_final_message or "analysis finished without a complete </Answer> block"
+        fallback_answer_block = _build_missing_conclusion_answer(fallback_reason, analysis_language)
+        assistant_reply += fallback_answer_block
+        yield fallback_answer_block
+        final_has_answer = True
+        if history_final_status == "completed":
+            history_final_status = "warning"
+            history_final_message = "analysis finished without a complete </Answer> block; fallback conclusion emitted"
+    history_recorder.finalize(
+        status=history_final_status,
+        message=history_final_message,
+        details={
+            "round_count": round_count,
+            "assistant_reply_chars": len(assistant_reply),
+            "has_final_answer": final_has_answer,
+            "workspace_dir": WORKSPACE_DIR,
+            "generated_dir": GENERATED_DIR,
+        },
+    )
     os.chdir(original_cwd)
 
 
@@ -3594,6 +5395,8 @@ async def chat(body: dict = Body(...)):
     analysis_language = normalize_analysis_language(body.get("analysis_language", "zh-CN"))
     report_types = body.get("report_types", ["pdf"])
     model_provider = body.get("model_provider")
+    selected_database_sources = body.get("selected_database_sources", [])
+    source_selection_explicit = bool(body.get("source_selection_explicit", False))
     model_name = MODEL_PATH
     if isinstance(model_provider, dict):
         model_name = (model_provider.get("model") or MODEL_PATH)
@@ -3613,6 +5416,8 @@ async def chat(body: dict = Body(...)):
             report_types,
             model_provider,
             analysis_language,
+            selected_database_sources,
+            source_selection_explicit,
         ):
             # print(delta_content)
             chunk = {
@@ -3649,8 +5454,214 @@ async def chat(body: dict = Body(...)):
 # -------- Export Report (PDF + MD) --------
 from datetime import datetime
 
+REPORT_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+REPORT_IMAGE_TOKEN_STOPWORDS = {
+    "chart",
+    "charts",
+    "plot",
+    "img",
+    "image",
+    "figure",
+    "analysis",
+    "report",
+    "auto",
+    "final",
+    "v1",
+    "v2",
+    "v3",
+    "top",
+    "now",
+}
+REPORT_IMAGE_KEYWORD_ALIASES: Dict[str, List[str]] = {
+    "vehicle": ["vehicles", "车辆", "车", "运输工具"],
+    "vehicles": ["vehicle", "车辆", "车", "运输工具"],
+    "area": ["areas", "区域", "地区", "口岸"],
+    "areas": ["area", "区域", "地区", "口岸"],
+    "hour": ["hourly", "小时", "时段", "时刻"],
+    "hourly": ["hour", "小时", "时段", "时刻"],
+    "daily": ["day", "trend", "每日", "日", "趋势"],
+    "day": ["daily", "日期", "日", "天"],
+    "trend": ["daily", "趋势", "变化"],
+    "distribution": ["分布", "占比", "频次"],
+    "heatmap": ["热力图", "热度", "矩阵"],
+    "stacked": ["堆叠", "累计"],
+    "top20": ["前20", "top20", "排名", "top"],
+}
 
-def _extract_sections_from_messages(messages: list[dict]) -> str:
+
+def _extract_image_filenames_from_file_sections(file_sections: List[str]) -> List[str]:
+    image_names: List[str] = []
+    seen = set()
+    link_pattern = re.compile(r"\(([^)]+)\)")
+
+    for section in file_sections:
+        section_text = str(section or "")
+        if not section_text.strip():
+            continue
+        for target in link_pattern.findall(section_text):
+            normalized = str(target or "").strip().strip('"\'')
+            if not normalized:
+                continue
+            normalized = normalized.split("?", 1)[0].split("#", 1)[0]
+            candidate_name = os.path.basename(normalized)
+            if not candidate_name:
+                continue
+            if Path(candidate_name).suffix.lower() not in REPORT_IMAGE_EXTENSIONS:
+                continue
+            dedup_key = candidate_name.lower()
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            image_names.append(candidate_name)
+
+    return image_names
+
+
+def _strip_chart_appendix_section(report_text: str) -> str:
+    if not report_text:
+        return ""
+    appendix_pattern = re.compile(
+        r"(?:\n|\A)\s*(?:#+\s*)?(?:附录|appendix)\s*[:：]\s*(?:分析图表|图表|charts?)\b[\s\S]*$",
+        re.IGNORECASE,
+    )
+    return appendix_pattern.sub("", report_text).strip()
+
+
+def _build_image_keywords(image_name: str) -> List[str]:
+    stem = Path(image_name).stem.lower()
+    raw_tokens = [
+        token
+        for token in re.split(r"[^a-z0-9\u4e00-\u9fff]+", stem)
+        if token
+    ]
+    keyword_set = set()
+    for token in raw_tokens:
+        if token in REPORT_IMAGE_TOKEN_STOPWORDS:
+            continue
+        keyword_set.add(token)
+        if token.endswith("s") and len(token) > 3:
+            keyword_set.add(token[:-1])
+        for alias in REPORT_IMAGE_KEYWORD_ALIASES.get(token, []):
+            keyword_set.add(alias.lower())
+    if not keyword_set and stem:
+        keyword_set.add(stem)
+    return sorted(keyword_set, key=len, reverse=True)
+
+
+def _build_image_caption(image_name: str, figure_index: int) -> str:
+    stem = Path(image_name).stem
+    display = re.sub(r"[_\-]+", " ", stem).strip()
+    display = re.sub(r"\s+", " ", display)
+    if not display:
+        display = f"分析图表{figure_index}"
+    return f"图{figure_index}：{display}"
+
+
+def _inject_images_into_report_text(report_text: str, image_names: List[str]) -> str:
+    if not report_text or not image_names:
+        return report_text
+
+    cleaned_text = _strip_chart_appendix_section(report_text)
+    if not cleaned_text:
+        cleaned_text = report_text.strip()
+    if not cleaned_text:
+        return cleaned_text
+
+    paragraphs = [chunk.strip() for chunk in re.split(r"\n{2,}", cleaned_text) if chunk.strip()]
+    if not paragraphs:
+        paragraphs = [cleaned_text]
+
+    used_image_names = set()
+    image_blocks_by_paragraph: Dict[int, List[str]] = {}
+
+    for figure_index, image_name in enumerate(image_names, start=1):
+        normalized_image_name = str(image_name or "").strip()
+        if not normalized_image_name:
+            continue
+        image_key = normalized_image_name.lower()
+        if image_key in used_image_names:
+            continue
+        if f"({normalized_image_name})" in cleaned_text:
+            used_image_names.add(image_key)
+            continue
+
+        keywords = _build_image_keywords(normalized_image_name)
+        best_paragraph_index = len(paragraphs) - 1
+        best_score = 0
+
+        for idx, paragraph in enumerate(paragraphs):
+            paragraph_lower = paragraph.lower()
+            score = 0
+            for keyword in keywords:
+                if len(keyword) < 2:
+                    continue
+                if keyword in paragraph_lower:
+                    score += 2 if len(keyword) >= 4 else 1
+            if score > best_score:
+                best_score = score
+                best_paragraph_index = idx
+
+        caption = _build_image_caption(normalized_image_name, figure_index)
+        figure_block = (
+            "如下图所示：\n\n"
+            f"![{caption}]({normalized_image_name})\n\n"
+            f"*{caption}*"
+        )
+        image_blocks_by_paragraph.setdefault(best_paragraph_index, []).append(figure_block)
+        used_image_names.add(image_key)
+
+    if not image_blocks_by_paragraph:
+        return cleaned_text
+
+    merged_paragraphs: List[str] = []
+    for idx, paragraph in enumerate(paragraphs):
+        merged_paragraphs.append(paragraph)
+        figure_blocks = image_blocks_by_paragraph.get(idx, [])
+        if figure_blocks:
+            merged_paragraphs.extend(figure_blocks)
+
+    return "\n\n".join(merged_paragraphs).strip()
+
+
+def _collect_generated_image_names(generated_dir: str) -> List[str]:
+    dir_path = Path(generated_dir)
+    if not dir_path.exists() or not dir_path.is_dir():
+        return []
+
+    image_files = [
+        item
+        for item in dir_path.iterdir()
+        if item.is_file() and item.suffix.lower() in REPORT_IMAGE_EXTENSIONS
+    ]
+    image_files.sort(key=lambda item: item.stat().st_mtime)
+    return [item.name for item in image_files]
+
+
+def _enhance_pdf_report_in_place(target_pdf_path: Path, md_text: str) -> bool:
+    if not md_text or not target_pdf_path:
+        return False
+    target_pdf_path = Path(target_pdf_path)
+    if not target_pdf_path.parent.exists():
+        return False
+
+    temp_pdf = target_pdf_path.with_name(f"{target_pdf_path.stem}.__enhance__.pdf")
+    try:
+        success = generate_pdf_module(md_text, str(temp_pdf), title=target_pdf_path.stem)
+        if not success or not temp_pdf.exists() or temp_pdf.stat().st_size <= 0:
+            return False
+        temp_pdf.replace(target_pdf_path)
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            if temp_pdf.exists():
+                temp_pdf.unlink()
+        except Exception:
+            pass
+
+
+def _extract_sections_from_messages(messages: list[dict], analysis_language: str = "zh-CN") -> str:
     """从历史消息中抽取报告内容。
     
     优先使用 <Answer> 标签中的内容作为报告主体。
@@ -3662,40 +5673,303 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
         return ""
     import re as _re
 
-    tag_pattern = r"<(Analyze|Understand|Code|Execute|File|Answer|TaskTree)>([\s\S]*?)</\1>"
+    tag_pattern = _re.compile(
+        r"<\s*(Analyze|Understand|Code|Execute|File|Answer|TaskTree|DataDictionary)\s*>([\s\S]*?)<\s*/\s*(Analyze|Understand|Code|Execute|File|Answer|TaskTree|DataDictionary)\s*>",
+        _re.IGNORECASE,
+    )
 
     # 收集所有助手消息内容
     all_content = ""
     for idx, m in enumerate(messages, start=1):
         role = (m or {}).get("role")
-        if role != "assistant":
+        if role not in ("assistant", "ai"):
             continue
         all_content += str((m or {}).get("content") or "") + "\n"
 
     # 分类提取各类标签内容
     answer_sections = []
+    fallback_answer_sections = []
     analyze_sections = []
     execute_data = []
+    file_sections = []
 
-    for match in _re.finditer(tag_pattern, all_content, _re.DOTALL):
-        tag, seg = match.groups()
+    fallback_report_patterns = [
+        r"本次分析未能自然产出完整结论",
+        r"当前结论由服务端兜底生成",
+        r"无法按原要求完整完成的原因",
+        r"当前可得结论",
+        r"analysis did not complete with a valid final conclusion",
+        r"fallback conclusion block",
+        r"Current conclusion:",
+        r"analysis session finished",
+    ]
+
+    def _contains_fallback_report_text(text: str) -> bool:
+        snippet = str(text or "").strip()
+        if not snippet:
+            return False
+        return any(_re.search(pattern, snippet, _re.IGNORECASE) for pattern in fallback_report_patterns)
+
+    def _sanitize_report_text(text: str) -> str:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return ""
+        kept_lines: list[str] = []
+        for line in raw_text.splitlines():
+            normalized = line.strip()
+            if not normalized:
+                if kept_lines and kept_lines[-1] != "":
+                    kept_lines.append("")
+                continue
+            if any(_re.search(pattern, normalized, _re.IGNORECASE) for pattern in fallback_report_patterns):
+                continue
+            kept_lines.append(normalized)
+        sanitized = "\n".join(kept_lines)
+        sanitized = _re.sub(r"\n{3,}", "\n\n", sanitized)
+        return sanitized.strip()
+
+    for match in tag_pattern.finditer(all_content):
+        open_tag, seg, close_tag = match.groups()
+        if str(open_tag).lower() != str(close_tag).lower():
+            continue
+        tag = str(open_tag).strip().lower()
         seg = seg.strip()
         if not seg:
             continue
-        if tag == "Answer":
-            answer_sections.append(seg)
-        elif tag == "Analyze":
+        if tag == "answer":
+            cleaned_answer = _sanitize_report_text(seg)
+            if _contains_fallback_report_text(seg):
+                fallback_answer_sections.append(cleaned_answer or seg)
+                continue
+            if cleaned_answer:
+                answer_sections.append(cleaned_answer)
+        elif tag == "analyze":
             # 去掉预测推理和短代码测试部分，只保留正式分析内容
             clean_seg = _re.sub(r"#\s*(预测推理|短代码测试与结果)\s*\n[\s\S]*?(?=\n#\s*正式分析|$)", "", seg, flags=_re.DOTALL).strip()
+            clean_seg = _sanitize_report_text(clean_seg)
             if clean_seg and len(clean_seg) > 50:  # 只保留有实质内容的分析
                 analyze_sections.append(clean_seg)
-        elif tag == "Execute":
+        elif tag == "execute":
             # 提取执行结果中的有用数据（排除纯错误信息）
             if seg and "Traceback" not in seg and "Error" not in seg and len(seg) > 20:
                 # 截断过长的执行输出
                 if len(seg) > 2000:
                     seg = seg[:2000] + "\n...(输出已截断)"
                 execute_data.append(seg)
+        elif tag == "file":
+            file_sections.append(_sanitize_report_text(seg) or seg)
+
+    # 去重：避免多轮重复内容在自动报告中反复出现
+    def _dedup_sections(sections: list[str]) -> list[str]:
+        seen = set()
+        deduped: list[str] = []
+        for section in sections:
+            normalized = _re.sub(r"\s+", " ", section).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(section.strip())
+        return deduped
+
+    answer_sections = _dedup_sections(answer_sections)
+    analyze_sections = _dedup_sections(analyze_sections)
+    execute_data = _dedup_sections(execute_data)
+    file_sections = _dedup_sections(file_sections)
+
+    confirmation_event_patterns = [
+        r"用户已确认以下数据字典条目",
+        r"The user confirmed the following data dictionary entries",
+    ]
+    has_real_data_dictionary_confirmation = False
+    for message in messages:
+        role = str((message or {}).get("role", "") or "").strip().lower()
+        if role != "user":
+            continue
+        content = str((message or {}).get("content") or "")
+        if any(_re.search(pattern, content, _re.IGNORECASE) for pattern in confirmation_event_patterns):
+            has_real_data_dictionary_confirmation = True
+            break
+
+    def _strip_unconfirmed_dictionary_claims(text: str) -> str:
+        if not text:
+            return text
+        claim_patterns = [
+            r"(?:用户|user).{0,16}(?:已确认|confirmed).{0,24}(?:数据字典|data dictionary)",
+            r"(?:数据字典|data dictionary).{0,20}(?:已确认|确认完成|confirmed)",
+            r"(?:语义|semantic).{0,20}(?:已确认|确认完成|confirmed)",
+            r"confirmed\s+semantics",
+        ]
+        sentences = _re.findall(r"[^。！？!?\n]+[。！？!?]?", text)
+        if not sentences:
+            sentences = [line for line in text.splitlines() if line.strip()]
+
+        kept: list[str] = []
+        for sentence in sentences:
+            snippet = sentence.strip()
+            if not snippet:
+                continue
+            if any(_re.search(pattern, snippet, _re.IGNORECASE) for pattern in claim_patterns):
+                continue
+            kept.append(snippet)
+        return "\n".join(kept).strip()
+
+    def _looks_like_structured_report(text: str) -> bool:
+        if not text:
+            return False
+        return bool(
+            _re.search(r"(^|\n)#{1,3}\s+", text)
+            or _re.search(r"(^|\n)(?:一、|二、|三、|四、|五、|1\.|2\.|3\.)", text)
+        )
+
+    def _split_report_paragraphs(text: str) -> list[str]:
+        if not text:
+            return []
+        paragraphs = []
+        for chunk in _re.split(r"\n\s*\n+", text):
+            normalized = chunk.strip()
+            if not normalized:
+                continue
+            normalized = _re.sub(r"\n{2,}", "\n", normalized)
+            paragraphs.append(normalized)
+        return paragraphs
+
+    def _split_report_sentences(text: str) -> list[str]:
+        if not text:
+            return []
+        sentences = _re.findall(r"[^。！？!?\n]+[。！？!?]?", text)
+        cleaned: list[str] = []
+        for sentence in sentences:
+            normalized = str(sentence or "").strip()
+            if not normalized:
+                continue
+            normalized = _re.sub(r"^(?:目标任务|问题定义|数据探查|核心结论|证据链与分析|处置建议)[:：]\s*", "", normalized)
+            cleaned.append(normalized)
+        return cleaned
+
+    def _build_structured_report_markdown(
+        report_text: str,
+        analysis_notes: list[str],
+        execution_notes: list[str],
+    ) -> str:
+        cleaned_report = _sanitize_report_text(report_text)
+        if not cleaned_report:
+            cleaned_report = _sanitize_report_text("\n\n".join(analysis_notes))
+
+        report_paragraphs = _split_report_paragraphs(cleaned_report)
+        report_sentences = _split_report_sentences(cleaned_report)
+        analysis_paragraphs: list[str] = []
+        analysis_sentences: list[str] = []
+        for note in analysis_notes:
+            sanitized_note = _sanitize_report_text(note)
+            analysis_paragraphs.extend(_split_report_paragraphs(sanitized_note))
+            analysis_sentences.extend(_split_report_sentences(sanitized_note))
+        execution_items: list[str] = []
+        for note in execution_notes[:6]:
+            compact = _re.sub(r"\s+", " ", _sanitize_report_text(note)).strip()
+            if compact:
+                execution_items.append(compact[:220] + ("..." if len(compact) > 220 else ""))
+
+        suggestion_pattern = _re.compile(r"建议|下一步|后续|应当|应尽快|建议对|建议将|recommended|recommendation|next step|should", _re.IGNORECASE)
+        risk_pattern = _re.compile(r"风险|异常|可疑|偏离|波动|疑点|违规|逃税|走私|高风险|锁定|重点企业|risk|anomal|deviation|suspicious", _re.IGNORECASE)
+        object_pattern = _re.compile(r"企业|公司|对象|商品|型号|税号|编码|订单|报关单|集装箱|航次|customer|company|entity|object", _re.IGNORECASE)
+
+        suggestions: list[str] = []
+        findings: list[str] = []
+        object_targets: list[str] = []
+        for sentence in report_sentences:
+            normalized = sentence.strip()
+            if not normalized:
+                continue
+            if suggestion_pattern.search(normalized):
+                suggestions.append(normalized)
+                continue
+            if risk_pattern.search(normalized) or len(findings) < 4:
+                findings.append(normalized)
+            if object_pattern.search(normalized):
+                object_targets.append(normalized)
+
+        objective_items = analysis_sentences[:2] or report_sentences[:1]
+        problem_items = [
+            item for item in (report_sentences + analysis_sentences)
+            if item not in objective_items and not suggestion_pattern.search(item)
+        ][:3]
+        probe_items = execution_items[:3] or analysis_sentences[2:5] or report_sentences[:2]
+        conclusion_items = (object_targets[:2] + [item for item in findings if item not in object_targets][:2])[:4]
+        evidence_items = []
+        for item in findings[:4]:
+            if item not in evidence_items:
+                evidence_items.append(item)
+        for item in execution_items[:3]:
+            if item not in evidence_items:
+                evidence_items.append(item)
+        recommendation_items = suggestions[:4]
+
+        if analysis_language == "en":
+            title_text = "Analysis Report"
+            objective_heading = "## 1. Target Task"
+            problem_heading = "## 2. Problem Definition"
+            probe_heading = "## 3. Data Exploration"
+            conclusion_heading = "## 4. Core Conclusions and Object Locking"
+            evidence_heading = "## 5. Evidence Chain and Analysis"
+            advice_heading = "## 6. Recommendations"
+            objective_fallback = "Complete a focused review around the requested risk topic, analysis scope, and target objects."
+            problem_fallback = "The task centers on identifying abnormal patterns, determining whether a stable risk signal exists, and clarifying the scope for follow-up verification."
+            probe_fallback = "The current output can support preliminary exploration, but additional structured evidence may still be required for a fully closed conclusion."
+            conclusion_fallback = "Current evidence indicates a need for continued review, but object locking should remain tied to additional validation evidence."
+            evidence_fallback = "The available materials partially support the current observations, though a stronger evidence chain is still recommended before final disposition."
+            advice_fallback = "Prioritize targeted re-checks on the highest-signal objects and supplement the missing evidence needed for formal closure."
+            numbered = ["1", "2", "3", "4", "5", "6"]
+        else:
+            title_text = "海关风险分析报告"
+            objective_heading = "## 一、目标任务"
+            problem_heading = "## 二、问题定义"
+            probe_heading = "## 三、数据探查"
+            conclusion_heading = "## 四、核心结论（含对象锁定）"
+            evidence_heading = "## 五、证据链与分析"
+            advice_heading = "## 六、处置建议"
+            objective_fallback = "围绕用户提出的分析主题、对象范围和时间口径，对相关业务数据开展针对性风险研判。"
+            problem_fallback = "本次任务重点在于识别异常波动、厘清疑点形成机制，并据此判断是否具备进一步锁定重点对象的条件。"
+            probe_fallback = "当前已完成基础材料梳理与初步探查，但仍需结合更多结构化证据巩固正式结论。"
+            conclusion_fallback = "结合现有材料，可形成阶段性风险关注判断，但对具体对象的最终锁定仍应以补充核查结果为准。"
+            evidence_fallback = "现有分析材料能够支撑初步疑点识别，但形成完整闭环证据链仍需进一步补证。"
+            advice_fallback = "建议围绕高风险对象继续开展针对性核查，并同步补充关键交易、申报与单证材料。"
+            numbered = ["一", "二", "三", "四", "五", "六"]
+
+        lines: list[str] = [f"# {title_text}", "", objective_heading, ""]
+        for item in (objective_items or [objective_fallback]):
+            lines.extend([item, ""])
+
+        lines.extend([problem_heading, ""])
+        for item in (problem_items or [problem_fallback]):
+            lines.extend([item, ""])
+
+        lines.extend([probe_heading, ""])
+        probe_values = probe_items or [probe_fallback]
+        for item in probe_values:
+            lines.append(f"- {item}")
+        lines.append("")
+
+        lines.extend([conclusion_heading, ""])
+        for index, item in enumerate(conclusion_items or [conclusion_fallback], start=1):
+            marker = numbered[index - 1] if index - 1 < len(numbered) else str(index)
+            if analysis_language == "en":
+                lines.append(f"### Conclusion {marker}")
+            else:
+                lines.append(f"### （{marker}）")
+            lines.extend(["", item, ""])
+
+        lines.extend([evidence_heading, ""])
+        for index, item in enumerate(evidence_items or [evidence_fallback], start=1):
+            lines.append(f"{index}. {item}")
+        lines.append("")
+
+        lines.extend([advice_heading, ""])
+        advice_values = recommendation_items or [advice_fallback]
+        for index, item in enumerate(advice_values, start=1):
+            lines.append(f"{index}. {item}")
+        lines.append("")
+
+        return "\n".join(lines).strip()
 
     # 构建最终报告文本
     final_text = ""
@@ -3704,14 +5978,27 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
     if answer_sections:
         final_text = "\n\n".join(answer_sections).strip()
 
-    # 2. 如果 Answer 内容过短或为空，用 Analyze 内容补充
-    if not final_text or len(final_text) < 200:
+    # 若最终结论本身是“自动停止/失败”类告警，则不再回填 Analyze 过程文字，
+    # 以避免把计划性描述误当成已发生事实写入最终报告。
+    terminal_answer_markers = [
+        r"模型连续返回空响应",
+        r"已自动停止",
+        r"达到最大分析轮次",
+        r"analysis stopped",
+        r"consecutive empty",
+        r"max(?:imum)? analysis rounds",
+        r"fallback conclusion",
+    ]
+    has_terminal_answer = bool(
+        final_text
+        and any(_re.search(pattern, final_text, _re.IGNORECASE) for pattern in terminal_answer_markers)
+    )
+
+    # 2. 仅在缺少 Answer 时，才用 Analyze 内容补充主体
+    if not final_text and not has_terminal_answer:
         if analyze_sections:
             analyze_text = "\n\n".join(analyze_sections).strip()
-            if final_text:
-                final_text = analyze_text + "\n\n" + final_text
-            else:
-                final_text = analyze_text
+            final_text = analyze_text
 
     # 3. 检测占位符模式并尝试替换
     placeholder_pattern = r'\[详细.*?(?:描述|分析|评估|建议)\.{0,3}\]'
@@ -3731,14 +6018,29 @@ def _extract_sections_from_messages(messages: list[dict]) -> str:
     # 4. 如果仍然没有内容，从整体对话中提取
     if not final_text:
         # 最后兜底：取所有助手消息中有实质内容的部分
+        collected_chunks = []
         for m in messages:
             role = (m or {}).get("role")
-            if role == "assistant":
+            if role in ("assistant", "ai"):
                 content = str((m or {}).get("content") or "")
                 # 移除标签
-                clean = _re.sub(r'</?(?:Analyze|Understand|Code|Execute|File|Answer|TaskTree)>', '', content).strip()
-                if clean and len(clean) > 100:
-                    final_text += clean + "\n\n"
+                clean = _sanitize_report_text(_re.sub(r'</?(?:Analyze|Understand|Code|Execute|File|Answer|TaskTree|DataDictionary)>', '', content)).strip()
+                if clean and len(clean) > 20:
+                    collected_chunks.append(clean)
+
+        if collected_chunks:
+            final_text = "\n\n".join(collected_chunks)
+        elif fallback_answer_sections:
+            final_text = _sanitize_report_text("\n\n".join(fallback_answer_sections))
+
+    if final_text and not has_real_data_dictionary_confirmation:
+        final_text = _strip_unconfirmed_dictionary_claims(final_text)
+
+    final_text = _build_structured_report_markdown(final_text, analyze_sections, execute_data)
+
+    image_names = _extract_image_filenames_from_file_sections(file_sections)
+    if image_names:
+        final_text = _inject_images_into_report_text(final_text, image_names)
 
     return final_text.strip()
 
@@ -3766,6 +6068,9 @@ def _get_available_fonts() -> dict:
     import reportlab.pdfbase.ttfonts as ttfonts
 
     fonts = {"assets": [], "system": [], "reportlab_fallback": None}
+    fonts_dir = _FONT_DIR if '_FONT_DIR' in globals() else os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "../../assets/fonts"
+    )
 
     # === assets 字体（纯 TTF，reportlab/fpdf2/matplotlib 均支持）===
     assets_fonts = [
@@ -3777,7 +6082,7 @@ def _get_available_fonts() -> dict:
         # 注意：simfang.ttf 和 fzbsk.ttf 是损坏的 HTML 文件，已排除
     ]
     for fname, name, desc in assets_fonts:
-        fp = os.path.join(FONT_DIR, fname)
+        fp = os.path.join(fonts_dir, fname)
         if os.path.exists(fp):
             fonts["assets"].append((fp, name, desc))
 
@@ -3838,6 +6143,36 @@ def _find_chinese_font() -> tuple[str | None, str]:
     return None, "Helvetica"
 
 
+def _pdf_has_visible_content(pdf_path: Path) -> bool:
+    """检测 PDF 是否包含可见文本，避免把空白文件当成成功结果。"""
+    try:
+        if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
+            return False
+
+        # 体积过小通常意味着只有空白页/元数据
+        if pdf_path.stat().st_size < 1024:
+            return False
+
+        try:
+            import importlib
+
+            pypdf_module = importlib.import_module("pypdf")
+            reader = pypdf_module.PdfReader(str(pdf_path))
+            text_chunks = []
+            for page in reader.pages[:5]:
+                text_chunks.append((page.extract_text() or "").strip())
+            merged = "\n".join(chunk for chunk in text_chunks if chunk).strip()
+            if merged:
+                return True
+        except Exception as extract_err:
+            print(f"PDF 文本提取检测失败，回退到文件大小判断: {extract_err}")
+
+        # 如果无法提取文本，则用体积做保守兜底
+        return pdf_path.stat().st_size >= 4096
+    except Exception:
+        return False
+
+
 def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
     """使用 R with Cairo 生成中文 PDF（优先），失败则降级到 reportlab"""
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
@@ -3845,9 +6180,16 @@ def _save_pdf(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
     # 先尝试 R Cairo 方案（对 CJK 字体支持最完整）
     r_result = _save_pdf_with_r(md_text, base_name, workspace_dir)
-    if r_result:
+    if r_result and _pdf_has_visible_content(r_result):
         print(f"PDF generated with R Cairo: {r_result}")
         return r_result
+
+    if r_result:
+        print(f"R Cairo 生成的 PDF 疑似空白，回退到 reportlab: {r_result}")
+        try:
+            r_result.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     # 降级到 reportlab
     return _save_pdf_with_reportlab(md_text, base_name, workspace_dir)
@@ -4138,79 +6480,76 @@ def _save_pptx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
 def _save_pdf_with_r(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
     """使用 R script + Cairo/grDevices 生成中文 PDF（支持所有 CJK 字体）"""
-    import tempfile, subprocess
+    import subprocess
+
+    Path(workspace_dir).mkdir(parents=True, exist_ok=True)
+    pdf_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pdf")
 
     font_path, font_name = _find_chinese_font()
     if not font_path:
         return None
 
-    # 准备字体路径（确保无空格或特殊字符）
     r_script_path = os.path.join(workspace_dir, f"_pdf_gen_{os.getpid()}.R")
     r_font_path = font_path.replace("\\", "\\\\").replace("'", "\\'")
-
-    # 清理 markdown 文本
     clean_text = re.sub(r"\\newpage", "", md_text)
+    r_pdf_path = str(pdf_path).replace("\\", "\\\\").replace("'", "\\'")
+    r_text = _escape_r_string(clean_text)
 
-    # 生成 R 脚本
     r_script = f"""
 options(width=120)
 Sys.setenv(LANG="en_US.UTF-8")
-library(grDevices)
+suppressPackageStartupMessages(library(showtext))
+suppressPackageStartupMessages(library(sysfonts))
 
-# 注册中文字体（Cairo 支持 TTC/TTF）
-tryCatch({{
-    if (file.exists("{r_font_path}")) {{
-        # macOS: 使用 quartz 或 cairo 设备
-        if (.Platform$GUI[1] == "AQUA") {{
-            # macOS 原生字体注册
-            quartz粵 font = quartzFont(c("{font_name}"))
+font_add("{font_name}", "{r_font_path}")
+showtext_auto()
+
+pdf("{r_pdf_path}", family="{font_name}", width=8.27, height=11.69)
+par(family="{font_name}", mar=c(2.5, 2.5, 2, 1), oma=c(0, 0, 0, 0))
+
+txt <- "{r_text}"
+lines <- strsplit(txt, "\\n")[[1]]
+if (length(lines) == 0) lines <- c(txt)
+
+plot.new()
+y <- 0.98
+line_height <- 0.03
+
+for (line in lines) {{
+    raw <- trimws(line)
+    if (nchar(raw) == 0) {{
+        y <- y - line_height
+    }} else {{
+        cex_val <- 0.95
+        font_val <- 1
+        if (grepl("^###\\\\s+", raw, perl=TRUE)) {{
+            raw <- sub("^###\\\\s+", "", raw, perl=TRUE)
+            cex_val <- 1.15
+            font_val <- 2
+        }} else if (grepl("^##\\\\s+", raw, perl=TRUE)) {{
+            raw <- sub("^##\\\\s+", "", raw, perl=TRUE)
+            cex_val <- 1.2
+            font_val <- 2
+        }} else if (grepl("^#\\\\s+", raw, perl=TRUE)) {{
+            raw <- sub("^#\\\\s+", "", raw, perl=TRUE)
+            cex_val <- 1.3
+            font_val <- 2
+        }} else if (grepl("^[-*]\\\\s+", raw, perl=TRUE)) {{
+            raw <- paste0("• ", sub("^[-*]\\\\s+", "", raw, perl=TRUE))
         }}
-    }}
-    warning("Font not found")
-}}, error = function(e) {{ warning(e) }})
 
-# 使用 showtext 方案（最可靠）
-tryCatch({{
-    library(showtext)
-    library(sysfonts)
-
-    # 添加字体文件
-    font_add("{font_name}", "{r_font_path}")
-    showtext_auto()
-
-    pdf("{str(pdf_path).replace("\\", "\\\\").replace("'", "\\'")}",
-        family="{font_name}", width=8.27, height=11.69)
-
-    par(family="{font_name}", mar=c(2.5, 2.5, 2, 1), oma=c(0, 0, 0, 0))
-
-    lines <- strsplit(gsub(r"\\n(?=\\S)", "<<<SPLIT>>>", "{_escape_r_string(clean_text)}", perl=TRUE), "<<<SPLIT>>>")[[1]]
-
-    for (line in lines) {{
-        line <- gsub("^#\\\\s+(.*)$", "\\\\1", line, perl=TRUE)
-        if (grepl("^##\\\\s+(.*)$", line, perl=TRUE)) {{
-            title <- gsub("^##\\\\s+(.*)$", "\\\\1", line, perl=TRUE)
-            cat("\\n")
-            plot.new()
-            text(0.5, 0.7, title, cex=2.2, family="{font_name}", font=2, adj=0)
-        }} else if (grepl("^###\\\\s+(.*)$", line, perl=TRUE)) {{
-            title <- gsub("^###\\\\s+(.*)$", "\\\\1", line, perl=TRUE)
-            cat("\\n")
-            plot.new()
-            text(0.5, 0.65, title, cex=1.6, family="{font_name}", font=2, adj=0)
-        }} else if (nzchar(trimws(line))) {{
-            if (grepl("^[-*]\\\\s+(.*)$", line, perl=TRUE)) {{
-                line <- paste0("  \\u2022 ", gsub("^[-*]\\\\s+(.*)$", "\\\\1", line, perl=TRUE))
-            }}
-            cat(line, "\\n", sep="")
-        }}
+        text(0.02, y, labels=raw, adj=c(0, 1), cex=cex_val, family="{font_name}", font=font_val)
+        y <- y - line_height
     }}
 
-    dev.off()
-    cat("PDF_R_OK\\n")
-}}, error = function(e) {{
-    message("R Cairo PDF failed: ", e$message)
-    if (dev.cur() > 1) dev.off()
-}})
+    if (y <= 0.04) {{
+        plot.new()
+        y <- 0.98
+    }}
+}}
+
+dev.off()
+cat("PDF_R_OK\\n")
 """
     try:
         with open(r_script_path, "w", encoding="utf-8") as f:
@@ -4218,11 +6557,13 @@ tryCatch({{
 
         result = subprocess.run(
             ["Rscript", "--vanilla", "--quiet", r_script_path],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=60
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
         )
 
-        # 清理脚本
         try:
             os.remove(r_script_path)
         except Exception:
@@ -4230,10 +6571,9 @@ tryCatch({{
 
         if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
             return pdf_path
-        else:
-            print(f"R PDF generation failed stdout: {result.stdout}, stderr: {result.stderr}")
-            return None
 
+        print(f"R PDF generation failed stdout: {result.stdout}, stderr: {result.stderr}")
+        return None
     except Exception as e:
         print(f"R PDF generation error: {e}")
         try:
@@ -4313,134 +6653,20 @@ def _save_docx(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
 
 def _save_pdf_with_reportlab(md_text: str, base_name: str, workspace_dir: str) -> Path | None:
     """
-    使用 reportlab + simhei.ttf 生成中文 PDF（降级方案）
-
-    优化要点：
-    1. 使用模块化的字体注册函数 register_chinese_fonts()
-    2. 使用 get_chinese_style() 获取预定义样式
-    3. 使用 extract_markdown_sections() 提取结构化内容
-    4. 使用 clean_md_text() 清理 Markdown 标记
-    5. 完善的错误处理和日志记录
+    使用模块化 PDF 引擎生成中文 PDF（降级方案）。
+    统一调用 pdf_utils.generate_pdf，确保图文混排行为与导出接口一致。
     """
     Path(workspace_dir).mkdir(parents=True, exist_ok=True)
     pdf_path = uniquify_path(Path(workspace_dir) / f"{base_name}.pdf")
 
     try:
-        print(f"开始生成 PDF (ReportLab): {pdf_path}")
-
-        # 1. 注册中文字体（使用模块化函数，只注册一次）
-        registered = register_chinese_fonts(force=False)
-        if not registered:
-            print("警告：没有成功注册中文字体，PDF 可能无法正常显示中文")
-        else:
-            print(f"已注册字体: {list(registered.keys())}")
-
-        # 2. 提取 Markdown 内容块
-        clean_text = clean_md_text(md_text)
-        blocks = extract_markdown_sections(clean_text)
-        print(f"提取到 {len(blocks)} 个内容块")
-
-        # 3. 初始化 PDF 文档
-        doc = SimpleDocTemplate(
-            str(pdf_path),
-            pagesize=A4,
-            rightMargin=50,
-            leftMargin=50,
-            topMargin=50,
-            bottomMargin=50,
-        )
-
-        # 4. 准备故事（PDF 内容）
-        story = []
-
-        # 5. 处理每个内容块
-        for block in blocks:
-            block_type = block["type"]
-            content = block["content"]
-
-            if block_type == "heading1":
-                style = get_chinese_style("heading1")
-                story.append(Paragraph(content, style))
-                story.append(Spacer(1, 12))
-
-            elif block_type == "heading2":
-                style = get_chinese_style("heading2")
-                story.append(Paragraph(content, style))
-                story.append(Spacer(1, 8))
-
-            elif block_type == "heading3":
-                style = get_chinese_style("heading3")
-                story.append(Paragraph(content, style))
-                story.append(Spacer(1, 6))
-
-            elif block_type == "paragraph":
-                style = get_chinese_style("normal")
-                story.append(Paragraph(content, style))
-                story.append(Spacer(1, 8))
-
-            elif block_type == "table":
-                # 使用 reportlab Table 渲染
-                try:
-                    from reportlab.platypus import Table, TableStyle
-                    from reportlab.lib import colors as rl_colors
-
-                    table_data = content
-                    headers = table_data.get("headers", [])
-                    rows = table_data.get("rows", [])
-                    font_name = get_chinese_font_name()
-
-                    all_rows = [headers] + rows
-                    max_cols = max(len(r) for r in all_rows) if all_rows else 0
-                    normalized = []
-                    for row in all_rows:
-                        padded = list(row) + [''] * (max_cols - len(row))
-                        normalized.append(padded[:max_cols])
-
-                    if normalized and max_cols > 0:
-                        available_width = A4[0] - 100
-                        col_width = available_width / max_cols
-                        table = Table(normalized, colWidths=[col_width] * max_cols)
-                        table.setStyle(TableStyle([
-                            ('FONTNAME', (0, 0), (-1, -1), font_name),
-                            ('FONTSIZE', (0, 0), (-1, -1), 9),
-                            ('FONTNAME', (0, 0), (-1, 0), font_name),
-                            ('FONTSIZE', (0, 0), (-1, 0), 10),
-                            ('BACKGROUND', (0, 0), (-1, 0), rl_colors.HexColor('#003366')),
-                            ('TEXTCOLOR', (0, 0), (-1, 0), rl_colors.white),
-                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                            ('GRID', (0, 0), (-1, -1), 0.5, rl_colors.grey),
-                            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [rl_colors.white, rl_colors.HexColor('#F0F4F8')]),
-                            ('TOPPADDING', (0, 0), (-1, -1), 4),
-                            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                        ]))
-                        story.append(table)
-                        story.append(Spacer(1, 12))
-                except Exception as table_err:
-                    print(f"表格渲染失败: {table_err}")
-                    style = get_chinese_style("normal")
-                    raw_text = block.get("raw", str(content))
-                    story.append(Paragraph(raw_text.replace('\n', '<br/>'), style))
-
-            elif block_type == "list":
-                style = get_chinese_style("list")
-                for item in content:
-                    para_text = f"• {item}"
-                    story.append(Paragraph(para_text, style))
-                    story.append(Spacer(1, 4))
-                story.append(Spacer(1, 8))
-
-        # 6. 构建 PDF
-        doc.build(story)
-
-        # 7. 验证生成结果
-        if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
-            file_size = os.path.getsize(pdf_path) / 1024
+        success = generate_pdf_module(md_text, str(pdf_path), title=base_name)
+        if success and pdf_path.exists() and pdf_path.stat().st_size > 0:
+            file_size = pdf_path.stat().st_size / 1024
             print(f"PDF 生成成功: {pdf_path.name} ({file_size:.1f} KB)")
             return pdf_path
-        else:
-            print(f"PDF 生成失败: 文件不存在或为空")
-            return None
+        print("PDF 生成失败: 模块化引擎未产出有效文件")
+        return None
 
     except Exception as e:
         error_msg = f"PDF 生成失败: {e}"
@@ -4465,7 +6691,7 @@ async def export_report(body: dict = Body(...)):
         if not isinstance(messages, list):
             raise HTTPException(status_code=400, detail="messages must be a list")
 
-        md_text = _extract_sections_from_messages(messages)
+        md_text = _extract_sections_from_messages(messages, analysis_language=analysis_language)
         if not md_text:
             if analysis_language == "en":
                 md_text = "(No <Analyze>/<Understand>/<Code>/<Execute>/<Answer> sections found.)"
@@ -5326,6 +7552,124 @@ def build_db_engine(db_type: str, config: dict):
     return create_engine(url, **engine_kwargs)
 
 
+def list_accessible_databases(db_type: str, config: dict) -> List[str]:
+    """根据连接信息列出可访问的数据库名称。"""
+    normalized_type = normalize_db_type(db_type)
+    config = config or {}
+
+    if normalized_type == "sqlite":
+        database = str(config.get("database", "")).strip()
+        if not database:
+            raise ValueError("SQLite 模式下请先填写数据库文件路径")
+        return [database]
+
+    host = str(config.get("host", "localhost") or "localhost").strip() or "localhost"
+    user = str(config.get("user", "") or "").strip() or None
+    password_raw = config.get("password", None)
+    password = None if password_raw in (None, "") else str(password_raw)
+
+    port_raw = str(config.get("port", "") or "").strip()
+    if port_raw:
+        if not port_raw.isdigit():
+            raise ValueError("端口必须为数字")
+        port = int(port_raw)
+    else:
+        port = DB_DEFAULT_PORTS.get(normalized_type)
+
+    def _create_engine_for_db(database_name: Optional[str]):
+        query = {"charset": "utf8mb4"} if normalized_type == "mysql" else None
+        url = URL.create(
+            drivername=DB_DRIVER_NAMES[normalized_type],
+            username=user,
+            password=password,
+            host=host,
+            port=port,
+            database=database_name,
+            query=query,
+        )
+        connect_args = {}
+        if normalized_type in ("mysql", "postgresql"):
+            connect_args["connect_timeout"] = 5
+        elif normalized_type == "mssql":
+            connect_args["login_timeout"] = 5
+        kwargs: Dict[str, Any] = {"pool_pre_ping": True}
+        if connect_args:
+            kwargs["connect_args"] = connect_args
+        return create_engine(url, **kwargs)
+
+    if normalized_type == "postgresql":
+        candidates = []
+        configured_db = str(config.get("database", "") or "").strip()
+        if configured_db:
+            candidates.append(configured_db)
+        candidates.extend(["postgres", "template1"])
+        seen = set()
+        dedup_candidates = []
+        for item in candidates:
+            if item and item not in seen:
+                dedup_candidates.append(item)
+                seen.add(item)
+
+        last_error: Optional[Exception] = None
+        for db_name in dedup_candidates:
+            engine = None
+            try:
+                engine = _create_engine_for_db(db_name)
+                with engine.connect() as conn:
+                    rows = conn.execute(
+                        text(
+                            "SELECT datname FROM pg_database "
+                            "WHERE datistemplate = false AND datallowconn = true "
+                            "ORDER BY datname"
+                        )
+                    ).fetchall()
+                names = [str(row[0]) for row in rows if row and row[0]]
+                if names:
+                    return names
+            except Exception as exc:
+                last_error = exc
+            finally:
+                if engine is not None:
+                    engine.dispose()
+
+        if configured_db:
+            return [configured_db]
+        if last_error is not None:
+            raise last_error
+        raise ValueError("未能获取 PostgreSQL 数据库列表")
+
+    if normalized_type == "mysql":
+        engine = None
+        try:
+            engine = _create_engine_for_db(None)
+            with engine.connect() as conn:
+                rows = conn.execute(text("SHOW DATABASES")).fetchall()
+            names = [str(row[0]) for row in rows if row and row[0]]
+            return names
+        finally:
+            if engine is not None:
+                engine.dispose()
+
+    if normalized_type == "mssql":
+        engine = None
+        admin_db = str(config.get("database", "") or "").strip() or "master"
+        try:
+            engine = _create_engine_for_db(admin_db)
+            with engine.connect() as conn:
+                rows = conn.execute(text("SELECT name FROM sys.databases ORDER BY name")).fetchall()
+            names = [str(row[0]) for row in rows if row and row[0]]
+            return names
+        finally:
+            if engine is not None:
+                engine.dispose()
+
+    # Oracle 无统一的“数据库名列表”语义，回退为当前用户输入值
+    configured_db = str(config.get("database", "") or "").strip()
+    if configured_db:
+        return [configured_db]
+    raise ValueError("当前数据库类型暂不支持自动拉取数据库名称，请手动填写数据库名称")
+
+
 def format_db_error(exc: Exception, db_type: Optional[str]) -> str:
     raw_message = str(exc).strip() or exc.__class__.__name__
     # 避免把连接串中的明文密码返回前端
@@ -5349,6 +7693,1274 @@ def format_db_error(exc: Exception, db_type: Optional[str]) -> str:
     return safe_message
 
 
+def _escape_md_cell(value: Any) -> str:
+    text_value = str(value or "").replace("\n", " ").strip()
+    if not text_value:
+        return "-"
+    return text_value.replace("|", "\\|")
+
+
+def _quote_identifier(identifier: str, db_type: str) -> str:
+    if db_type == "mysql":
+        return f"`{identifier.replace('`', '``')}`"
+    if db_type == "mssql":
+        return f"[{identifier.replace(']', ']]')}]"
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _build_qualified_table_name(schema_name: Optional[str], table_name: str, db_type: str) -> str:
+    if schema_name:
+        return f"{_quote_identifier(schema_name, db_type)}.{_quote_identifier(table_name, db_type)}"
+    return _quote_identifier(table_name, db_type)
+
+
+def _shorten_text(value: Any, max_len: int = 120) -> str:
+    text_value = str(value or "").strip()
+    if len(text_value) <= max_len:
+        return text_value
+    return text_value[: max_len - 1] + "…"
+
+
+def _safe_iso_ts(value: Any) -> str:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return ""
+    try:
+        return datetime.fromisoformat(text_value).isoformat(timespec="seconds")
+    except Exception:
+        return text_value
+
+
+def upsert_database_knowledge_source(
+    username: str,
+    db_type: str,
+    config: dict,
+    snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    """把数据库快照持久化为用户级知识库条目。"""
+    username = str(username or "default").strip() or "default"
+
+    source_entry = {
+        "source_label": str(snapshot.get("source_label", "") or ""),
+        "db_type": normalize_db_type(db_type),
+        "host": str(config.get("host", "") or "").strip(),
+        "port": str(config.get("port", "") or "").strip(),
+        "database": str(snapshot.get("database", "") or "").strip(),
+        "table_count": int(snapshot.get("table_count", 0) or 0),
+        "column_count": int(snapshot.get("column_count", 0) or 0),
+        "loaded_at": datetime.now().isoformat(timespec="seconds"),
+        "tables": snapshot.get("tables", []),
+        "summary": _shorten_text(snapshot.get("summary", ""), max_len=500),
+    }
+
+    kb_data = _load_user_config(username, "database_knowledge_base.json", {"sources": []})
+    sources = kb_data.get("sources", [])
+    if not isinstance(sources, list):
+        sources = []
+
+    source_label = source_entry["source_label"]
+    source_db = source_entry["database"]
+    source_host = source_entry["host"]
+    source_port = source_entry["port"]
+    replaced = False
+
+    for idx, existing in enumerate(sources):
+        if not isinstance(existing, dict):
+            continue
+        existing_label = str(existing.get("source_label", "") or "").strip()
+        existing_db = str(existing.get("database", "") or "").strip()
+        existing_host = str(existing.get("host", "") or "").strip()
+        existing_port = str(existing.get("port", "") or "").strip()
+
+        if (
+            (source_label and existing_label == source_label)
+            or (
+                source_db
+                and source_host == existing_host
+                and source_port == existing_port
+                and source_db == existing_db
+            )
+        ):
+            sources[idx] = source_entry
+            replaced = True
+            break
+
+    if not replaced:
+        sources.append(source_entry)
+
+    sources = sorted(
+        [item for item in sources if isinstance(item, dict)],
+        key=lambda item: _safe_iso_ts(item.get("loaded_at", "")),
+        reverse=True,
+    )[:30]
+
+    kb_data["sources"] = sources
+    _save_user_config(username, "database_knowledge_base.json", kb_data)
+    return source_entry
+
+
+def build_database_knowledge_context(
+    username: str,
+    user_query: str,
+    preferred_source_labels: Optional[List[str]] = None,
+    analysis_language: str = "zh-CN",
+    max_tables: int = 6,
+    max_columns_per_table: int = 10,
+    max_chars: int = 2600,
+) -> str:
+    """从数据库知识库检索与当前问题相关的结构化上下文。"""
+    username = str(username or "default").strip() or "default"
+    kb_data = _load_user_config(username, "database_knowledge_base.json", {"sources": []})
+    raw_sources = kb_data.get("sources", [])
+    if not isinstance(raw_sources, list) or not raw_sources:
+        return ""
+
+    sources = [item for item in raw_sources if isinstance(item, dict)]
+    if not sources:
+        return ""
+
+    preferred_labels = set(
+        str(item or "").strip()
+        for item in (preferred_source_labels or [])
+        if str(item or "").strip()
+    )
+    if preferred_labels:
+        matched_sources = [
+            item
+            for item in sources
+            if str(item.get("source_label", "") or "").strip() in preferred_labels
+        ]
+        if matched_sources:
+            sources = matched_sources
+
+    query_text = str(user_query or "").lower()
+    query_tokens = [
+        token for token in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]{2,}", query_text)
+        if token
+    ]
+
+    def table_score(table_item: Dict[str, Any]) -> int:
+        table_name = str(table_item.get("name", "") or "").lower()
+        table_comment = str(table_item.get("table_comment", "") or "").lower()
+        columns = table_item.get("columns", [])
+        column_blob = " ".join(
+            f"{str(col.get('name', '') or '')} {str(col.get('definition', '') or '')}"
+            for col in columns
+            if isinstance(col, dict)
+        ).lower()
+
+        if not query_tokens:
+            return 1
+
+        score = 0
+        for token in query_tokens:
+            if token in table_name:
+                score += 6
+            if token in table_comment:
+                score += 3
+            if token in column_blob:
+                score += 2
+        return score
+
+    lines: List[str] = []
+    if analysis_language == "en":
+        lines.append("Database knowledge base retrieval context:")
+    else:
+        lines.append("数据库知识库检索上下文：")
+
+    source_count = 0
+    for source in sources:
+        if source_count >= 2:
+            break
+
+        tables = source.get("tables", [])
+        if not isinstance(tables, list):
+            tables = []
+        ranked_tables = sorted(
+            [item for item in tables if isinstance(item, dict)],
+            key=lambda item: (table_score(item), int(item.get("row_count") or 0)),
+            reverse=True,
+        )
+
+        if not ranked_tables:
+            continue
+
+        source_label = str(source.get("source_label", "") or "").strip()
+        table_count = int(source.get("table_count", len(tables)) or len(tables))
+        column_count = int(source.get("column_count", 0) or 0)
+
+        lines.append(
+            f"- 数据源: {source_label} (表{table_count}张, 字段{column_count}个)"
+        )
+
+        selected_tables = ranked_tables[:max_tables]
+        for table in selected_tables:
+            table_name = str(table.get("name", "") or "")
+            row_count = table.get("row_count")
+            table_comment = _shorten_text(table.get("table_comment", ""), max_len=80)
+
+            if analysis_language == "en":
+                table_line = f"  - Table: {table_name}, rows={row_count if row_count is not None else 'unknown'}"
+            else:
+                table_line = f"  - 表: {table_name}, 行数={row_count if row_count is not None else '未知'}"
+
+            if table_comment:
+                table_line += f", 说明={table_comment}"
+            lines.append(table_line)
+
+            columns = table.get("columns", [])
+            if not isinstance(columns, list) or not columns:
+                continue
+
+            column_entries: List[str] = []
+            for col in columns[:max_columns_per_table]:
+                if not isinstance(col, dict):
+                    continue
+                col_name = str(col.get("name", "") or "")
+                col_type = str(col.get("type", "") or "")
+                col_def = _shorten_text(col.get("definition", ""), max_len=40)
+                entry = f"{col_name}({col_type})"
+                if col_def:
+                    entry += f":{col_def}"
+                column_entries.append(entry)
+
+            if column_entries:
+                if analysis_language == "en":
+                    lines.append(f"    key columns: {', '.join(column_entries)}")
+                else:
+                    lines.append(f"    关键字段: {', '.join(column_entries)}")
+
+        source_count += 1
+
+    context_text = "\n".join(lines).strip()
+    if len(context_text) > max_chars:
+        context_text = context_text[: max_chars - 1] + "…"
+    return context_text
+
+
+def _normalize_source_labels(raw_source_labels: Any) -> List[str]:
+    if not isinstance(raw_source_labels, list):
+        return []
+
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in raw_source_labels:
+        if isinstance(item, dict):
+            candidate = str(
+                item.get("source_label")
+                or item.get("label")
+                or item.get("database")
+                or ""
+            ).strip()
+        else:
+            candidate = str(item or "").strip()
+
+        if not candidate:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized
+
+
+def _normalize_data_dictionary_item(raw_item: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_item, dict):
+        return None
+
+    table_name = str(
+        raw_item.get("table")
+        or raw_item.get("table_name")
+        or raw_item.get("tableName")
+        or ""
+    ).strip()
+    field_name = str(
+        raw_item.get("field")
+        or raw_item.get("column")
+        or raw_item.get("field_name")
+        or raw_item.get("column_name")
+        or raw_item.get("fieldName")
+        or ""
+    ).strip()
+    code_explanation = str(
+        raw_item.get("code_explanation")
+        or raw_item.get("schema_meaning")
+        or raw_item.get("schema_definition")
+        or raw_item.get("column_comment")
+        or raw_item.get("comment")
+        or raw_item.get("db_comment")
+        or ""
+    ).strip()
+    ai_understanding = str(
+        raw_item.get("ai_understanding")
+        or raw_item.get("proposed_meaning")
+        or raw_item.get("meaning")
+        or raw_item.get("business_meaning")
+        or raw_item.get("description")
+        or raw_item.get("desc")
+        or ""
+    ).strip()
+
+    if not table_name and not field_name and not ai_understanding and not code_explanation:
+        return None
+
+    source_label = str(
+        raw_item.get("source_label")
+        or raw_item.get("source")
+        or raw_item.get("database")
+        or ""
+    ).strip()
+    question = str(
+        raw_item.get("question")
+        or raw_item.get("confirm_question")
+        or raw_item.get("uncertainty")
+        or ""
+    ).strip()
+    confidence = str(raw_item.get("confidence") or raw_item.get("certainty") or "").strip().lower()
+    analysis_usage = str(
+        raw_item.get("analysis_usage")
+        or raw_item.get("usage")
+        or raw_item.get("use_case")
+        or ""
+    ).strip()
+
+    aliases_raw = raw_item.get("aliases") or []
+    aliases: List[str] = []
+    if isinstance(aliases_raw, list):
+        for alias_item in aliases_raw:
+            alias_text = str(alias_item or "").strip()
+            if alias_text and alias_text not in aliases:
+                aliases.append(alias_text)
+
+    raw_id = str(raw_item.get("id") or "").strip()
+    if raw_id:
+        item_id = raw_id
+    else:
+        id_seed = f"{source_label}|{table_name}|{field_name}|{ai_understanding}|{code_explanation}"
+        item_id = hashlib.sha1(id_seed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+    return {
+        "id": item_id,
+        "source_label": source_label,
+        "table": table_name,
+        "field": field_name,
+        "code_explanation": code_explanation,
+        "ai_understanding": ai_understanding,
+        "meaning": ai_understanding,
+        "question": question,
+        "confidence": confidence,
+        "analysis_usage": analysis_usage,
+        "aliases": aliases,
+    }
+
+
+_DATA_DICTIONARY_IMPORT_COLUMN_ALIASES = {
+    "source_label": {
+        "sourcelabel", "source", "datasource", "database", "db", "数据源", "来源", "库", "数据库", "连接名", "连接"
+    },
+    "table": {
+        "table", "tablename", "tablename", "sheet", "sheetname", "数据表", "表", "表名", "工作表", "工作表名"
+    },
+    "field": {
+        "field", "column", "fieldname", "columnname", "字段", "字段名", "列", "列名"
+    },
+    "code_explanation": {
+        "codeexplanation", "schemaexplanation", "schemadefinition", "schemameaning", "columncomment", "comment", "dbcomment",
+        "代码释义", "字段释义", "架构释义", "结构释义", "代码定义", "字段注释", "列注释", "注释"
+    },
+    "ai_understanding": {
+        "aiunderstanding", "meaning", "semanticmeaning", "businessmeaning", "proposedmeaning", "description", "datadefinition",
+        "字段定义", "数据定义", "语义定义", "业务含义", "含义", "理解", "ai理解", "ai关联理解", "ai关联理解的数据定义"
+    },
+    "question": {
+        "question", "confirmquestion", "uncertainty", "remark", "remarks", "note", "notes", "问题", "待确认点", "备注", "说明"
+    },
+    "confidence": {
+        "confidence", "certainty", "score", "置信度", "可信度"
+    },
+    "analysis_usage": {
+        "analysisusage", "usage", "usecase", "purpose", "分析用途", "用途", "使用场景"
+    },
+}
+
+
+def _normalize_data_dictionary_import_key(raw_key: Any) -> str:
+    key_text = str(raw_key or "").strip().lower()
+    return re.sub(r"[\s_\-:/\\|（）()【】\[\]·,.，。：；;]+", "", key_text)
+
+
+def _canonical_data_dictionary_import_key(raw_key: Any) -> Optional[str]:
+    normalized = _normalize_data_dictionary_import_key(raw_key)
+    if not normalized:
+        return None
+    for canonical, aliases in _DATA_DICTIONARY_IMPORT_COLUMN_ALIASES.items():
+        if normalized in aliases:
+            return canonical
+    return None
+
+
+def _clean_data_dictionary_import_value(raw_value: Any) -> str:
+    if raw_value is None:
+        return ""
+    try:
+        if pd.isna(raw_value):
+            return ""
+    except Exception:
+        pass
+    return str(raw_value).strip()
+
+
+def _normalize_imported_data_dictionary_row(
+    raw_row: Dict[str, Any],
+    default_source_label: str = "",
+    default_table_name: str = "",
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_row, dict):
+        return None
+
+    normalized_row: Dict[str, Any] = {}
+    for raw_key, raw_value in raw_row.items():
+        canonical_key = _canonical_data_dictionary_import_key(raw_key)
+        if not canonical_key:
+            continue
+        cleaned_value = _clean_data_dictionary_import_value(raw_value)
+        if cleaned_value:
+            normalized_row[canonical_key] = cleaned_value
+
+    if default_source_label and not normalized_row.get("source_label"):
+        normalized_row["source_label"] = default_source_label
+    if default_table_name and not normalized_row.get("table"):
+        normalized_row["table"] = default_table_name
+    if normalized_row.get("ai_understanding") and not normalized_row.get("meaning"):
+        normalized_row["meaning"] = normalized_row["ai_understanding"]
+
+    if not any(normalized_row.get(field) for field in ("table", "field", "code_explanation", "ai_understanding", "meaning")):
+        return None
+    return normalized_row
+
+
+def _decode_uploaded_text(raw_bytes: bytes) -> str:
+    if not raw_bytes:
+        return ""
+
+    encodings_to_try: List[str] = []
+    detected_encoding = str((chardet.detect(raw_bytes) or {}).get("encoding") or "").strip()
+    if detected_encoding:
+        encodings_to_try.append(detected_encoding)
+    encodings_to_try.extend(["utf-8-sig", "utf-8", "gb18030", "gbk"])
+
+    seen: set[str] = set()
+    for encoding in encodings_to_try:
+        encoding_key = encoding.lower()
+        if encoding_key in seen:
+            continue
+        seen.add(encoding_key)
+        try:
+            return raw_bytes.decode(encoding)
+        except Exception:
+            continue
+    return raw_bytes.decode("utf-8", errors="ignore")
+
+
+def _extract_data_dictionary_import_items(
+    filename: str,
+    raw_bytes: bytes,
+    default_source_label: str = "",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    suffix = Path(filename or "").suffix.lower()
+    imported_items: List[Dict[str, Any]] = []
+    skipped_count = 0
+    sheet_names: List[str] = []
+
+    def append_rows(rows: List[Any], table_name: str = "") -> None:
+        nonlocal skipped_count
+        for row in rows:
+            normalized = _normalize_imported_data_dictionary_row(
+                row if isinstance(row, dict) else {},
+                default_source_label=default_source_label,
+                default_table_name=table_name,
+            )
+            if normalized:
+                imported_items.append(normalized)
+            else:
+                skipped_count += 1
+
+    if suffix == ".json":
+        text = _decode_uploaded_text(raw_bytes)
+        payload = json.loads(text)
+        if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            append_rows(payload.get("items", []))
+        elif isinstance(payload, dict) and isinstance(payload.get("entries"), list):
+            append_rows(payload.get("entries", []))
+        elif isinstance(payload, dict) and isinstance(payload.get("tables"), dict):
+            for table_name, rows in payload.get("tables", {}).items():
+                if isinstance(rows, list):
+                    append_rows(rows, table_name=str(table_name or "").strip())
+        elif isinstance(payload, list):
+            append_rows(payload)
+        elif isinstance(payload, dict):
+            append_rows([payload])
+        else:
+            raise ValueError("JSON 数据字典格式不支持")
+    elif suffix == ".csv":
+        text = _decode_uploaded_text(raw_bytes)
+        frame = pd.read_csv(io.StringIO(text), dtype=str, keep_default_na=False)
+        append_rows(frame.to_dict(orient="records"))
+    elif suffix in {".xlsx", ".xls"}:
+        workbook = pd.read_excel(io.BytesIO(raw_bytes), sheet_name=None, dtype=str)
+        for sheet_name, frame in workbook.items():
+            if frame is None:
+                continue
+            safe_sheet_name = str(sheet_name or "").strip()
+            if safe_sheet_name:
+                sheet_names.append(safe_sheet_name)
+            default_table_name = ""
+            normalized_sheet_key = _normalize_data_dictionary_import_key(safe_sheet_name)
+            if normalized_sheet_key not in {"sheet", "sheet1", "sheet2", "sheet3"}:
+                default_table_name = safe_sheet_name
+            append_rows(frame.to_dict(orient="records"), table_name=default_table_name)
+    else:
+        raise ValueError("仅支持 csv、xlsx、xls、json 格式的数据字典导入")
+
+    return imported_items, {
+        "file_name": filename,
+        "file_type": suffix or "unknown",
+        "imported_count": len(imported_items),
+        "skipped_count": skipped_count,
+        "sheet_names": sheet_names,
+    }
+
+
+def upsert_confirmed_data_dictionary(
+    username: str,
+    session_id: str,
+    source_labels: Any,
+    dictionary_items: Any,
+    selected_ids: Any = None,
+) -> Dict[str, Any]:
+    username = str(username or "default").strip() or "default"
+    session_id = str(session_id or "").strip()
+    normalized_sources = _normalize_source_labels(source_labels)
+    default_source = normalized_sources[0] if normalized_sources else ""
+
+    selected_id_set = {
+        str(item or "").strip()
+        for item in (selected_ids or [])
+        if str(item or "").strip()
+    }
+
+    normalized_items: List[Dict[str, Any]] = []
+    for raw_item in (dictionary_items or []):
+        normalized = _normalize_data_dictionary_item(raw_item)
+        if not normalized:
+            continue
+        if selected_id_set and normalized["id"] not in selected_id_set:
+            continue
+        if not normalized.get("source_label") and default_source:
+            normalized["source_label"] = default_source
+        normalized_items.append(normalized)
+
+    if not normalized_items:
+        return {
+            "added_count": 0,
+            "updated_count": 0,
+            "total_count": len(_load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []}).get("entries", [])),
+            "saved_item_ids": [],
+            "source_labels": normalized_sources,
+        }
+
+    kb_data = _load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []})
+    entries = kb_data.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    added_count = 0
+    updated_count = 0
+    saved_item_ids: List[str] = []
+
+    def _entry_key(item: Dict[str, Any]) -> str:
+        return "|".join([
+            str(item.get("source_label", "") or "").strip().lower(),
+            str(item.get("table", "") or "").strip().lower(),
+            str(item.get("field", "") or "").strip().lower(),
+        ])
+
+    for item in normalized_items:
+        saved_item_ids.append(item["id"])
+        candidate = {
+            **item,
+            "session_id": session_id,
+            "confirmed_at": now_iso,
+            "updated_at": now_iso,
+        }
+        key = _entry_key(candidate)
+        matched_index = -1
+        for idx, existing in enumerate(entries):
+            if not isinstance(existing, dict):
+                continue
+            if _entry_key(existing) == key:
+                matched_index = idx
+                break
+
+        if matched_index >= 0:
+            existing_entry = entries[matched_index] if isinstance(entries[matched_index], dict) else {}
+            if not candidate.get("code_explanation"):
+                candidate["code_explanation"] = str(existing_entry.get("code_explanation") or "")
+            if not candidate.get("ai_understanding"):
+                candidate["ai_understanding"] = str(existing_entry.get("ai_understanding") or existing_entry.get("meaning") or "")
+            if not candidate.get("meaning"):
+                candidate["meaning"] = str(candidate.get("ai_understanding") or existing_entry.get("meaning") or "")
+            if not candidate.get("question"):
+                candidate["question"] = str(existing_entry.get("question") or "")
+            if not candidate.get("confidence"):
+                candidate["confidence"] = str(existing_entry.get("confidence") or "")
+            if not candidate.get("analysis_usage"):
+                candidate["analysis_usage"] = str(existing_entry.get("analysis_usage") or "")
+            if not candidate.get("aliases"):
+                candidate["aliases"] = list(existing_entry.get("aliases") or [])
+            candidate["created_at"] = str(existing_entry.get("created_at") or existing_entry.get("confirmed_at") or now_iso)
+            entries[matched_index] = candidate
+            updated_count += 1
+        else:
+            candidate["created_at"] = now_iso
+            entries.append(candidate)
+            added_count += 1
+
+    entries = sorted(
+        [item for item in entries if isinstance(item, dict)],
+        key=lambda item: _safe_iso_ts(item.get("updated_at") or item.get("confirmed_at") or ""),
+        reverse=True,
+    )[:800]
+    kb_data["entries"] = entries
+    _save_user_config(username, "data_dictionary_knowledge_base.json", kb_data)
+
+    return {
+        "added_count": added_count,
+        "updated_count": updated_count,
+        "total_count": len(entries),
+        "saved_item_ids": saved_item_ids,
+        "source_labels": normalized_sources,
+    }
+
+
+def build_confirmed_data_dictionary_context(
+    username: str,
+    user_query: str,
+    preferred_source_labels: Optional[List[str]] = None,
+    analysis_language: str = "zh-CN",
+    max_items: int = 18,
+    max_chars: int = 1800,
+) -> str:
+    username = str(username or "default").strip() or "default"
+    kb_data = _load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []})
+    raw_entries = kb_data.get("entries", [])
+    if not isinstance(raw_entries, list) or not raw_entries:
+        return ""
+
+    entries = [item for item in raw_entries if isinstance(item, dict)]
+    if not entries:
+        return ""
+
+    preferred_labels = set(
+        str(item or "").strip()
+        for item in (preferred_source_labels or [])
+        if str(item or "").strip()
+    )
+    if preferred_labels:
+        matched_entries = [
+            item for item in entries
+            if str(item.get("source_label", "") or "").strip() in preferred_labels
+        ]
+        if matched_entries:
+            entries = matched_entries
+
+    query_text = str(user_query or "").lower()
+    query_tokens = [
+        token
+        for token in re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]{2,}", query_text)
+        if token
+    ]
+
+    def _entry_score(entry: Dict[str, Any]) -> int:
+        source_label = str(entry.get("source_label", "") or "").lower()
+        table_name = str(entry.get("table", "") or "").lower()
+        field_name = str(entry.get("field", "") or "").lower()
+        meaning = str(entry.get("meaning", "") or "").lower()
+        question = str(entry.get("question", "") or "").lower()
+        usage = str(entry.get("analysis_usage", "") or "").lower()
+        aliases = " ".join(str(alias or "") for alias in entry.get("aliases", [])).lower()
+        blob = f"{source_label} {table_name} {field_name} {meaning} {question} {usage} {aliases}"
+        if not query_tokens:
+            return 1
+        score = 0
+        for token in query_tokens:
+            if token in table_name or token in field_name:
+                score += 6
+            if token in meaning or token in question or token in usage:
+                score += 4
+            if token in source_label or token in aliases:
+                score += 2
+            if token in blob:
+                score += 1
+        return score
+
+    ranked_entries = sorted(
+        entries,
+        key=lambda item: (_entry_score(item), _safe_iso_ts(item.get("updated_at") or item.get("confirmed_at") or "")),
+        reverse=True,
+    )
+
+    selected_entries = ranked_entries[:max_items]
+    if not selected_entries:
+        return ""
+
+    lines: List[str] = []
+    if analysis_language == "en":
+        lines.append("Knowledge-base data dictionary context:")
+    else:
+        lines.append("知识库中的数据字典理解：")
+
+    for item in selected_entries:
+        source_label = str(item.get("source_label", "") or "").strip()
+        table_name = str(item.get("table", "") or "").strip()
+        field_name = str(item.get("field", "") or "").strip()
+        meaning = _shorten_text(item.get("ai_understanding") or item.get("meaning") or item.get("code_explanation", ""), max_len=120)
+        code_explanation = _shorten_text(item.get("code_explanation", ""), max_len=80)
+        confidence = str(item.get("confidence", "") or "").strip()
+        usage = _shorten_text(item.get("analysis_usage", ""), max_len=80)
+
+        subject = f"{table_name}.{field_name}" if table_name and field_name else table_name or field_name or "(unknown)"
+        if source_label:
+            subject = f"{source_label}::{subject}"
+
+        if analysis_language == "en":
+            line = f"- {subject} => {meaning or 'knowledge-base business meaning'}"
+            if code_explanation and code_explanation != meaning:
+                line += f"; schema note: {code_explanation}"
+            if confidence:
+                line += f" (confidence: {confidence})"
+            if usage:
+                line += f"; usage: {usage}"
+        else:
+            line = f"- {subject} => {meaning or '知识库业务含义'}"
+            if code_explanation and code_explanation != meaning:
+                line += f"；代码释义：{code_explanation}"
+            if confidence:
+                line += f"（置信度：{confidence}）"
+            if usage:
+                line += f"；分析用途：{usage}"
+        lines.append(line)
+
+    context_text = "\n".join(lines).strip()
+    if len(context_text) > max_chars:
+        context_text = context_text[: max_chars - 1] + "…"
+    return context_text
+
+
+def build_database_context_snapshot(db_type: str, config: dict) -> Dict[str, Any]:
+    """提取数据库结构快照，用于注入分析上下文。"""
+    normalized_type = normalize_db_type(db_type)
+    config = config or {}
+    database_name = str(config.get("database", "") or "").strip()
+
+    if normalized_type != "sqlite" and not database_name:
+        raise ValueError("请先选择数据库名称后再导入上下文")
+
+    from sqlalchemy import inspect
+
+    engine = build_db_engine(normalized_type, config)
+    inspector = inspect(engine)
+
+    source_label = (
+        f"{normalized_type}@{database_name}"
+        if normalized_type == "sqlite"
+        else f"{normalized_type}@{str(config.get('host', 'localhost') or 'localhost').strip()}:{str(config.get('port', '') or DB_DEFAULT_PORTS.get(normalized_type, '')).strip() or DB_DEFAULT_PORTS.get(normalized_type, '')}/{database_name}"
+    )
+
+    lines: List[str] = [
+        "# 数据库知识库上下文快照",
+        f"- 数据源: {source_label}",
+        f"- 导入时间: {datetime.now().isoformat(timespec='seconds')}",
+        "",
+    ]
+
+    table_targets: List[Tuple[Optional[str], str]] = []
+
+    if normalized_type in ("postgresql", "mssql", "oracle"):
+        try:
+            schema_names = inspector.get_schema_names()
+        except Exception:
+            schema_names = []
+
+        for schema_name in schema_names:
+            if not schema_name:
+                continue
+            lower_schema = str(schema_name).lower()
+            upper_schema = str(schema_name).upper()
+
+            if normalized_type == "postgresql" and lower_schema in {"pg_catalog", "information_schema", "pg_toast"}:
+                continue
+            if normalized_type == "mssql" and upper_schema in {"INFORMATION_SCHEMA", "SYS"}:
+                continue
+            if normalized_type == "oracle" and upper_schema in {"SYS", "SYSTEM", "XDB", "MDSYS", "CTXSYS", "WMSYS"}:
+                continue
+
+            try:
+                schema_tables = inspector.get_table_names(schema=schema_name)
+            except Exception:
+                schema_tables = []
+
+            for table_name in schema_tables:
+                table_targets.append((schema_name, table_name))
+    else:
+        try:
+            base_tables = inspector.get_table_names()
+        except Exception:
+            base_tables = []
+        for table_name in base_tables:
+            table_targets.append((None, table_name))
+
+    table_targets = sorted(table_targets, key=lambda item: ((item[0] or ""), item[1]))
+
+    total_tables = 0
+    total_columns = 0
+    table_records: List[Dict[str, Any]] = []
+
+    with engine.connect() as conn:
+        for schema_name, table_name in table_targets:
+            total_tables += 1
+
+            try:
+                columns = inspector.get_columns(table_name, schema=schema_name)
+            except Exception:
+                columns = []
+
+            total_columns += len(columns)
+
+            try:
+                pk_info = inspector.get_pk_constraint(table_name, schema=schema_name) or {}
+                pk_columns = set(pk_info.get("constrained_columns") or [])
+            except Exception:
+                pk_columns = set()
+
+            table_comment = ""
+            try:
+                comment_payload = inspector.get_table_comment(table_name, schema=schema_name) or {}
+                table_comment = str(comment_payload.get("text") or "").strip()
+            except Exception:
+                table_comment = ""
+
+            row_count: Optional[int] = None
+            try:
+                qualified_table_name = _build_qualified_table_name(schema_name, table_name, normalized_type)
+                row_count_result = conn.execute(text(f"SELECT COUNT(*) AS cnt FROM {qualified_table_name}"))
+                row_count_value = row_count_result.scalar()
+                row_count = int(row_count_value) if row_count_value is not None else 0
+            except Exception:
+                row_count = None
+
+            display_table_name = f"{schema_name}.{table_name}" if schema_name else table_name
+            lines.append(f"## 表: {display_table_name}")
+            lines.append(f"- 数据量(行数): {row_count if row_count is not None else '未知'}")
+            lines.append(f"- 字段数量: {len(columns)}")
+            if table_comment:
+                lines.append(f"- 表定义/说明: {table_comment}")
+
+            table_record: Dict[str, Any] = {
+                "schema": schema_name or "",
+                "name": display_table_name,
+                "row_count": row_count,
+                "column_count": len(columns),
+                "table_comment": table_comment,
+                "columns": [],
+            }
+
+            if not columns:
+                lines.append("- 字段信息: 无法读取")
+                lines.append("")
+                table_records.append(table_record)
+                continue
+
+            lines.append("| 字段名 | 数据类型 | 可空 | 默认值 | 字段定义/说明 | 主键 |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
+            for column in columns:
+                column_name = str(column.get("name") or "")
+                column_type = _escape_md_cell(column.get("type") or "")
+                nullable = "是" if column.get("nullable", True) else "否"
+                default_value = _escape_md_cell(column.get("default") or "")
+                definition_text = _escape_md_cell(column.get("comment") or column.get("definition") or "")
+                is_pk = "是" if column_name in pk_columns else "-"
+                lines.append(
+                    f"| {_escape_md_cell(column_name)} | {column_type} | {nullable} | {default_value} | {definition_text} | {is_pk} |"
+                )
+                table_record["columns"].append(
+                    {
+                        "name": column_name,
+                        "type": str(column.get("type") or ""),
+                        "nullable": bool(column.get("nullable", True)),
+                        "default": str(column.get("default") or ""),
+                        "definition": str(column.get("comment") or column.get("definition") or ""),
+                        "is_pk": column_name in pk_columns,
+                    }
+                )
+            lines.append("")
+            table_records.append(table_record)
+
+    engine.dispose()
+
+    lines.insert(3, f"- 表数量: {total_tables}")
+    lines.insert(4, f"- 字段总数: {total_columns}")
+
+    return {
+        "source_label": source_label,
+        "database": database_name,
+        "table_count": total_tables,
+        "column_count": total_columns,
+        "tables": table_records,
+        "summary": f"{source_label} 共 {total_tables} 张表、{total_columns} 个字段",
+        "context_text": "\n".join(lines).strip(),
+    }
+
+
+def _schema_table_id(schema_name: Optional[str], table_name: str) -> str:
+    schema_part = str(schema_name or "default").strip() or "default"
+    table_part = str(table_name or "table").strip() or "table"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", f"{schema_part}.{table_part}").strip("_")
+
+
+def build_database_schema_graph(db_type: str, config: dict) -> Dict[str, Any]:
+    """Build ChartDB-style table/relationship graph metadata from a live database."""
+    normalized_type = normalize_db_type(db_type)
+    config = config or {}
+    database_name = str(config.get("database", "") or "").strip()
+
+    if normalized_type != "sqlite" and not database_name:
+        raise ValueError("请先选择数据库名称后再生成关系图")
+
+    from sqlalchemy import inspect
+
+    engine = build_db_engine(normalized_type, config)
+    inspector = inspect(engine)
+
+    source_label = (
+        f"{normalized_type}@{database_name}"
+        if normalized_type == "sqlite"
+        else f"{normalized_type}@{str(config.get('host', 'localhost') or 'localhost').strip()}:{str(config.get('port', '') or DB_DEFAULT_PORTS.get(normalized_type, '')).strip() or DB_DEFAULT_PORTS.get(normalized_type, '')}/{database_name}"
+    )
+
+    table_targets: List[Tuple[Optional[str], str]] = []
+    if normalized_type in ("postgresql", "mssql", "oracle"):
+        try:
+            schema_names = inspector.get_schema_names()
+        except Exception:
+            schema_names = []
+
+        for schema_name in schema_names:
+            if not schema_name:
+                continue
+            lower_schema = str(schema_name).lower()
+            upper_schema = str(schema_name).upper()
+            if normalized_type == "postgresql" and lower_schema in {"pg_catalog", "information_schema", "pg_toast"}:
+                continue
+            if normalized_type == "mssql" and upper_schema in {"INFORMATION_SCHEMA", "SYS"}:
+                continue
+            if normalized_type == "oracle" and upper_schema in {"SYS", "SYSTEM", "XDB", "MDSYS", "CTXSYS", "WMSYS"}:
+                continue
+            try:
+                schema_tables = inspector.get_table_names(schema=schema_name)
+            except Exception:
+                schema_tables = []
+            for table_name in schema_tables:
+                table_targets.append((schema_name, table_name))
+    else:
+        try:
+            base_tables = inspector.get_table_names()
+        except Exception:
+            base_tables = []
+        for table_name in base_tables:
+            table_targets.append((None, table_name))
+
+    table_targets = sorted(table_targets, key=lambda item: ((item[0] or ""), item[1]))
+    tables: List[Dict[str, Any]] = []
+    relationships: List[Dict[str, Any]] = []
+    table_id_lookup: Dict[Tuple[str, str], str] = {}
+
+    with engine.connect() as conn:
+        for schema_name, table_name in table_targets:
+            table_id = _schema_table_id(schema_name, table_name)
+            schema_key = str(schema_name or "").strip()
+            table_id_lookup[(schema_key, table_name)] = table_id
+            display_name = f"{schema_name}.{table_name}" if schema_name else table_name
+
+            try:
+                columns = inspector.get_columns(table_name, schema=schema_name)
+            except Exception:
+                columns = []
+
+            try:
+                pk_info = inspector.get_pk_constraint(table_name, schema=schema_name) or {}
+                pk_columns = set(pk_info.get("constrained_columns") or [])
+            except Exception:
+                pk_columns = set()
+
+            row_count: Optional[int] = None
+            try:
+                qualified_table_name = _build_qualified_table_name(schema_name, table_name, normalized_type)
+                row_count_value = conn.execute(text(f"SELECT COUNT(*) AS cnt FROM {qualified_table_name}")).scalar()
+                row_count = int(row_count_value) if row_count_value is not None else 0
+            except Exception:
+                row_count = None
+
+            table_columns = []
+            for column in columns:
+                column_name = str(column.get("name") or "")
+                table_columns.append(
+                    {
+                        "name": column_name,
+                        "type": str(column.get("type") or ""),
+                        "nullable": bool(column.get("nullable", True)),
+                        "default": str(column.get("default") or ""),
+                        "definition": str(column.get("comment") or column.get("definition") or ""),
+                        "is_pk": column_name in pk_columns,
+                    }
+                )
+
+            tables.append(
+                {
+                    "id": table_id,
+                    "schema": schema_key,
+                    "name": table_name,
+                    "display_name": display_name,
+                    "row_count": row_count,
+                    "columns": table_columns,
+                }
+            )
+
+        for schema_name, table_name in table_targets:
+            source_table_id = table_id_lookup.get((str(schema_name or "").strip(), table_name))
+            if not source_table_id:
+                continue
+
+            try:
+                foreign_keys = inspector.get_foreign_keys(table_name, schema=schema_name)
+            except Exception:
+                foreign_keys = []
+
+            for index, foreign_key in enumerate(foreign_keys or []):
+                referred_table = str(foreign_key.get("referred_table") or "").strip()
+                if not referred_table:
+                    continue
+                referred_schema = foreign_key.get("referred_schema")
+                referred_schema_key = str(referred_schema if referred_schema is not None else (schema_name or "")).strip()
+                target_table_id = table_id_lookup.get((referred_schema_key, referred_table))
+                if not target_table_id and not referred_schema_key:
+                    target_table_id = table_id_lookup.get(("", referred_table))
+                if not target_table_id:
+                    continue
+
+                constrained_columns = [str(item) for item in (foreign_key.get("constrained_columns") or [])]
+                referred_columns = [str(item) for item in (foreign_key.get("referred_columns") or [])]
+                fk_name = str(foreign_key.get("name") or "").strip()
+                relationship_id = re.sub(
+                    r"[^A-Za-z0-9_.-]+",
+                    "_",
+                    fk_name or f"fk_{source_table_id}_{target_table_id}_{index}",
+                ).strip("_")
+
+                relationships.append(
+                    {
+                        "id": relationship_id,
+                        "name": fk_name or relationship_id,
+                        "source_table_id": source_table_id,
+                        "source_columns": constrained_columns,
+                        "target_table_id": target_table_id,
+                        "target_columns": referred_columns,
+                        "relationship_type": "many_to_one",
+                    }
+                )
+
+    engine.dispose()
+
+    return {
+        "source_label": source_label,
+        "db_type": normalized_type,
+        "database": database_name,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "tables": tables,
+        "relationships": relationships,
+        "summary": f"{source_label} 共 {len(tables)} 张表、{len(relationships)} 条外键关系",
+    }
+
+
+def _profile_workspace_file(file_path: Path, workspace_root: Path) -> Dict[str, Any]:
+    relative_path = str(file_path.relative_to(workspace_root))
+    profile: Dict[str, Any] = {
+        "name": file_path.name,
+        "path": relative_path,
+        "size": file_path.stat().st_size if file_path.exists() else 0,
+        "extension": file_path.suffix.lower().lstrip("."),
+        "status": "listed",
+        "columns": [],
+        "row_count_sampled": None,
+    }
+
+    extension = file_path.suffix.lower()
+    try:
+        if extension in {".csv", ".tsv", ".txt"}:
+            separator = "\t" if extension == ".tsv" else ","
+            df = pd.read_csv(file_path, nrows=1000, sep=separator)
+        elif extension in {".xlsx", ".xls"}:
+            df = pd.read_excel(file_path, nrows=1000)
+        elif extension == ".json":
+            df = pd.read_json(file_path)
+            if len(df) > 1000:
+                df = df.head(1000)
+        else:
+            return profile
+
+        profile["status"] = "profiled"
+        profile["row_count_sampled"] = int(len(df))
+        profile["column_count"] = int(len(df.columns))
+        profile["columns"] = [
+            {
+                "name": str(column),
+                "dtype": str(df[column].dtype),
+                "non_null_sampled": int(df[column].notna().sum()),
+                "null_sampled": int(df[column].isna().sum()),
+                "sample_values": [str(value)[:80] for value in df[column].dropna().head(3).tolist()],
+            }
+            for column in df.columns[:80]
+        ]
+    except Exception as exc:
+        profile["status"] = "profile_failed"
+        profile["error"] = str(exc)[:240]
+    return profile
+
+
+def _collect_workspace_file_profiles(session_id: str, username: str) -> List[Dict[str, Any]]:
+    workspace_root = Path(get_session_workspace(session_id, username)).resolve()
+    profiles: List[Dict[str, Any]] = []
+    excluded_dirs = {"generated", ".lib", "__pycache__"}
+
+    for file_path in sorted(workspace_root.rglob("*")):
+        if not file_path.is_file():
+            continue
+        relative_parts = file_path.relative_to(workspace_root).parts
+        if any(part in excluded_dirs or part.startswith(".") for part in relative_parts):
+            continue
+        profiles.append(_profile_workspace_file(file_path, workspace_root))
+        if len(profiles) >= 30:
+            break
+    return profiles
+
+
+def _build_data_profile_skill_markdown(
+    username: str,
+    session_id: str,
+    db_graphs: List[Dict[str, Any]],
+    file_profiles: List[Dict[str, Any]],
+) -> str:
+    generated_at = datetime.now().isoformat(timespec="seconds")
+    lines: List[str] = [
+        "# Data Exploration SKILL",
+        "",
+        "## Purpose",
+        "",
+        "This SKILL captures the current data landscape for subsequent customs risk analysis. Use it before analysis planning, SQL generation, feature engineering, anomaly detection, and report writing.",
+        "",
+        "## Runtime Context",
+        "",
+        f"- User: {username or 'default'}",
+        f"- Session: {session_id or 'default'}",
+        f"- Generated at: {generated_at}",
+        "",
+        "## Database Sources",
+        "",
+    ]
+
+    if db_graphs:
+        for graph in db_graphs:
+            lines.extend(
+                [
+                    f"### {graph.get('source_label', 'database')}",
+                    "",
+                    f"- Type: {graph.get('db_type', '-')}",
+                    f"- Tables: {len(graph.get('tables', []) or [])}",
+                    f"- Relationships: {len(graph.get('relationships', []) or [])}",
+                    "",
+                ]
+            )
+            for table in (graph.get("tables", []) or [])[:20]:
+                columns = table.get("columns", []) or []
+                pk_columns = [col.get("name") for col in columns if col.get("is_pk")]
+                key_columns = ", ".join(str(col.get("name")) for col in columns[:12])
+                lines.append(
+                    f"- `{table.get('display_name') or table.get('name')}`: rows={table.get('row_count', 'unknown')}, columns={len(columns)}, pk={', '.join(pk_columns) or '-'}, key fields={key_columns or '-'}"
+                )
+            if graph.get("relationships"):
+                lines.extend(["", "Relationships:"])
+                table_names = {table.get("id"): table.get("display_name") or table.get("name") for table in graph.get("tables", []) or []}
+                for relationship in (graph.get("relationships", []) or [])[:30]:
+                    source_name = table_names.get(relationship.get("source_table_id"), relationship.get("source_table_id"))
+                    target_name = table_names.get(relationship.get("target_table_id"), relationship.get("target_table_id"))
+                    lines.append(
+                        f"- `{source_name}`.{','.join(relationship.get('source_columns', []) or [])} -> `{target_name}`.{','.join(relationship.get('target_columns', []) or [])}"
+                    )
+            lines.append("")
+    else:
+        lines.extend(["- No live database source was available for this report.", ""])
+
+    lines.extend(["## Uploaded / Workspace Files", ""])
+    if file_profiles:
+        for profile in file_profiles:
+            lines.extend(
+                [
+                    f"### {profile.get('path')}",
+                    "",
+                    f"- Size: {profile.get('size', 0)} bytes",
+                    f"- Type: {profile.get('extension') or '-'}",
+                    f"- Profile status: {profile.get('status')}",
+                ]
+            )
+            if profile.get("row_count_sampled") is not None:
+                lines.append(f"- Sampled rows: {profile.get('row_count_sampled')}")
+            columns = profile.get("columns", []) or []
+            if columns:
+                lines.append("- Columns:")
+                for column in columns[:30]:
+                    sample_values = ", ".join(column.get("sample_values", []) or [])
+                    lines.append(
+                        f"  - `{column.get('name')}` ({column.get('dtype')}), non-null sample={column.get('non_null_sampled')}, examples={sample_values or '-'}"
+                    )
+            if profile.get("error"):
+                lines.append(f"- Profiling note: {profile.get('error')}")
+            lines.append("")
+    else:
+        lines.extend(["- No user-uploaded workspace data files were detected.", ""])
+
+    lines.extend(
+        [
+            "## Analysis Contract",
+            "",
+            "When analyzing this workspace:",
+            "",
+            "1. Prefer the database relationship graph for join planning and entity grain decisions.",
+            "2. Treat table primary keys, foreign keys, row counts, and high-null columns as first-order data quality signals.",
+            "3. Reconcile uploaded files with database entities before feature engineering; identify duplicate keys, missing periods, and inconsistent code mappings.",
+            "4. For customs risk analysis, prioritize import/export主体、商品编码、贸易方式、原产地/目的地、申报价格、数量、税则、许可证件、物流路径 and time-window anomalies.",
+            "5. Before producing final conclusions, record assumptions about table joins, missing values, and derived fields.",
+            "",
+            "## Suggested Next Prompts",
+            "",
+            "- 基于 Data Exploration SKILL，识别当前数据中最适合开展风险画像的主表和关联表。",
+            "- 根据字段完整性、关系图和样本值，为该数据集设计走私违规、逃证逃税、安全准入风险特征。",
+            "- 生成一份分阶段分析计划：数据校验、指标构造、异常发现、证据链整理、报告输出。",
+        ]
+    )
+    return "\n".join(lines).strip() + "\n"
+
+
 @app.post("/api/db/test")
 async def test_db_connection(body: dict = Body(...)):
     """测试数据库连接"""
@@ -5365,6 +8977,163 @@ async def test_db_connection(body: dict = Body(...)):
     except Exception as e:
         print(f"DB Test Error: {e}")
         return {"success": False, "message": format_db_error(e, body.get("db_type"))}
+
+
+@app.post("/api/db/list-databases")
+async def list_databases(body: dict = Body(...)):
+    """根据连接参数拉取数据库名称列表，用于前端数据库下拉选择。"""
+    try:
+        db_type = body.get("db_type")
+        config = body.get("config", {})
+        databases = list_accessible_databases(db_type, config)
+        return {"success": True, "databases": databases}
+    except Exception as e:
+        print(f"DB List Databases Error: {e}")
+        return {"success": False, "message": format_db_error(e, body.get("db_type"))}
+
+
+@app.post("/api/db/context/load")
+async def load_db_context_into_session(body: dict = Body(...)):
+    """将当前数据库结构导入会话上下文，作为分析知识库。"""
+    try:
+        db_type = body.get("db_type")
+        config = body.get("config", {})
+        session_id = str(body.get("session_id", "default") or "default")
+        username = str(body.get("username", "default") or "default")
+
+        snapshot = build_database_context_snapshot(db_type, config)
+        context_text = snapshot.get("context_text", "")
+        kb_entry = upsert_database_knowledge_source(username, db_type, config, snapshot)
+
+        workspace_dir = get_session_workspace(session_id, username)
+        generated_dir = Path(workspace_dir) / "generated"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_db_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(snapshot.get("database") or "database")).strip("_") or "database"
+        base_name = f"Database_Context_{safe_db_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        md_path = _save_md(context_text, base_name, str(generated_dir))
+
+        file_url = None
+        if md_path:
+            file_url = build_download_url(f"{username}/{session_id}/generated/{Path(md_path).name}")
+
+        loaded_at = datetime.now().isoformat(timespec="seconds")
+
+        SESSION_DB_CONTEXT[session_id] = {
+            "context_text": context_text,
+            "source_label": snapshot.get("source_label", ""),
+            "table_count": snapshot.get("table_count", 0),
+            "column_count": snapshot.get("column_count", 0),
+            "loaded_at": loaded_at,
+            "snapshot_file": Path(md_path).name if md_path else "",
+            "snapshot_url": file_url or "",
+            "knowledge_summary": kb_entry.get("summary", ""),
+        }
+
+        return {
+            "success": True,
+            "message": "数据库上下文已导入当前会话",
+            "source_label": snapshot.get("source_label", ""),
+            "table_count": snapshot.get("table_count", 0),
+            "column_count": snapshot.get("column_count", 0),
+            "context_length": len(context_text),
+            "snapshot_file": Path(md_path).name if md_path else None,
+            "snapshot_url": file_url,
+            "knowledge_summary": kb_entry.get("summary", ""),
+            "loaded_at": loaded_at,
+        }
+    except Exception as e:
+        print(f"DB Context Load Error: {e}")
+        return {"success": False, "message": format_db_error(e, body.get("db_type"))}
+
+
+@app.post("/api/db/schema/graph")
+async def load_db_schema_graph(body: dict = Body(...)):
+    """返回数据库表/字段/外键关系图，用于前端可视化。"""
+    try:
+        db_type = body.get("db_type")
+        config = body.get("config", {})
+        graph = build_database_schema_graph(db_type, config)
+        return {"success": True, "graph": graph, "message": graph.get("summary", "关系图已生成")}
+    except Exception as e:
+        print(f"DB Schema Graph Error: {e}")
+        return {"success": False, "message": format_db_error(e, body.get("db_type"))}
+
+
+@app.post("/api/data/profile-report")
+async def create_data_profile_report(body: dict = Body(...)):
+    """生成当前数据库与 workspace 文件的数据探查 SKILL 文档。"""
+    try:
+        session_id = str(body.get("session_id", "default") or "default")
+        username = str(body.get("username", "default") or "default")
+        selected_database_sources = body.get("selected_database_sources", [])
+
+        db_graphs: List[Dict[str, Any]] = []
+        source_candidates: List[Dict[str, Any]] = []
+        if isinstance(selected_database_sources, list):
+            source_candidates.extend([item for item in selected_database_sources if isinstance(item, dict)])
+
+        db_type = body.get("db_type")
+        config = body.get("config")
+        if db_type and isinstance(config, dict):
+            source_candidates.append({"dbType": db_type, "config": config})
+
+        seen_sources = set()
+        for source in source_candidates[:5]:
+            source_db_type = source.get("dbType") or source.get("db_type")
+            source_config = source.get("config", {}) if isinstance(source.get("config", {}), dict) else {}
+            source_key = json.dumps({"db_type": source_db_type, "config": source_config}, sort_keys=True, ensure_ascii=False)
+            if source_key in seen_sources:
+                continue
+            seen_sources.add(source_key)
+            try:
+                db_graphs.append(build_database_schema_graph(source_db_type, source_config))
+            except Exception as graph_error:
+                db_graphs.append(
+                    {
+                        "source_label": source.get("label") or str(source_db_type or "database"),
+                        "db_type": source_db_type,
+                        "tables": [],
+                        "relationships": [],
+                        "error": format_db_error(graph_error, source_db_type),
+                    }
+                )
+
+        file_profiles = _collect_workspace_file_profiles(session_id, username)
+        markdown = _build_data_profile_skill_markdown(username, session_id, db_graphs, file_profiles)
+
+        workspace_dir = get_session_workspace(session_id, username)
+        generated_dir = Path(workspace_dir) / "generated"
+        generated_dir.mkdir(parents=True, exist_ok=True)
+        existing_reports = sorted(generated_dir.glob("Data_Exploration_SKILL_*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if existing_reports:
+            latest_report = existing_reports[0]
+            return {
+                "success": True,
+                "skipped": True,
+                "message": f"已生成数据探查报告：{latest_report.name}，无需重复生成。",
+                "filename": latest_report.name,
+                "file_url": build_download_url(f"{username}/{session_id}/generated/{latest_report.name}"),
+                "database_source_count": len(db_graphs),
+                "file_count": len(file_profiles),
+                "summary": f"已存在数据探查报告：{latest_report.name}",
+            }
+        base_name = f"Data_Exploration_SKILL_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        md_path = _save_md(markdown, base_name, str(generated_dir))
+        file_url = build_download_url(f"{username}/{session_id}/generated/{Path(md_path).name}")
+
+        return {
+            "success": True,
+            "message": "数据探查 SKILL 文档已生成",
+            "filename": Path(md_path).name,
+            "file_url": file_url,
+            "database_source_count": len(db_graphs),
+            "file_count": len(file_profiles),
+            "summary": f"已整理 {len(db_graphs)} 个数据库来源、{len(file_profiles)} 个工作区文件",
+        }
+    except Exception as e:
+        print(f"Data Profile Report Error: {e}")
+        return {"success": False, "message": str(e)}
 
 
 @app.post("/api/db/generate-sql")
@@ -5655,6 +9424,200 @@ async def save_user_knowledge_settings(body: dict = Body(...)):
     settings = body.get("settings", {})
     _save_user_config(username, "knowledge_settings.json", settings)
     return {"success": True, "message": "知识库配置已保存到本地"}
+
+
+@app.get("/api/config/data-dictionary")
+async def get_user_data_dictionary(username: str = Query("default"), limit: int = Query(200, ge=1, le=800)):
+    data = _load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []})
+    entries = data.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+    normalized_entries = [item for item in entries if isinstance(item, dict)]
+    return {
+        "success": True,
+        "entries": normalized_entries[:limit],
+        "total": len(normalized_entries),
+    }
+
+
+@app.post("/api/config/data-dictionary")
+async def save_user_data_dictionary(body: dict = Body(...)):
+    username = body.get("username", "default")
+    session_id = body.get("session_id", "")
+    source_labels = body.get("source_labels", [])
+    selected_ids = body.get("selected_ids", [])
+
+    dictionary_items: Any = []
+    raw_dictionary = body.get("dictionary", {})
+    if isinstance(raw_dictionary, dict) and isinstance(raw_dictionary.get("items"), list):
+        dictionary_items = raw_dictionary.get("items", [])
+    elif isinstance(body.get("items"), list):
+        dictionary_items = body.get("items", [])
+
+    result = upsert_confirmed_data_dictionary(
+        username=username,
+        session_id=session_id,
+        source_labels=source_labels,
+        dictionary_items=dictionary_items,
+        selected_ids=selected_ids,
+    )
+    return {
+        "success": True,
+        "result": result,
+        "message": "数据字典理解已保存到本地知识库",
+    }
+
+
+@app.post("/api/config/data-dictionary/import")
+async def import_user_data_dictionary(
+    file: UploadFile = File(...),
+    username: str = Form("default"),
+    session_id: str = Form(""),
+    default_source_label: str = Form(""),
+):
+    filename = str(file.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="缺少上传文件名")
+
+    raw_bytes = await file.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="上传的数据字典文件为空")
+
+    try:
+        dictionary_items, import_meta = _extract_data_dictionary_import_items(
+            filename=filename,
+            raw_bytes=raw_bytes,
+            default_source_label=str(default_source_label or "").strip(),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"数据字典导入失败: {exc}")
+
+    if not dictionary_items:
+        return {
+            "success": False,
+            "result": {
+                "added_count": 0,
+                "updated_count": 0,
+                "total_count": len(_load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []}).get("entries", [])),
+            },
+            "import_meta": import_meta,
+            "message": "未从上传文件中识别到可导入的数据字典条目",
+        }
+
+    result = upsert_confirmed_data_dictionary(
+        username=username,
+        session_id=session_id,
+        source_labels=[default_source_label] if str(default_source_label or "").strip() else [],
+        dictionary_items=dictionary_items,
+    )
+    return {
+        "success": True,
+        "result": result,
+        "import_meta": import_meta,
+        "message": f"已导入 {import_meta.get('imported_count', 0)} 条数据字典理解",
+    }
+
+
+@app.delete("/api/config/data-dictionary")
+async def delete_user_data_dictionary(body: dict = Body(...)):
+    username = body.get("username", "default")
+    raw_ids = body.get("ids", [])
+    ids = {
+        str(item or "").strip()
+        for item in (raw_ids if isinstance(raw_ids, list) else [])
+        if str(item or "").strip()
+    }
+
+    if not ids:
+        return {
+            "success": False,
+            "message": "请提供需要删除的条目 id",
+            "removed_count": 0,
+        }
+
+    data = _load_user_config(username, "data_dictionary_knowledge_base.json", {"entries": []})
+    entries = data.get("entries", [])
+    if not isinstance(entries, list):
+        entries = []
+
+    normalized_entries = [item for item in entries if isinstance(item, dict)]
+    remaining_entries = [
+        item
+        for item in normalized_entries
+        if str(item.get("id", "") or "").strip() not in ids
+    ]
+    removed_count = len(normalized_entries) - len(remaining_entries)
+
+    data["entries"] = remaining_entries
+    _save_user_config(username, "data_dictionary_knowledge_base.json", data)
+
+    return {
+        "success": True,
+        "message": f"已删除 {removed_count} 条数据字典理解记录",
+        "removed_count": removed_count,
+        "total": len(remaining_entries),
+    }
+
+
+@app.get("/api/config/analysis-history")
+async def get_analysis_history_settings(username: str = Query("default")):
+    settings = _load_analysis_history_settings(username)
+    return {"success": True, "settings": settings}
+
+
+@app.post("/api/config/analysis-history")
+async def save_analysis_history_settings(body: dict = Body(...)):
+    username = body.get("username", "default")
+    settings = _sanitize_analysis_history_settings(body.get("settings", {}))
+    _save_user_config(username, "analysis_history_settings.json", settings)
+    return {"success": True, "settings": settings, "message": "分析历史配置已保存到本地"}
+
+
+@app.get("/api/analysis/history")
+async def list_analysis_history_runs(username: str = Query("default"), limit: int = Query(30, ge=1, le=200)):
+    settings = _load_analysis_history_settings(username)
+    data = _normalize_analysis_history_index(username)
+    runs = [item for item in data.get("runs", []) if isinstance(item, dict)][:limit]
+    stats = {
+        "total": len(data.get("runs", [])),
+        "completed": sum(1 for item in data.get("runs", []) if isinstance(item, dict) and item.get("status") == "completed"),
+        "failed": sum(1 for item in data.get("runs", []) if isinstance(item, dict) and item.get("status") == "failed"),
+        "warning": sum(1 for item in data.get("runs", []) if isinstance(item, dict) and item.get("status") == "warning"),
+    }
+    return {"success": True, "settings": settings, "runs": runs, "stats": stats}
+
+
+@app.get("/api/analysis/history/{run_id}")
+async def get_analysis_history_run(run_id: str, username: str = Query("default")):
+    data = _normalize_analysis_history_index(username)
+    run_summary = next(
+        (item for item in data.get("runs", []) if isinstance(item, dict) and item.get("run_id") == run_id),
+        None,
+    )
+    if not run_summary:
+        raise HTTPException(status_code=404, detail="分析历史不存在")
+
+    run_path = _get_analysis_history_run_path(username, run_id)
+    events: List[Dict[str, Any]] = []
+    if os.path.exists(run_path):
+        with open(run_path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(payload, dict):
+                    events.append(payload)
+
+    return {
+        "success": True,
+        "run": run_summary,
+        "events": events,
+        "settings": _load_analysis_history_settings(username),
+    }
 
 
 @app.get("/api/config/export")

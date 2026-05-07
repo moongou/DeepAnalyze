@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
@@ -7,11 +8,31 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MODEL_PROVIDER_PRESETS, parseModelHeadersInput, type ModelProviderConfig } from "@/lib/config";
-import { Database, RefreshCw, Sparkles, Play } from "lucide-react";
+import { Database, RefreshCw, Sparkles, Play, ChevronDown, ChevronRight } from "lucide-react";
+import {
+  AnalysisHistorySettingsPanel,
+  type AnalysisHistoryEvent,
+  type AnalysisHistoryRunSummary,
+  type AnalysisHistorySettings,
+} from "./AnalysisHistorySettingsPanel";
+import {
+  DataDictionarySettingsPanel,
+  type DataDictionaryKnowledgeEntry,
+} from "./DataDictionarySettingsPanel";
 
 interface DbConfig {
   host: string;
@@ -19,6 +40,19 @@ interface DbConfig {
   user: string;
   password: string;
   database: string;
+}
+
+interface SavedDatabaseConnection {
+  id: string;
+  dbType: string;
+  label: string;
+  config: {
+    host?: string;
+    port?: string;
+    user?: string;
+    password?: string;
+    database: string;
+  };
 }
 
 interface OnyxConfig {
@@ -46,8 +80,8 @@ interface ModelTestStatus {
 interface SystemSettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  systemSettingsTab: "model" | "database" | "knowledge";
-  setSystemSettingsTab: (tab: "model" | "database" | "knowledge") => void;
+  systemSettingsTab: "model" | "database" | "knowledge" | "history" | "dictionary";
+  setSystemSettingsTab: (tab: "model" | "database" | "knowledge" | "history" | "dictionary") => void;
   // Model tab
   modelProviderConfig: ModelProviderConfig;
   setModelProviderConfig: React.Dispatch<React.SetStateAction<ModelProviderConfig>>;
@@ -61,14 +95,21 @@ interface SystemSettingsDialogProps {
   handleSaveModelConfig: () => void;
   modelTestStatus: ModelTestStatus;
   availableModels: string[];
-  analysisStrategy: string;
-  temperature: number | null;
   // Database tab
   dbType: string;
   handleDbTypeChange: (type: string) => void;
   dbConfig: DbConfig;
   setDbConfig: (config: DbConfig) => void;
   getDefaultPort: (type: string) => string;
+  availableDatabaseNames: string[];
+  isLoadingDatabaseNames: boolean;
+  databaseListError: string;
+  dbContextSummary: string;
+  dbKnowledgeSummary: string;
+  dbKnowledgeUpdatedAt: string | null;
+  isLoadingDbContext: boolean;
+  handleLoadDbContext: () => void;
+  handleFetchDatabaseNames: () => void;
   handleTestConnection: () => void;
   isTestingDb: boolean;
   isDbTested: boolean;
@@ -85,6 +126,35 @@ interface SystemSettingsDialogProps {
   handleExecuteDbSql: () => void;
   isExecutingDbSql: boolean;
   handleSaveDatabaseConfig: () => void;
+  savedDbConnections: SavedDatabaseConnection[];
+  selectedDbSourceIds: string[];
+  handleToggleSavedDbSourceSelection: (connectionId: string, checked: boolean) => void;
+  handleApplySavedDbConnection: (connectionId: string) => void;
+  handleDeleteSavedDbConnection: (connectionId: string) => void;
+  deletingDbConnectionId: string | null;
+  // Analysis history tab
+  analysisHistorySettings: AnalysisHistorySettings;
+  setAnalysisHistorySettings: React.Dispatch<React.SetStateAction<AnalysisHistorySettings>>;
+  analysisHistoryRuns: AnalysisHistoryRunSummary[];
+  analysisHistoryStats: { total: number; completed: number; failed: number; warning: number };
+  selectedAnalysisHistoryRun: AnalysisHistoryRunSummary | null;
+  analysisHistoryEvents: AnalysisHistoryEvent[];
+  isLoadingAnalysisHistory: boolean;
+  isLoadingAnalysisHistoryDetail: boolean;
+  isSavingAnalysisHistorySettings: boolean;
+  handleRefreshAnalysisHistory: () => void;
+  handleSelectAnalysisHistoryRun: (runId: string) => void;
+  handleSaveAnalysisHistorySettings: () => void;
+  // Data dictionary tab
+  dataDictionaryEntries: DataDictionaryKnowledgeEntry[];
+  dataDictionaryTotal: number;
+  isLoadingDataDictionary: boolean;
+  isDeletingDataDictionary: boolean;
+  isImportingDataDictionary: boolean;
+  handleRefreshDataDictionary: () => void;
+  handleDeleteDataDictionaryEntries: (ids: string[]) => Promise<void>;
+  handleSaveDataDictionaryEntry: (id: string, aiUnderstanding: string) => Promise<void>;
+  handleImportDataDictionaryFile: (file: File) => Promise<void>;
   // Knowledge tab
   isLoadingKnowledgeConfig: boolean;
   loadKnowledgeConfig: () => void;
@@ -126,13 +196,28 @@ export function SystemSettingsDialog({
   modelProviderConfig, setModelProviderConfig, applyModelPreset,
   showRawModelHeaders, setShowRawModelHeaders, modelHeadersInput, setModelHeadersInput,
   handleFetchModelList, isFetchingModelList, handleSaveModelConfig,
-  modelTestStatus, availableModels, analysisStrategy, temperature,
+  modelTestStatus, availableModels,
   dbType, handleDbTypeChange, dbConfig, setDbConfig, getDefaultPort,
+  availableDatabaseNames, isLoadingDatabaseNames, databaseListError,
+  dbContextSummary, dbKnowledgeSummary, dbKnowledgeUpdatedAt,
+  isLoadingDbContext, handleLoadDbContext, handleFetchDatabaseNames,
   handleTestConnection, isTestingDb, isDbTested,
   dbPrompt, setDbPrompt, handleGenerateSql, isGeneratingSql,
   dbGeneratedSql, setDbGeneratedSql, dbDatasetName, setDbDatasetName,
   dbExecuteMode, setDbExecuteMode, handleExecuteDbSql, isExecutingDbSql,
   handleSaveDatabaseConfig,
+  savedDbConnections, selectedDbSourceIds,
+  handleToggleSavedDbSourceSelection, handleApplySavedDbConnection, handleDeleteSavedDbConnection,
+  deletingDbConnectionId,
+  analysisHistorySettings, setAnalysisHistorySettings,
+  analysisHistoryRuns, analysisHistoryStats,
+  selectedAnalysisHistoryRun, analysisHistoryEvents,
+  isLoadingAnalysisHistory, isLoadingAnalysisHistoryDetail,
+  isSavingAnalysisHistorySettings,
+  handleRefreshAnalysisHistory, handleSelectAnalysisHistoryRun, handleSaveAnalysisHistorySettings,
+  dataDictionaryEntries, dataDictionaryTotal,
+  isLoadingDataDictionary, isDeletingDataDictionary, isImportingDataDictionary,
+  handleRefreshDataDictionary, handleDeleteDataDictionaryEntries, handleSaveDataDictionaryEntry, handleImportDataDictionaryFile,
   isLoadingKnowledgeConfig, loadKnowledgeConfig,
   knowledgeBaseEnabled, setKnowledgeBaseEnabled,
   yutuRecords, currentUser, isRecordingKnowledge,
@@ -144,7 +229,118 @@ export function SystemSettingsDialog({
   knowledgeTestResults, handleTestKnowledgeProvider, knowledgeTestTarget,
   isSavingKnowledgeConfig, handleSaveKnowledgeConfig, knowledgeSettingsLoaded,
 }: SystemSettingsDialogProps) {
+  const formattedDbKnowledgeUpdatedAt = dbKnowledgeUpdatedAt
+    ? (() => {
+        const parsed = new Date(dbKnowledgeUpdatedAt);
+        if (Number.isNaN(parsed.getTime())) {
+          return dbKnowledgeUpdatedAt;
+        }
+        return parsed.toLocaleString("zh-CN", { hour12: false });
+      })()
+    : "-";
+
+  const [expandedDbGroups, setExpandedDbGroups] = useState<Record<string, boolean>>({});
+  const [pendingDeleteConnection, setPendingDeleteConnection] = useState<SavedDatabaseConnection | null>(null);
+  const dbGroupStateStorageKey = useMemo(() => {
+    const normalizedUser = String(currentUser || "default").trim() || "default";
+    return `dbGroupExpandedState:${normalizedUser}`;
+  }, [currentUser]);
+
+  const dbTypeMeta = useMemo(() => {
+    const typeMap: Record<string, { label: string; icon: string }> = {};
+    DB_TYPES.forEach((item) => {
+      typeMap[item.id] = { label: item.label, icon: item.icon };
+    });
+    return typeMap;
+  }, []);
+
+  const groupedSavedConnections = useMemo(() => {
+    const grouped: Record<string, SavedDatabaseConnection[]> = {};
+    savedDbConnections.forEach((connection) => {
+      const key = connection.dbType || "unknown";
+      if (!grouped[key]) {
+        grouped[key] = [];
+      }
+      grouped[key].push(connection);
+    });
+
+    const order = DB_TYPES.map((item) => item.id);
+    return Object.entries(grouped).sort((left, right) => {
+      const leftIndex = order.indexOf(left[0]);
+      const rightIndex = order.indexOf(right[0]);
+      const normalizedLeft = leftIndex === -1 ? Number.MAX_SAFE_INTEGER : leftIndex;
+      const normalizedRight = rightIndex === -1 ? Number.MAX_SAFE_INTEGER : rightIndex;
+      if (normalizedLeft !== normalizedRight) {
+        return normalizedLeft - normalizedRight;
+      }
+      return left[0].localeCompare(right[0]);
+    });
+  }, [savedDbConnections]);
+
+  const selectedDbSourceIdSet = useMemo(() => new Set(selectedDbSourceIds), [selectedDbSourceIds]);
+
+  const isGroupExpanded = (groupType: string) => {
+    if (expandedDbGroups[groupType] !== undefined) {
+      return expandedDbGroups[groupType];
+    }
+    return groupType === dbType;
+  };
+
+  const toggleDbGroup = (groupType: string) => {
+    setExpandedDbGroups((prev) => {
+      const nextValue = !(prev[groupType] ?? groupType === dbType);
+      return {
+        ...prev,
+        [groupType]: nextValue,
+      };
+    });
+  };
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      const raw = localStorage.getItem(dbGroupStateStorageKey);
+      if (!raw) {
+        setExpandedDbGroups({});
+        return;
+      }
+
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setExpandedDbGroups({});
+        return;
+      }
+
+      const normalized: Record<string, boolean> = {};
+      Object.entries(parsed as Record<string, unknown>).forEach(([key, value]) => {
+        if (typeof value === "boolean") {
+          normalized[key] = value;
+        }
+      });
+
+      setExpandedDbGroups(normalized);
+    } catch {
+      setExpandedDbGroups({});
+    }
+  }, [dbGroupStateStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      localStorage.setItem(dbGroupStateStorageKey, JSON.stringify(expandedDbGroups));
+    } catch {
+      // 忽略浏览器存储异常，保持界面可用
+    }
+  }, [dbGroupStateStorageKey, expandedDbGroups]);
+
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="dialog-page-like max-w-none w-auto h-auto p-0 overflow-hidden flex flex-col">
         <DialogHeader className="px-6 py-4 border-b">
@@ -153,20 +349,53 @@ export function SystemSettingsDialog({
             系统设置
           </DialogTitle>
           <DialogDescription>
-            统一管理模型配置、数据库连接和知识库设置。
+            统一管理模型配置、数据库连接、知识库、数据字典与分析历史追踪设置。
           </DialogDescription>
         </DialogHeader>
         <div className="flex-1 min-h-0 overflow-hidden px-6 py-4">
-          <Tabs value={systemSettingsTab} onValueChange={(value) => setSystemSettingsTab(value as "model" | "database" | "knowledge")} className="h-full flex flex-col">
-            <TabsList className="grid w-full grid-cols-3 max-w-[520px]">
+          <Tabs value={systemSettingsTab} onValueChange={(value) => setSystemSettingsTab(value as "model" | "database" | "knowledge" | "history" | "dictionary")} className="h-full flex flex-col">
+            <TabsList className="grid w-full grid-cols-5 max-w-[920px]">
               <TabsTrigger value="model">模型设置</TabsTrigger>
               <TabsTrigger value="database">数据库设置</TabsTrigger>
               <TabsTrigger value="knowledge">知识库设置</TabsTrigger>
+              <TabsTrigger value="dictionary">数据字典</TabsTrigger>
+              <TabsTrigger value="history">分析历史</TabsTrigger>
             </TabsList>
 
-            <TabsContent value="model" className="mt-4 flex-1 overflow-y-auto space-y-6">
+            <TabsContent value="model" className="mt-4 flex-1 overflow-y-auto">
               <section className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
+                <div className="rounded-lg border bg-white p-4 dark:bg-gray-950">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium">模型配置测试</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">
+                        先获取当前提供商可用模型，再直接选择目标模型。
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleFetchModelList}
+                        disabled={isFetchingModelList}
+                      >
+                        {isFetchingModelList ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                        获取模型名称
+                      </Button>
+                      <Button size="sm" onClick={handleSaveModelConfig}>
+                        保存当前提供商
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-2 text-xs text-gray-600 dark:text-gray-300 sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 dark:bg-gray-900/30">状态：{modelTestStatus.status}</div>
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 dark:bg-gray-900/30">结果：{modelTestStatus.message}</div>
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 dark:bg-gray-900/30">时间：{modelTestStatus.testedAt || "-"}</div>
+                    <div className="rounded-md border bg-gray-50 px-3 py-2 dark:bg-gray-900/30">当前模型：{modelProviderConfig.model || "-"}</div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                   <div className="space-y-1.5">
                     <Label htmlFor="model-preset">预设模型</Label>
                     <Select value={modelProviderConfig.id} onValueChange={applyModelPreset}>
@@ -182,6 +411,7 @@ export function SystemSettingsDialog({
                       </SelectContent>
                     </Select>
                   </div>
+
                   <div className="space-y-1.5">
                     <Label htmlFor="model-provider-type">Provider 类型</Label>
                     <Input
@@ -195,6 +425,7 @@ export function SystemSettingsDialog({
                       }
                     />
                   </div>
+
                   <div className="space-y-1.5">
                     <Label htmlFor="model-label">显示名称</Label>
                     <Input
@@ -205,15 +436,9 @@ export function SystemSettingsDialog({
                       }
                     />
                   </div>
+
                   <div className="space-y-1.5">
                     <Label htmlFor="model-name">模型名</Label>
-                    <Input
-                      id="model-name"
-                      value={modelProviderConfig.model}
-                      onChange={(e) =>
-                        setModelProviderConfig((prev) => ({ ...prev, model: e.target.value }))
-                      }
-                    />
                     {availableModels.length > 0 ? (
                       <Select
                         value={modelProviderConfig.model}
@@ -221,7 +446,7 @@ export function SystemSettingsDialog({
                           setModelProviderConfig((prev) => ({ ...prev, model: value }))
                         }
                       >
-                        <SelectTrigger className="mt-2">
+                        <SelectTrigger id="model-name">
                           <SelectValue placeholder="从已获取模型列表中选择" />
                         </SelectTrigger>
                         <SelectContent>
@@ -232,19 +457,23 @@ export function SystemSettingsDialog({
                           ))}
                         </SelectContent>
                       </Select>
-                    ) : null}
+                    ) : (
+                      <Input
+                        id="model-name"
+                        value={modelProviderConfig.model}
+                        onChange={(e) =>
+                          setModelProviderConfig((prev) => ({ ...prev, model: e.target.value }))
+                        }
+                      />
+                    )}
+                    <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                      {availableModels.length > 0
+                        ? `已获取 ${availableModels.length} 个模型，选择即生效。`
+                        : "未获取模型列表时可手动输入模型名称。"}
+                    </div>
                   </div>
-                  <div className="col-span-2 space-y-1.5">
-                    <Label htmlFor="model-description">描述</Label>
-                    <Input
-                      id="model-description"
-                      value={modelProviderConfig.description}
-                      onChange={(e) =>
-                        setModelProviderConfig((prev) => ({ ...prev, description: e.target.value }))
-                      }
-                    />
-                  </div>
-                  <div className="col-span-2 space-y-1.5">
+
+                  <div className="space-y-1.5 md:col-span-2 xl:col-span-2">
                     <Label htmlFor="model-base-url">Base URL</Label>
                     <Input
                       id="model-base-url"
@@ -254,7 +483,8 @@ export function SystemSettingsDialog({
                       }
                     />
                   </div>
-                  <div className="col-span-2 space-y-1.5">
+
+                  <div className="space-y-1.5 md:col-span-2 xl:col-span-1">
                     <Label htmlFor="model-api-key">API Key</Label>
                     <Input
                       id="model-api-key"
@@ -265,9 +495,20 @@ export function SystemSettingsDialog({
                       }
                     />
                   </div>
+
+                  <div className="space-y-1.5 md:col-span-2 xl:col-span-3">
+                    <Label htmlFor="model-description">描述</Label>
+                    <Input
+                      id="model-description"
+                      value={modelProviderConfig.description}
+                      onChange={(e) =>
+                        setModelProviderConfig((prev) => ({ ...prev, description: e.target.value }))
+                      }
+                    />
+                  </div>
                 </div>
 
-                <div className="rounded-lg border p-4 space-y-3 bg-gray-50 dark:bg-gray-900/30">
+                <div className="rounded-lg border bg-gray-50 p-4 dark:bg-gray-900/30">
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="text-sm font-medium">自定义请求头</div>
@@ -290,49 +531,10 @@ export function SystemSettingsDialog({
                           headers: parseModelHeadersInput(nextValue),
                         }));
                       }}
-                      className="min-h-[120px] font-mono text-xs"
+                      className="mt-3 min-h-[96px] font-mono text-xs"
                       placeholder={"Authorization: Bearer xxx\nX-Trace-Id: demo"}
                     />
                   ) : null}
-                </div>
-
-                <div className="rounded-lg border p-4 space-y-4 bg-white dark:bg-gray-950">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="text-sm font-medium">模型配置测试</div>
-                      <div className="text-xs text-gray-500 dark:text-gray-400">
-                        获取当前提供商可用模型名称，并从列表中确认实际使用的模型。
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleFetchModelList}
-                        disabled={isFetchingModelList}
-                      >
-                        {isFetchingModelList ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
-                        获取模型名称
-                      </Button>
-                      <Button size="sm" onClick={handleSaveModelConfig}>
-                        保存模型配置
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="rounded-md border bg-gray-50 dark:bg-gray-900/30 p-3 text-xs text-gray-600 dark:text-gray-300 space-y-1">
-                    <div>状态：{modelTestStatus.status}</div>
-                    <div>结果：{modelTestStatus.message}</div>
-                    <div>时间：{modelTestStatus.testedAt || "-"}</div>
-                    <div>当前生效模型：{modelProviderConfig.model || "-"}</div>
-                  </div>
-                </div>
-
-                <div className="rounded-lg border p-4 space-y-2 bg-blue-50 dark:bg-blue-950/20 text-sm">
-                  <div className="font-medium text-blue-700 dark:text-blue-300">当前分析参数</div>
-                  <div className="text-xs text-blue-700 dark:text-blue-300">分析策略与温度仍保留在聊天输入区，不从那里移除，避免影响现有分析流程。</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">当前模型：{modelProviderConfig.model}</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">当前分析策略：{analysisStrategy}</div>
-                  <div className="text-xs text-gray-600 dark:text-gray-300">当前温度：{temperature ?? "自动"}</div>
                 </div>
               </section>
             </TabsContent>
@@ -386,15 +588,158 @@ export function SystemSettingsDialog({
                             </div>
                             <div className="col-span-2 space-y-1.5">
                               <Label htmlFor="system-db-name">{dbType === "sqlite" ? "SQLite 文件绝对路径" : "数据库名称"}</Label>
-                              <Input id="system-db-name" value={dbConfig.database} onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })} />
+                              {dbType !== "sqlite" && availableDatabaseNames.length > 0 ? (
+                                <Select
+                                  value={dbConfig.database || undefined}
+                                  onValueChange={(value) => setDbConfig({ ...dbConfig, database: value })}
+                                >
+                                  <SelectTrigger id="system-db-name">
+                                    <SelectValue placeholder="请选择数据库名称" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {availableDatabaseNames.map((name) => (
+                                      <SelectItem key={name} value={name}>
+                                        {name}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              ) : (
+                                <Input id="system-db-name" value={dbConfig.database} onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })} />
+                              )}
+                              {databaseListError ? <div className="text-xs text-amber-600">数据库列表加载失败：{databaseListError}</div> : null}
                             </div>
                           </div>
                           <div className="flex gap-2 justify-end">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={handleLoadDbContext}
+                              disabled={isLoadingDbContext}
+                            >
+                              {isLoadingDbContext ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                              将当前数据库所有信息作为上下文
+                            </Button>
+                            <Button variant="outline" size="sm" onClick={handleFetchDatabaseNames} disabled={isLoadingDatabaseNames || dbType === "sqlite"}>
+                              {isLoadingDatabaseNames ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
+                              刷新数据库列表
+                            </Button>
                             <Button variant="outline" size="sm" onClick={handleTestConnection} disabled={isTestingDb}>
                               {isTestingDb ? <RefreshCw className="mr-2 h-3 w-3 animate-spin" /> : null}
                               测试连接
                             </Button>
                           </div>
+                          <div className="rounded-lg border p-4 space-y-3 bg-white dark:bg-gray-950">
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <div className="text-sm font-medium">已保存连接管理</div>
+                                <div className="text-xs text-gray-500 dark:text-gray-400">
+                                  共 {savedDbConnections.length} 条连接，已勾选 {selectedDbSourceIds.length} 条作为分析数据源
+                                </div>
+                              </div>
+                              <Button size="sm" variant="outline" onClick={handleSaveDatabaseConfig}>
+                                保存当前连接
+                              </Button>
+                            </div>
+
+                            {groupedSavedConnections.length === 0 ? (
+                              <div className="text-xs text-gray-500 dark:text-gray-400">
+                                当前暂无已保存连接。可先填写上方配置并点击“保存当前连接”。
+                              </div>
+                            ) : (
+                              <div className="space-y-3">
+                                {groupedSavedConnections.map(([groupType, connections]) => {
+                                  const expanded = isGroupExpanded(groupType);
+                                  const selectedCount = connections.filter((item) => selectedDbSourceIdSet.has(item.id)).length;
+                                  const typeInfo = dbTypeMeta[groupType] || {
+                                    label: groupType.toUpperCase(),
+                                    icon: "🗂️",
+                                  };
+
+                                  return (
+                                    <div key={groupType} className="rounded-md border border-gray-200 dark:border-gray-800 overflow-hidden">
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleDbGroup(groupType)}
+                                        className="w-full flex items-center justify-between px-3 py-2 bg-gray-50 dark:bg-gray-900/40 hover:bg-gray-100 dark:hover:bg-gray-900/70 transition-colors"
+                                      >
+                                        <div className="flex items-center gap-2 text-sm font-medium text-gray-800 dark:text-gray-100">
+                                          {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                                          <span>{typeInfo.icon}</span>
+                                          <span>{typeInfo.label}</span>
+                                          <span className="text-xs text-gray-500 dark:text-gray-400">({connections.length})</span>
+                                        </div>
+                                        <span className="text-xs text-gray-500 dark:text-gray-400">已选 {selectedCount} 条</span>
+                                      </button>
+
+                                      {expanded ? (
+                                        <div className="p-3 space-y-2 border-t border-gray-200 dark:border-gray-800">
+                                          {connections.map((connection) => {
+                                            const selected = selectedDbSourceIdSet.has(connection.id);
+                                            const deleting = deletingDbConnectionId === connection.id;
+                                            const endpointText =
+                                              connection.dbType === "sqlite"
+                                                ? `文件: ${connection.config.database}`
+                                                : `用户: ${connection.config.user || "(未填写)"} | ${connection.config.host || "localhost"}:${connection.config.port || "default"}/${connection.config.database}`;
+
+                                            return (
+                                              <div
+                                                key={connection.id}
+                                                className="rounded-md border border-gray-200 dark:border-gray-800 p-3 space-y-2"
+                                              >
+                                                <div className="flex items-start justify-between gap-3">
+                                                  <div className="min-w-0">
+                                                    <div className="text-sm font-medium text-gray-800 dark:text-gray-100 break-all">
+                                                      {connection.label}
+                                                    </div>
+                                                    <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 break-all">
+                                                      {endpointText}
+                                                    </div>
+                                                  </div>
+                                                  <Switch
+                                                    checked={selected}
+                                                    onCheckedChange={(checked) =>
+                                                      handleToggleSavedDbSourceSelection(connection.id, Boolean(checked))
+                                                    }
+                                                  />
+                                                </div>
+                                                <div className="flex justify-end gap-2">
+                                                  <Button
+                                                    size="sm"
+                                                    variant="outline"
+                                                    onClick={() => handleApplySavedDbConnection(connection.id)}
+                                                  >
+                                                    应用
+                                                  </Button>
+                                                  <Button
+                                                    size="sm"
+                                                    variant="destructive"
+                                                    onClick={() => setPendingDeleteConnection(connection)}
+                                                    disabled={deleting}
+                                                  >
+                                                    {deleting ? "删除中..." : "删除"}
+                                                  </Button>
+                                                </div>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                          {dbContextSummary ? (
+                            <div className="space-y-1 text-right">
+                              <div className="text-xs text-emerald-600 dark:text-emerald-400">{dbContextSummary}</div>
+                              {dbKnowledgeSummary ? (
+                                <div className="text-xs text-sky-600 dark:text-sky-400">知识库摘要：{dbKnowledgeSummary}</div>
+                              ) : null}
+                              <div className="text-xs text-gray-500 dark:text-gray-400">最近一次知识库更新时间：{formattedDbKnowledgeUpdatedAt}</div>
+                            </div>
+                          ) : null}
                         </section>
 
                         <section className={`space-y-3 transition-opacity ${!isDbTested ? "opacity-50 pointer-events-none" : ""}`}>
@@ -471,6 +816,37 @@ export function SystemSettingsDialog({
                   </ResizablePanel>
                 </ResizablePanelGroup>
               </div>
+            </TabsContent>
+
+            <TabsContent value="history" className="mt-0 flex-1 min-h-0 overflow-hidden">
+              <AnalysisHistorySettingsPanel
+                settings={analysisHistorySettings}
+                setSettings={setAnalysisHistorySettings}
+                runs={analysisHistoryRuns}
+                stats={analysisHistoryStats}
+                selectedRun={selectedAnalysisHistoryRun}
+                events={analysisHistoryEvents}
+                isLoading={isLoadingAnalysisHistory}
+                isLoadingDetail={isLoadingAnalysisHistoryDetail}
+                isSaving={isSavingAnalysisHistorySettings}
+                onRefresh={handleRefreshAnalysisHistory}
+                onSave={handleSaveAnalysisHistorySettings}
+                onSelectRun={handleSelectAnalysisHistoryRun}
+              />
+            </TabsContent>
+
+            <TabsContent value="dictionary" className="mt-0 flex-1 overflow-hidden">
+              <DataDictionarySettingsPanel
+                entries={dataDictionaryEntries}
+                total={dataDictionaryTotal}
+                isLoading={isLoadingDataDictionary}
+                isDeleting={isDeletingDataDictionary}
+                isImporting={isImportingDataDictionary}
+                onRefresh={handleRefreshDataDictionary}
+                onDelete={handleDeleteDataDictionaryEntries}
+                onSaveUnderstanding={handleSaveDataDictionaryEntry}
+                onImportFile={handleImportDataDictionaryFile}
+              />
             </TabsContent>
 
             <TabsContent value="knowledge" className="mt-4 flex-1 overflow-y-auto space-y-6">
@@ -638,12 +1014,56 @@ export function SystemSettingsDialog({
             </TabsContent>
           </Tabs>
         </div>
+        <AlertDialog
+          open={Boolean(pendingDeleteConnection)}
+          onOpenChange={(open) => {
+            if (!open) {
+              setPendingDeleteConnection(null);
+            }
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>确认删除数据库连接？</AlertDialogTitle>
+              <AlertDialogDescription>
+                将删除连接“{pendingDeleteConnection?.label || ""}”，此操作不可撤销。
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>取消</AlertDialogCancel>
+              <AlertDialogAction asChild>
+                <Button
+                  variant="destructive"
+                  disabled={
+                    !pendingDeleteConnection || deletingDbConnectionId === pendingDeleteConnection.id
+                  }
+                  onClick={async () => {
+                    if (!pendingDeleteConnection) {
+                      return;
+                    }
+                    const target = pendingDeleteConnection;
+                    await handleDeleteSavedDbConnection(target.id);
+                    setPendingDeleteConnection(null);
+                  }}
+                >
+                  {pendingDeleteConnection && deletingDbConnectionId === pendingDeleteConnection.id
+                    ? "删除中..."
+                    : "确认删除"}
+                </Button>
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
         <DialogFooter className="px-6 py-4 border-t justify-between">
           <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
             {systemSettingsTab === "model"
-              ? `当前模型：${modelProviderConfig.model || "-"}`
+              ? "模型提供商配置编辑中"
               : systemSettingsTab === "database"
                 ? `数据库测试状态：${isDbTested ? "已通过" : "未测试"}`
+                : systemSettingsTab === "dictionary"
+                  ? `AI 数据字典理解 ${dataDictionaryTotal} 条`
+                : systemSettingsTab === "history"
+                  ? `已加载分析历史 ${analysisHistoryRuns.length} 条`
                 : knowledgeSettingsLoaded
                   ? "配置已加载"
                   : "尚未加载配置"}
@@ -654,6 +1074,12 @@ export function SystemSettingsDialog({
             ) : null}
             {systemSettingsTab === "database" ? (
               <Button onClick={handleSaveDatabaseConfig}>保存数据库配置</Button>
+            ) : null}
+            {systemSettingsTab === "history" ? (
+              <Button onClick={handleSaveAnalysisHistorySettings} disabled={isSavingAnalysisHistorySettings}>
+                {isSavingAnalysisHistorySettings ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : null}
+                保存历史配置
+              </Button>
             ) : null}
             {systemSettingsTab === "knowledge" ? (
               <Button onClick={handleSaveKnowledgeConfig} disabled={isSavingKnowledgeConfig || isLoadingKnowledgeConfig}>
@@ -666,5 +1092,6 @@ export function SystemSettingsDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    </>
   );
 }

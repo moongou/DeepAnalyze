@@ -83,11 +83,96 @@ def init_fpdf_chinese():
 
     return pdf
 
-def generate_report_pdf(md_text, output_path, title="Analysis Report"):
+
+def _report_content_to_markdown(report_content):
+    if isinstance(report_content, str):
+        return report_content, "Analysis Report"
+
+    if not isinstance(report_content, dict):
+        text = str(report_content or "")
+        return text, "Analysis Report"
+
+    title = str(report_content.get("title") or "Analysis Report").strip() or "Analysis Report"
+    subtitle = str(report_content.get("subtitle") or "").strip()
+    report_date = str(report_content.get("date") or "").strip()
+    sections = report_content.get("sections") or []
+
+    lines = [f"# {title}"]
+    if subtitle:
+        lines.extend(["", subtitle])
+    if report_date:
+        lines.extend(["", f"**日期：** {report_date}"])
+
+    for section in sections:
+        if not isinstance(section, dict):
+            text = str(section or "").strip()
+            if text:
+                lines.extend(["", text])
+            continue
+
+        section_title = str(section.get("title") or "").strip()
+        if section_title:
+            lines.extend(["", f"## {section_title}"])
+
+        content_items = section.get("content") or []
+        if isinstance(content_items, str):
+            content_items = [content_items]
+        for item in content_items:
+            text = str(item or "").strip()
+            if text:
+                lines.extend(["", text])
+
+        chart_items = section.get("charts") or []
+        if isinstance(chart_items, str):
+            chart_items = [chart_items]
+        for chart_path in chart_items:
+            chart_text = str(chart_path or "").strip()
+            if chart_text:
+                chart_name = os.path.basename(chart_text) or "chart"
+                lines.extend(["", f"![{chart_name}]({chart_text})"])
+
+    md_text = "\n".join(lines).strip() + "\n"
+    return md_text, title
+
+
+def _prepare_report_args(md_text=None, output_path=None, title="Analysis Report", default_filename="analysis_report.pdf", **kwargs):
+    report_content = kwargs.pop("report_content", None)
+    output_filename = kwargs.pop("output_filename", None)
+    output_dir = kwargs.pop("output_dir", None)
+
+    if isinstance(md_text, dict) and report_content is None:
+        report_content = md_text
+        md_text = None
+
+    if report_content is not None:
+        md_text, derived_title = _report_content_to_markdown(report_content)
+        if not title or title == "Analysis Report":
+            title = derived_title
+
+    resolved_output_path = output_path or output_filename or default_filename
+    if output_dir and not os.path.isabs(resolved_output_path):
+        resolved_output_path = os.path.join(output_dir, resolved_output_path)
+
+    output_dirname = os.path.dirname(resolved_output_path)
+    if output_dirname:
+        os.makedirs(output_dirname, exist_ok=True)
+
+    return str(md_text or ""), resolved_output_path, title
+
+
+def generate_report_pdf(md_text=None, output_path=None, title="Analysis Report", **kwargs):
     """
     Generate a PDF report from Markdown text using the best available method.
     Priority: 1. reportlab (via pdf_utils), 2. fpdf2
     """
+    md_text, output_path, title = _prepare_report_args(
+        md_text,
+        output_path,
+        title=title,
+        default_filename="analysis_report.pdf",
+        **kwargs,
+    )
+
     if gen_pdf_rl:
         return gen_pdf_rl(md_text, output_path, title=title)
 
@@ -121,17 +206,33 @@ def generate_report_pdf(md_text, output_path, title="Analysis Report"):
     pdf.output(output_path)
     return True
 
-def generate_report_docx(md_text, output_path, title="Analysis Report"):
+
+def generate_report_docx(md_text=None, output_path=None, title="Analysis Report", **kwargs):
     """Generate a DOCX report from Markdown text."""
+    md_text, output_path, title = _prepare_report_args(
+        md_text,
+        output_path,
+        title=title,
+        default_filename="analysis_report.docx",
+        **kwargs,
+    )
     if gen_docx_impl:
         return gen_docx_impl(md_text, output_path, title=title)
     return False
 
-def generate_report_pptx(md_text, output_path, title="Analysis Report"):
+
+def generate_report_pptx(md_text=None, output_path=None, title="Analysis Report", **kwargs):
     """
     Generate a PPTX report from Markdown text.
     Uses python-pptx with Chinese font support, multi-paragraph formatting, and image embedding.
     """
+    md_text, output_path, title = _prepare_report_args(
+        md_text,
+        output_path,
+        title=title,
+        default_filename="analysis_report.pptx",
+        **kwargs,
+    )
     try:
         from pptx import Presentation
         from pptx.util import Inches, Pt
